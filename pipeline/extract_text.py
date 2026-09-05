@@ -63,6 +63,9 @@ def inline_text(el: Tag) -> tuple[str, list[list[int]], list[dict]]:
         if node.name in ("script", "style", "svg"):
             return
         child_em = in_em or node.name in ("em", "i")
+        if node.name in ("p", "div", "br") and parts and not parts[-1].endswith(" "):
+            parts.append(" ")
+            pos += 1
         for c in node.children:
             walk(c, child_em)
 
