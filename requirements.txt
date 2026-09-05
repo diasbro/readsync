@@ -1,0 +1,8 @@
+beautifulsoup4
+lxml
+pytest
+ctc-forced-aligner==1.0.2
+unidecode
+soundfile
+numpy
+faster-whisper
