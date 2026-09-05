@@ -16,7 +16,7 @@
   const today = () => new Date().toISOString().slice(0, 10);
 
   // ---------------- settings ----------------
-  const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", word: true, wordStyle: "bg",
+  const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", sent: true, word: true, wordStyle: "bg",
     dimMode: "off", offset: 0, scroll: "zone", clickWord: false, speed: 1, hideUi: true, pauseHidden: true, rewind: true };
   const FAMILIES = {
     literata: '"Literata", "Iowan Old Style", Georgia, serif', ptserif: '"PT Serif", Georgia, serif', merriweather: '"Merriweather", Georgia, serif',
@@ -40,6 +40,7 @@
     r.setProperty("--ui", FAMILIES[settings.ui] || FAMILIES.inter);
     r.setProperty("--weight", settings.weight);
     document.documentElement.dataset.theme = settings.theme === "auto" ? (darkMedia.matches ? "dark" : "light") : settings.theme;
+    document.body.classList.toggle("sent-hl", !!settings.sent);
     document.body.classList.toggle("word-hl", !!settings.word);
     document.body.classList.toggle("word-underline", settings.wordStyle === "underline");
     document.body.classList.toggle("dim-para", settings.dimMode === "para");
@@ -367,7 +368,7 @@
   document.querySelectorAll("[data-close]").forEach((b) => (b.onclick = closeDrawers));
   function syncSettingsUI() {
     $("#set-font").value = settings.font; $("#set-lh").value = settings.lh; $("#set-width").value = settings.width;
-    $("#set-family").value = settings.family; $("#set-word").checked = !!settings.word; $("#set-dim").value = settings.dimMode;
+    $("#set-family").value = settings.family; $("#set-sent").checked = !!settings.sent; $("#set-word").checked = !!settings.word; $("#set-dim").value = settings.dimMode;
     $("#set-ui").value = settings.ui; $("#set-weight").value = settings.weight; $("#set-rewind").checked = !!settings.rewind;
     $("#set-offset").value = Math.round(settings.offset * 1000); $("#offset-out").textContent = (settings.offset > 0 ? "+" : "") + Math.round(settings.offset * 1000) + " мс";
     $("#set-scroll").value = settings.scroll; $("#set-click-word").checked = !!settings.clickWord;
@@ -377,7 +378,7 @@
   }
   const bind = (sel, key, conv = (v) => v) => $(sel).addEventListener("input", (e) => { settings[key] = conv(e.target.type === "checkbox" ? e.target.checked : e.target.value); applySettings(); syncSettingsUI(); });
   bind("#set-font", "font", Number); bind("#set-lh", "lh", Number); bind("#set-width", "width", Number);
-  bind("#set-family", "family"); bind("#set-word", "word"); bind("#set-dim", "dimMode"); bind("#set-scroll", "scroll"); bind("#set-click-word", "clickWord");
+  bind("#set-family", "family"); bind("#set-sent", "sent"); bind("#set-word", "word"); bind("#set-dim", "dimMode"); bind("#set-scroll", "scroll"); bind("#set-click-word", "clickWord");
   bind("#set-ui", "ui"); bind("#set-weight", "weight", Number); bind("#set-rewind", "rewind"); bind("#set-offset", "offset", (v) => Number(v) / 1000);
   $("#set-dim").addEventListener("input", () => { if (settings.dimMode !== "off") settings.lastDim = settings.dimMode; });
   $("#set-offset").addEventListener("input", () => update(true));

@@ -16,7 +16,7 @@
   color-scheme: light;
   --bg: #fbfaf7; --fg: #1d1c1a; --muted: #7a7670; --line: #e6e2da;
   --panel: #ffffff; --accent: #b4532a;
-  --sent-bg: #fff3c4; --word-bg: #ffd166; --word-fg: #1d1c1a;
+  --sent-bg: #fff3c4; --word-bg: color-mix(in srgb, var(--accent) 16%, transparent);
   --font-size: 20px; --lh: 1.65; --width: 42rem;
   --serif: "Iowan Old Style", "Palatino Linotype", "Literata", Georgia, "Times New Roman", serif;
   --sans: -apple-system, "Helvetica Neue", Arial, sans-serif;
@@ -28,18 +28,18 @@
 html[data-theme="sepia"] {
   color-scheme: light;
   --bg: #f4ecd8; --fg: #3b2f22; --muted: #8a7a63; --line: #e2d6bd; --panel: #fbf5e6;
-  --sent-bg: #ead9a8; --word-bg: #d9b25a; --accent: #9a4b22;
+  --sent-bg: #ead9a8; --accent: #9a4b22; --word-bg: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 html[data-theme="dark"] {
   color-scheme: dark;
   --bg: #15161a; --fg: #d9d6cf; --muted: #8b8985; --line: #2a2c33; --panel: #1e2027;
-  --sent-bg: #2f3140; --word-bg: #7a6220; --word-fg: #ffffff; --accent: #e0885e;
+  --sent-bg: #2f3140; --accent: #e0885e; --word-bg: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 /* warm dark: less blue light for evening reading */
 html[data-theme="night"] {
   color-scheme: dark;
   --bg: #1a1613; --fg: #d6c9b5; --muted: #8a7d6c; --line: #2d2721; --panel: #211c17;
-  --sent-bg: #33291c; --word-bg: #7d5f2a; --word-fg: #fff6e6; --accent: #d59260;
+  --sent-bg: #33291c; --accent: #d59260; --word-bg: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--fg); }
@@ -93,12 +93,12 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 #text .k-verse { text-indent: 0; margin: 0 0 0 2.5em; white-space: pre-wrap; }
 #text .k-verse.stanza-end { margin-bottom: 1em; }
 #text .em { font-style: italic; }
-#text .w { border-radius: 3px; }
+#text .w { border-radius: 3px; transition: background-color .12s; }
 #text .s { border-radius: 4px; box-decoration-break: clone; -webkit-box-decoration-break: clone;
   transition: background-color .15s; }
-#text .s.cur { background: var(--sent-bg); }
-body.word-hl #text .w.cur { background: var(--word-bg); color: var(--word-fg); }
-body.word-hl.word-underline #text .w.cur { background: none; color: inherit; box-shadow: inset 0 -2px 0 var(--accent); }
+body.sent-hl #text .s.cur { background: var(--sent-bg); }
+body.word-hl #text .w.cur { background: var(--word-bg); }
+body.word-hl.word-underline #text .w.cur { background: none; box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 65%, transparent); }
 /* focus dimming works through text color so the current sentence can stay bright inside a dimmed block */
 body.dim-para #text .blk, body.dim-sent #text .blk { color: color-mix(in srgb, var(--fg) 32%, var(--bg)); transition: color .3s; }
 body.dim-para #text .blk.cur, body.dim-sent #text .s.cur { color: var(--fg); }
