@@ -30,7 +30,7 @@ def test_fb2_extract(tmp_path):
     assert kinds == ["title", "title", "p", "verse", "verse", "title", "p"]
     p = book["blocks"][2]
     assert len(p["sentences"]) == 2
-    assert p["text"][p["em"][0][0]:p["em"][0][1]] == "с курсивом"
+    assert p["text"][p["em"][0][0] : p["em"][0][1]] == "с курсивом"
     assert p["notes"] == [{"pos": len(p["text"]) - 1, "id": "n1"}]
     assert book["notes"]["n1"] == "Это сноска."
     assert book["blocks"][4]["text"].startswith("   Строка два")
@@ -39,6 +39,7 @@ def test_fb2_extract(tmp_path):
 
 def test_fb2_zip(tmp_path):
     import zipfile
+
     z = tmp_path / "book.fb2.zip"
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("book.fb2", FB2)

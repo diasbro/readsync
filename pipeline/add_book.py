@@ -9,6 +9,7 @@ Text sources: reader.fantasy-worlds.org "read.html" pages, or FB2 files.
 Audio sources: a YouTube URL (audio + auto-captions via yt-dlp) or a local audio file.
 Without captions the audio is transcribed with faster-whisper for coarse anchoring.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -52,8 +53,23 @@ def fetch_text(src: str, d: Path) -> str:
 
 def fetch_audio(src: str, d: Path, lang: str) -> Path:
     if is_url(src):
-        run(["yt-dlp", "-f", "bestaudio[ext=webm]/bestaudio", "--write-auto-subs", "--sub-langs", f"{lang}-orig,{lang}",
-             "--sub-format", "json3", "--no-progress", "-o", "yt.%(ext)s", src], cwd=d)
+        run(
+            [
+                "yt-dlp",
+                "-f",
+                "bestaudio[ext=webm]/bestaudio",
+                "--write-auto-subs",
+                "--sub-langs",
+                f"{lang}-orig,{lang}",
+                "--sub-format",
+                "json3",
+                "--no-progress",
+                "-o",
+                "yt.%(ext)s",
+                src,
+            ],
+            cwd=d,
+        )
         return next(f for f in d.iterdir() if f.stem == "yt" and f.suffix not in (".json3", ".part"))
     p = Path(src).expanduser()
     dst = d / ("source" + p.suffix.lower())
@@ -64,12 +80,47 @@ def fetch_audio(src: str, d: Path, lang: str) -> Path:
 
 def prepare_audio(src: Path, d: Path) -> None:
     if not (d / "audio16k.wav").exists():
-        run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(d / "audio16k.wav")])
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(src),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(d / "audio16k.wav"),
+            ]
+        )
     if src.suffix.lower() == ".mp3":
         return  # browsers play mp3 directly (serve.py picks audio.mp3)
     if not (d / "audio.m4a").exists():
-        codec = ["-c:a", "copy"] if src.suffix.lower() in (".m4a", ".m4b", ".mp4", ".aac") else ["-c:a", "aac", "-b:a", "96k"]
-        run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", *codec, "-movflags", "+faststart", str(d / "audio.m4a")])
+        codec = (
+            ["-c:a", "copy"]
+            if src.suffix.lower() in (".m4a", ".m4b", ".mp4", ".aac")
+            else ["-c:a", "aac", "-b:a", "96k"]
+        )
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(src),
+                "-vn",
+                *codec,
+                "-movflags",
+                "+faststart",
+                str(d / "audio.m4a"),
+            ]
+        )
 
 
 def main() -> None:
@@ -100,6 +151,7 @@ def main() -> None:
     run([PY, str(PIPE / "timing_from_anchors.py"), str(d)])
 
     import json
+
     book = json.loads((d / "book.json").read_text(encoding="utf-8"))
     toml = d / "book.toml"
     if not toml.exists():
@@ -107,8 +159,10 @@ def main() -> None:
         toml.write_text(
             f'slug = "{args.slug}"\ntitle = "{esc(args.title or book.get("title", args.slug))}"\n'
             f'author = "{esc(args.author or book.get("author", ""))}"\nlanguage = "{args.lang}"\n'
-            f'text_source = "{esc(args.text)}"\naudio_source = "{esc(args.audio)}"\nnarrator = "{esc(args.narrator)}"\n',
-            encoding="utf-8")
+            f'text_source = "{esc(args.text)}"\naudio_source = "{esc(args.audio)}"\n'
+            f'narrator = "{esc(args.narrator)}"\n',
+            encoding="utf-8",
+        )
     print(f"\nready: http://127.0.0.1:8765/?book={args.slug}  (caption timing)")
     if not args.no_align:
         print("running precise MMS alignment (about 7 min per hour of audio)...", flush=True)

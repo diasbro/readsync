@@ -8,6 +8,7 @@ Produces data/anchors.json:
   "block_hits": [n_matched_words_per_block, ...]
 }
 """
+
 from __future__ import annotations
 
 import argparse
@@ -60,7 +61,7 @@ def caption_words(json3: dict) -> tuple[list[float], list[float], list[str]]:
                     norm.append(n)
     ends = starts[1:] + [starts[-1] + 0.5 if starts else 0.0]
     # a caption word cannot last longer than ~2s (gaps between events)
-    ends = [min(e, s + 2.0) for s, e in zip(starts, ends)]
+    ends = [min(e, s + 2.0) for s, e in zip(starts, ends, strict=False)]
     return starts, ends, norm
 
 
@@ -69,8 +70,8 @@ def chunked_match(a: list[str], b: list[str]) -> list[tuple[int, int, int]]:
     i = j = 0
     out: list[tuple[int, int, int]] = []
     while i < len(a) and j < len(b):
-        wa = a[i:i + WINDOW]
-        wb = b[j:j + WINDOW + SLACK]
+        wa = a[i : i + WINDOW]
+        wb = b[j : j + WINDOW + SLACK]
         sm = SequenceMatcher(None, wa, wb, autojunk=False)
         blocks = [bl for bl in sm.get_matching_blocks() if bl.size >= MIN_RUN]
         if not blocks:
@@ -108,8 +109,13 @@ def build(book: dict, json3: dict) -> dict:
         if not mono or a[1] >= mono[-1][1]:
             mono.append(a)
     coverage = len(mono) / max(1, len(words))
-    return {"words": words, "anchors": mono, "coverage": round(coverage, 4), "block_hits": hits,
-            "duration": cend[-1] if cend else 0.0}
+    return {
+        "words": words,
+        "anchors": mono,
+        "coverage": round(coverage, 4),
+        "block_hits": hits,
+        "duration": cend[-1] if cend else 0.0,
+    }
 
 
 def main() -> None:
@@ -124,11 +130,13 @@ def main() -> None:
     res = build(book, json.loads(caps.read_text(encoding="utf-8")))
     (d / "anchors.json").write_text(json.dumps(res), encoding="utf-8")
     words_per_block = {}
-    for wi, (bi, _, _) in enumerate(res["words"]):
+    for bi, _, _ in res["words"]:
         words_per_block[bi] = words_per_block.get(bi, 0) + 1
     silent = [bi for bi, n in words_per_block.items() if n >= 6 and res["block_hits"][bi] == 0]
-    print(f"book words={len(res['words'])} anchors={len(res['anchors'])} coverage={res['coverage']:.1%} "
-          f"blocks_without_hits(>=6 words)={len(silent)}")
+    print(
+        f"book words={len(res['words'])} anchors={len(res['anchors'])} coverage={res['coverage']:.1%} "
+        f"blocks_without_hits(>=6 words)={len(silent)}"
+    )
     gaps = []
     prev_t, prev_w = 0.0, 0
     for wi, t0, _ in res["anchors"]:

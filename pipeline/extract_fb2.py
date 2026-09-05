@@ -1,7 +1,7 @@
 """Extract an FB2 (or .fb2.zip) file into the same book.json model as extract_text.py."""
+
 from __future__ import annotations
 
-import io
 import json
 import re
 import sys
@@ -48,7 +48,7 @@ def inline(el) -> tuple[str, list[list[int]], list[dict]]:
     def walk(node, in_em: bool):
         t = tag(node)
         if t == "a" and node.get("type") == "note":
-            href = node.get("{%s}href" % NS["l"], "") or node.get("href", "")
+            href = node.get("{{{}}}href".format(NS["l"]), "") or node.get("href", "")
             notes.append({"pos": pos, "id": href.lstrip("#")})
             add(node.tail or "", in_em)
             return
@@ -67,6 +67,7 @@ def inline(el) -> tuple[str, list[list[int]], list[dict]]:
     new = " " * lead + body
     if new != text:
         from extract_text import build_offset_map
+
         m = build_offset_map(text, new)
         em = [[m[a], m[b]] for a, b in em if m[b] > m[a]]
         notes = [{"pos": m[n["pos"]], "id": n["id"]} for n in notes]
@@ -90,9 +91,19 @@ def extract(path: Path) -> dict:
         text, em, nrefs = inline(el)
         if not text.strip():
             return
-        blocks.append({"id": bid or el.get("id") or f"b{len(blocks)}", "kind": kind, "chapter": ch, "stanza": stanza,
-                       "text": text, "em": em, "notes": nrefs,
-                       "sentences": split_sentences(text) if kind == "p" else [[0, len(text)]], "audio": audio})
+        blocks.append(
+            {
+                "id": bid or el.get("id") or f"b{len(blocks)}",
+                "kind": kind,
+                "chapter": ch,
+                "stanza": stanza,
+                "text": text,
+                "em": em,
+                "notes": nrefs,
+                "sentences": split_sentences(text) if kind == "p" else [[0, len(text)]],
+                "audio": audio,
+            }
+        )
 
     def handle(el, ch, kind_override=None, stanza=None):
         nonlocal stanza_n
@@ -137,7 +148,9 @@ def extract(path: Path) -> dict:
         ttl = sec.find("fb:title", NS)
         title_txt = " ".join(re.sub(r"\s+", " ", "".join(p.itertext())).strip() for p in ttl) if ttl is not None else ""
         ch = len(chapters)
-        chapters.append({"id": sec.get("id") or f"s{ch}", "title": title_txt.strip(), "level": level, "first_block": len(blocks)})
+        chapters.append(
+            {"id": sec.get("id") or f"s{ch}", "title": title_txt.strip(), "level": level, "first_block": len(blocks)}
+        )
         for c in sec:
             handle(c, ch)
 
@@ -148,13 +161,24 @@ def extract(path: Path) -> dict:
                 nid = sec.get("id")
                 if not nid:
                     continue
-                ps = [p for p in sec.iter() if tag(p) == "p" and not (tag(p.getparent()) if hasattr(p, "getparent") else "") == "title"]
+                [
+                    p
+                    for p in sec.iter()
+                    if tag(p) == "p" and (tag(p.getparent()) if hasattr(p, "getparent") else "") != "title"
+                ]
                 txt = " ".join(re.sub(r"\s+", " ", "".join(p.itertext())).strip() for p in sec.findall("fb:p", NS))
                 notes[nid] = txt
             continue
         bt = body.find("fb:title", NS)
         if bt is not None:
-            chapters.append({"id": "body", "title": " ".join("".join(p.itertext()).strip() for p in bt), "level": 1, "first_block": len(blocks)})
+            chapters.append(
+                {
+                    "id": "body",
+                    "title": " ".join("".join(p.itertext()).strip() for p in bt),
+                    "level": 1,
+                    "first_block": len(blocks),
+                }
+            )
             for p in bt:
                 add_block(p, "title", len(chapters) - 1)
         for c in body:
@@ -167,6 +191,7 @@ def extract(path: Path) -> dict:
 
 def main() -> None:
     import argparse
+
     ap = argparse.ArgumentParser(description="book.fb2 / book.fb2.zip -> book.json")
     ap.add_argument("book_dir", type=Path)
     args = ap.parse_args()
@@ -175,7 +200,10 @@ def main() -> None:
         sys.exit("no .fb2 file in book dir")
     book = extract(src)
     (args.book_dir / "book.json").write_text(json.dumps(book, ensure_ascii=False), encoding="utf-8")
-    print(f"chapters={len(book['chapters'])} blocks={len(book['blocks'])} words={sum(len(b['text'].split()) for b in book['blocks'])} notes={len(book['notes'])}")
+    print(
+        f"chapters={len(book['chapters'])} blocks={len(book['blocks'])} "
+        f"words={sum(len(b['text'].split()) for b in book['blocks'])} notes={len(book['notes'])}"
+    )
 
 
 if __name__ == "__main__":

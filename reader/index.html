@@ -69,11 +69,31 @@
       <label>Размер <input type="range" id="set-font" min="15" max="28" step="1"></label>
       <label>Интервал <input type="range" id="set-lh" min="1.3" max="2.1" step="0.05"></label>
       <label>Ширина <input type="range" id="set-width" min="30" max="60" step="1"></label>
-      <label>Шрифт
+      <label>Насыщенность <input type="range" id="set-weight" min="330" max="600" step="10"></label>
+      <label>Шрифт текста
         <select id="set-family">
-          <option value="serif">С засечками</option>
-          <option value="charter">Charter</option>
-          <option value="sans">Без засечек</option>
+          <optgroup label="Для длинного чтения">
+            <option value="literata">Literata</option>
+            <option value="ptserif">PT Serif</option>
+            <option value="merriweather">Merriweather</option>
+          </optgroup>
+          <optgroup label="Системные">
+            <option value="iowan">Iowan Old Style</option>
+            <option value="charter">Charter</option>
+            <option value="georgia">Georgia</option>
+          </optgroup>
+          <optgroup label="Без засечек">
+            <option value="inter">Inter</option>
+            <option value="golos">Golos Text</option>
+            <option value="plex">IBM Plex Sans</option>
+          </optgroup>
+        </select></label>
+      <label>Шрифт интерфейса
+        <select id="set-ui">
+          <option value="inter">Inter</option>
+          <option value="golos">Golos Text</option>
+          <option value="plex">IBM Plex Sans</option>
+          <option value="system">Системный</option>
         </select></label>
     </section>
     <section>
@@ -91,7 +111,13 @@
           <option value="bg">Заливка</option>
           <option value="underline">Подчёркивание (мягче)</option>
         </select></label>
-      <label class="row"><input type="checkbox" id="set-dim"> Приглушать остальной текст (фокус)</label>
+      <label>Приглушать (f)
+        <select id="set-dim">
+          <option value="off">Нет</option>
+          <option value="para">Всё, кроме абзаца</option>
+          <option value="sent">Всё, кроме предложения</option>
+        </select></label>
+      <label>Сдвиг подсветки <span><input type="range" id="set-offset" min="-600" max="600" step="50"> <output id="offset-out">0 мс</output></span></label>
       <label>Прокрутка
         <select id="set-scroll">
           <option value="zone">Держать в зоне чтения</option>
@@ -104,6 +130,7 @@
       <h4>Фокус</h4>
       <label class="row"><input type="checkbox" id="set-hide-ui"> Прятать панели во время чтения</label>
       <label class="row"><input type="checkbox" id="set-pause-hidden"> Пауза при уходе из вкладки</label>
+      <label class="row"><input type="checkbox" id="set-rewind"> После паузы начинать с начала предложения</label>
     </section>
     <section>
       <h4>Статистика</h4>
