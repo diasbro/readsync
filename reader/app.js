@@ -16,16 +16,19 @@
   const today = () => new Date().toISOString().slice(0, 10);
 
   // ---------------- settings ----------------
-  const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "serif", theme: "light", word: true, dim: false, scroll: "zone", clickWord: false, speed: 1 };
+  const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "serif", theme: "auto", word: true, wordStyle: "bg", dim: false, scroll: "zone", clickWord: false, speed: 1, hideUi: true, pauseHidden: true };
+  const darkMedia = matchMedia("(prefers-color-scheme: dark)");
+  darkMedia.addEventListener("change", () => applySettings());
   const settings = Object.assign({}, DEFAULTS, store.get("rs:settings", {}));
   function applySettings() {
     const r = document.documentElement.style;
     r.setProperty("--font-size", settings.font + "px");
     r.setProperty("--lh", settings.lh);
     r.setProperty("--width", settings.width + "rem");
-    r.setProperty("--family", settings.family === "sans" ? "var(--sans)" : "var(--serif)");
-    document.documentElement.dataset.theme = settings.theme;
+    r.setProperty("--family", settings.family === "sans" ? "var(--sans)" : settings.family === "charter" ? '"Charter", "Iowan Old Style", Georgia, serif' : "var(--serif)");
+    document.documentElement.dataset.theme = settings.theme === "auto" ? (darkMedia.matches ? "dark" : "light") : settings.theme;
     document.body.classList.toggle("word-hl", !!settings.word);
+    document.body.classList.toggle("word-underline", settings.wordStyle === "underline");
     document.body.classList.toggle("dim", !!settings.dim);
     store.set("rs:settings", settings);
   }
@@ -206,6 +209,9 @@
       if (ci !== curChap) {
         curChap = ci;
         $("#chapter-title").textContent = book.chapters[ci]?.title || "";
+        if ("mediaSession" in navigator && "MediaMetadata" in window) {
+          navigator.mediaSession.metadata = new MediaMetadata({ title: book.chapters[ci]?.title || book.title, artist: book.author, album: book.title });
+        }
         document.querySelectorAll("#toc-list li").forEach((li) => { const k = +li.dataset.ch; li.classList.toggle("cur", k === ci); li.classList.toggle("done", k < ci); });
       }
     }
@@ -244,8 +250,20 @@
 
   // 10 Hz sync loop while playing (cheap: one binary search + a few class toggles per tick)
   let tick = 0;
-  audio.addEventListener("play", () => { clearInterval(tick); tick = setInterval(() => update(false), 100); $("#btn-play").textContent = "❚❚"; session.start(); });
-  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; session.stop(); savePos(); });
+  audio.addEventListener("play", () => { clearInterval(tick); tick = setInterval(() => update(false), 100); $("#btn-play").textContent = "❚❚"; session.start(); document.body.classList.add("playing"); armIdle(); });
+  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; session.stop(); savePos(); document.body.classList.remove("playing", "idle"); });
+  // distraction-free chrome: fade bars after 4 s without pointer/keyboard activity while playing
+  let idleTimer = 0;
+  function armIdle() {
+    clearTimeout(idleTimer);
+    document.body.classList.remove("idle");
+    if (settings.hideUi) idleTimer = setTimeout(() => { if (!audio.paused && $("#toc").hidden && $("#settings").hidden) document.body.classList.add("idle"); }, 4000);
+  }
+  ["mousemove", "mousedown", "keydown", "wheel", "touchstart"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
+  // focus aid: pause when the reader leaves the tab or window
+  const onLeave = () => { if (settings.pauseHidden && !audio.paused) audio.pause(); };
+  document.addEventListener("visibilitychange", () => { if (document.hidden) onLeave(); });
+  addEventListener("blur", onLeave);
   audio.addEventListener("seeked", () => update(true));
   audio.addEventListener("ratechange", () => update(true));
   audio.addEventListener("error", () => { $("#loading").hidden = false; $("#loading").textContent = "Ошибка аудио: " + (audio.error?.message || audio.error?.code); });
@@ -328,12 +346,14 @@
     $("#set-font").value = settings.font; $("#set-lh").value = settings.lh; $("#set-width").value = settings.width;
     $("#set-family").value = settings.family; $("#set-word").checked = !!settings.word; $("#set-dim").checked = !!settings.dim;
     $("#set-scroll").value = settings.scroll; $("#set-click-word").checked = !!settings.clickWord;
+    $("#set-word-style").value = settings.wordStyle; $("#set-hide-ui").checked = !!settings.hideUi; $("#set-pause-hidden").checked = !!settings.pauseHidden;
     document.querySelectorAll("#set-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
     $("#btn-focus").classList.toggle("on", !!settings.dim);
   }
   const bind = (sel, key, conv = (v) => v) => $(sel).addEventListener("input", (e) => { settings[key] = conv(e.target.type === "checkbox" ? e.target.checked : e.target.value); applySettings(); syncSettingsUI(); });
   bind("#set-font", "font", Number); bind("#set-lh", "lh", Number); bind("#set-width", "width", Number);
   bind("#set-family", "family"); bind("#set-word", "word"); bind("#set-dim", "dim"); bind("#set-scroll", "scroll"); bind("#set-click-word", "clickWord");
+  bind("#set-word-style", "wordStyle"); bind("#set-hide-ui", "hideUi"); bind("#set-pause-hidden", "pauseHidden");
   $("#set-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); syncSettingsUI(); });
   syncSettingsUI();
 
@@ -381,6 +401,33 @@
   $("#sprint-stop").onclick = () => { stopSprint(); $("#sprint-menu").hidden = true; };
   $("#sprint-close").onclick = () => { $("#sprint-done").hidden = true; };
   $("#sprint-again").onclick = () => { $("#sprint-done").hidden = true; startSprint(sprint.minutes); if (audio.paused) audio.play(); };
+  $("#sprint-break").onclick = () => { $("#sprint-done").hidden = true; startBreak(5); };
+  $("#break-close").onclick = () => { $("#break-done").hidden = true; };
+  $("#break-sprint").onclick = () => { $("#break-done").hidden = true; startSprint(sprint.minutes || 25); };
+  // rest break between sprints: audio stays paused, badge counts down, soft chime at the end
+  function startBreak(min) {
+    stopSprint(); if (!audio.paused) audio.pause();
+    const end = Date.now() + min * 60000, badge = $("#sprint-badge"); badge.hidden = false; badge.classList.remove("ending");
+    $("#btn-sprint").classList.add("on");
+    sprint.timer = setInterval(() => {
+      const left = end - Date.now();
+      if (left <= 0) { stopSprint(); chime(); $("#break-done").hidden = false; return; }
+      badge.textContent = "перерыв " + fmt(left / 1000);
+    }, 500);
+  }
+  function chime() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      [523.25, 659.25, 783.99].forEach((f, i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = "sine"; o.frequency.value = f; o.connect(g); g.connect(ctx.destination);
+        const t0 = ctx.currentTime + i * 0.18;
+        g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(0.15, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.6);
+        o.start(t0); o.stop(t0 + 0.65);
+      });
+    } catch {}
+  }
+  window.readsync = { startSprint, startBreak, seek, setSpeed };
   function startSprint(min) {
     stopSprint(); sprint.minutes = min; sprint.end = Date.now() + min * 60000; sprint.words = 0; sprint.sents0 = curSent; sprint.startWord = curWord;
     $("#sprint-menu").hidden = true; $("#btn-sprint").classList.add("on");
