@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Local server for readsync: serves the reader UI, book data with HTTP Range support,
 and /api/books (list of books/*/book.toml)."""
+
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import mimetypes
 import os
@@ -51,12 +53,12 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter log
         if "audio" in (args[0] if args else ""):
             return
-        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+        sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
 
     def translate_path(self, path: str) -> str:
         path = path.split("?", 1)[0].split("#", 1)[0]
         if path.startswith("/books/"):
-            rel = Path(path[len("/books/"):])
+            rel = Path(path[len("/books/") :])
             target = (BOOKS / rel).resolve()
             if BOOKS.resolve() in target.parents:
                 return str(target)
@@ -129,10 +131,8 @@ def main() -> None:
     args = ap.parse_args()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"readsync: http://{args.host}:{args.port}/  (books: {', '.join(b['slug'] for b in list_books()) or 'none'})")
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
 
 
 if __name__ == "__main__":

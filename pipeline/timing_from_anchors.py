@@ -3,6 +3,7 @@
 timing.json: {"source": "captions", "duration": float,
               "words": [[block_idx, char_start, char_end, t0, t1], ...]}
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,7 +24,7 @@ def interpolate(words: list[list[int]], anchors: list[list[float]], duration: fl
     if not known:
         raise SystemExit("no anchors")
     # global speaking rate (sec per char) from first/last anchors
-    span_chars = sum(weight[known[0]:known[-1]]) or 1
+    span_chars = sum(weight[known[0] : known[-1]]) or 1
     rate = (t0[known[-1]] - t0[known[0]]) / span_chars
     # before first anchor
     acc = 0
@@ -31,7 +32,7 @@ def interpolate(words: list[list[int]], anchors: list[list[float]], duration: fl
         acc += weight[i]
         t0[i] = max(0.0, t0[known[0]] - acc * rate)
     # between anchors
-    for a, b in zip(known, known[1:]):
+    for a, b in zip(known, known[1:], strict=False):
         if b - a <= 1:
             continue
         seg_chars = sum(weight[a:b]) or 1
@@ -62,7 +63,8 @@ def main() -> None:
     anc = json.loads((args.book_dir / "anchors.json").read_text(encoding="utf-8"))
     words = interpolate(anc["words"], anc["anchors"], anc["duration"])
     (args.book_dir / "timing.json").write_text(
-        json.dumps({"source": "captions", "duration": anc["duration"], "words": words}), encoding="utf-8")
+        json.dumps({"source": "captions", "duration": anc["duration"], "words": words}), encoding="utf-8"
+    )
     print(f"timing words={len(words)} duration={anc['duration']:.0f}s")
 
 

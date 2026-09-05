@@ -8,6 +8,7 @@ aligner on each window with the book words that fall inside it, and take the res
 timestamps. Words the aligner scores badly (score < BAD_SCORE) fall back to caption/interpolated
 timing so a single mis-read window cannot derail the map.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -62,7 +63,9 @@ def main() -> None:
     ap.add_argument("--limit-sec", type=float, default=None, help="only align the first N seconds (for testing)")
     ap.add_argument("--providers", default="CPUExecutionProvider")
     ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--threads", type=int, default=4, help="CPU threads for the model (default 4 keeps the laptop cool)")
+    ap.add_argument(
+        "--threads", type=int, default=4, help="CPU threads for the model (default 4 keeps the laptop cool)"
+    )
     ap.add_argument("--fast", action="store_true", help="use all cores at normal priority")
     args = ap.parse_args()
     if not args.fast:
@@ -77,7 +80,8 @@ def main() -> None:
     anc = json.loads((d / "anchors.json").read_text(encoding="utf-8"))
     words, anchors, duration = anc["words"], anc["anchors"], anc["duration"]
     base = interpolate(words, anchors, duration)  # fallback timing
-    t0 = np.array([w[3] for w in base]); t1 = np.array([w[4] for w in base])
+    t0 = np.array([w[3] for w in base])
+    t1 = np.array([w[4] for w in base])
     good = np.zeros(len(words), dtype=bool)
 
     al = cfa.AlignmentSingleton()
@@ -97,10 +101,11 @@ def main() -> None:
     started = time.time()
     bad_windows = 0
     for k, (w_lo, w_hi, tl, th) in enumerate(wins):
-        a0 = max(0.0, tl - PAD_SEC); a1 = min(duration, th + PAD_SEC)
+        a0 = max(0.0, tl - PAD_SEC)
+        a1 = min(duration, th + PAD_SEC)
         wav.seek(int(a0 * SR))
         audio = wav.read(int((a1 - a0) * SR), dtype="float32")
-        text = " ".join(book["blocks"][b]["text"][s:e] for b, s, e in words[w_lo:w_hi + 1])
+        text = " ".join(book["blocks"][b]["text"][s:e] for b, s, e in words[w_lo : w_hi + 1])
         try:
             em, stride = cfa.generate_emissions(session, audio, batch_size=args.batch_size)
             tok, txt = cfa.preprocess_text(text, romanize=True, language="rus")
@@ -126,8 +131,11 @@ def main() -> None:
             good[wi] = True
         if k % 20 == 0 or k == len(wins) - 1:
             el = time.time() - started
-            print(f"  {k + 1}/{len(wins)} windows, {th / 3600:.2f}h audio, {el / 60:.1f} min elapsed, "
-                  f"eta {el / (k + 1) * (len(wins) - k - 1) / 60:.1f} min", flush=True)
+            print(
+                f"  {k + 1}/{len(wins)} windows, {th / 3600:.2f}h audio, {el / 60:.1f} min elapsed, "
+                f"eta {el / (k + 1) * (len(wins) - k - 1) / 60:.1f} min",
+                flush=True,
+            )
 
     # enforce monotonic order and sane durations
     for i in range(1, len(words)):
@@ -138,8 +146,11 @@ def main() -> None:
         t1[i] = min(max(t1[i], t0[i] + 0.05), nxt, t0[i] + MAX_WORD_SEC)
     out = [[w[0], w[1], w[2], round(float(t0[i]), 3), round(float(t1[i]), 3)] for i, w in enumerate(words)]
     (d / "timing.json").write_text(json.dumps({"source": "mms", "duration": duration, "words": out}), encoding="utf-8")
-    print(f"done: aligned {good.mean():.1%} of words by MMS, bad windows={bad_windows}, "
-          f"{(time.time() - started) / 60:.1f} min", flush=True)
+    print(
+        f"done: aligned {good.mean():.1%} of words by MMS, bad windows={bad_windows}, "
+        f"{(time.time() - started) / 60:.1f} min",
+        flush=True,
+    )
     os._exit(0)  # onnxruntime CoreML teardown can crash at interpreter exit
 
 

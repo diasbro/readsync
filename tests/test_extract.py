@@ -20,7 +20,10 @@ def test_dialogue_dash_and_quotes():
 
 
 def test_abbreviation_not_split():
-    assert sents("Это было в 1990 г. в Москве. Потом т. е. позже.") == ["Это было в 1990 г. в Москве.", "Потом т. е. позже."]
+    assert sents("Это было в 1990 г. в Москве. Потом т. е. позже.") == [
+        "Это было в 1990 г. в Москве.",
+        "Потом т. е. позже.",
+    ]
 
 
 def test_ellipsis_lowercase_continuation():
