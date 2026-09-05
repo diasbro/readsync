@@ -91,7 +91,29 @@ def main() -> None:
         so.intra_op_num_threads = args.threads
     session = ort.InferenceSession(model_path, sess_options=so, providers=args.providers.split(","))
     tokenizer = al.alignment_tokenizer
-    wav = sf.SoundFile(str(d / "audio16k.wav"))
+    wav_path = d / "audio16k.wav"
+    if not wav_path.exists():  # derived file; rebuild it from whatever playable audio the book has
+        src = next(f for f in (d / "audio.m4a", d / "audio.mp3", d / "yt.webm") if f.exists())
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(src),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(wav_path),
+            ],
+            check=True,
+        )
+    wav = sf.SoundFile(str(wav_path))
     assert wav.samplerate == SR and wav.channels == 1, "audio16k.wav must be 16 kHz mono"
 
     wins = pick_windows(anchors, duration)
