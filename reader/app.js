@@ -106,6 +106,7 @@
       let w = -1;
       for (let i = 0; i < n; i++) if (wB[i] >= c.first_block) { w = i; break; }
       chapStartWord.push(w); chapStartTime.push(w >= 0 ? wT0[w] : Infinity);
+      c.hidden = !c.title || c.title === "* * *";
     });
   }
 
@@ -162,7 +163,7 @@
 
   function buildToc() {
     const ol = $("#toc-list");
-    ol.innerHTML = book.chapters.map((c, i) => `<li class="l${c.level}" data-ch="${i}"><span>${esc(c.title || "…")}</span><span class="tt">${isFinite(chapStartTime[i]) ? fmt(chapStartTime[i]) : ""}</span></li>`).join("");
+    ol.innerHTML = book.chapters.map((c, i) => c.hidden ? "" : `<li class="l${c.level}" data-ch="${i}"><span>${esc(c.title)}</span><span class="tt">${isFinite(chapStartTime[i]) ? fmt(chapStartTime[i]) : ""}</span></li>`).join("");
     ol.addEventListener("click", (e) => {
       const li = e.target.closest("li"); if (!li) return;
       const i = +li.dataset.ch;
@@ -172,7 +173,7 @@
   }
   function drawTicks() {
     const el = $("#chapter-ticks");
-    el.innerHTML = book.chapters.map((c, i) => isFinite(chapStartTime[i]) && chapStartTime[i] > 0
+    el.innerHTML = book.chapters.map((c, i) => !c.hidden && isFinite(chapStartTime[i]) && chapStartTime[i] > 0
       ? `<i class="l${c.level}" style="left:${(chapStartTime[i] / duration) * 100}%" title="${esc(c.title)}"></i>` : "").join("");
   }
 
@@ -219,7 +220,7 @@
     }
   }
   let lastSec = -1;
-  function chapterAt(t) { let c = 0; for (let i = 0; i < chapStartTime.length; i++) if (chapStartTime[i] <= t) c = i; return c; }
+  function chapterAt(t) { let c = 0; for (let i = 0; i < chapStartTime.length; i++) if (chapStartTime[i] <= t && !book.chapters[i].hidden) c = i; return c; }
 
   function onSentenceChange(prevSent) {
     if (sprint.stopAtSentence && prevSent >= 0) { sprint.stopAtSentence = false; audio.pause(); finishSprint(); return; }
