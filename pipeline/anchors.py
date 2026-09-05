@@ -118,7 +118,7 @@ def main() -> None:
     args = ap.parse_args()
     d = args.book_dir
     book = json.loads((d / "book.json").read_text(encoding="utf-8"))
-    caps = next(iter(sorted(d.glob("*.json3"))), None)
+    caps = next((f for f in sorted(d.glob("yt.*.json3")) + [d / "whisper.json3"] if f.exists()), None)
     if caps is None:
         sys.exit("no *.json3 captions in book dir")
     res = build(book, json.loads(caps.read_text(encoding="utf-8")))
