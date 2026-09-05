@@ -1,5 +1,6 @@
 """Fallback for audio without YouTube captions: transcribe with faster-whisper into a json3-like
 caption file (whisper.json3) that anchors.py understands."""
+
 from __future__ import annotations
 
 import argparse
@@ -24,6 +25,7 @@ def main() -> None:
     src = str(wav)
     if args.limit_sec:
         import soundfile as sf
+
         audio, sr = sf.read(str(wav), stop=int(args.limit_sec * 16000), dtype="float32")
         src = audio
     model = WhisperModel(args.model, device="cpu", compute_type="int8")

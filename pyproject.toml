@@ -1,0 +1,31 @@
+[project]
+name = "readsync"
+version = "0.1.0"
+description = "Immersion reading: book text synced with an audiobook, with focus and eye-care tooling"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "beautifulsoup4",
+  "lxml",
+  "numpy",
+  "soundfile",
+  "ctc-forced-aligner==1.0.2",
+  "unidecode",
+  "faster-whisper",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "fonttools", "brotli"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = [".venv", "books"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E731"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

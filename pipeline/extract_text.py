@@ -16,11 +16,11 @@ Output model:
   "notes": {"n_1": "text", ...}
 }
 """
+
 from __future__ import annotations
 
 import json
 import re
-import sys
 from pathlib import Path
 
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -129,14 +129,10 @@ def split_sentences(text: str) -> list[list[int]]:
             out.append([start, n])
             start = n
             break
-        word_before = re.search(r"([А-Яа-яЁёA-Za-z]+)\.?$", text[start:m.start() + 1])
+        word_before = re.search(r"([А-Яа-яЁёA-Za-z]+)\.?$", text[start : m.start() + 1])
         is_abbrev = bool(word_before) and word_before.group(1).lower() in ABBREV and text[m.start()] == "."
         next_ch = text[j] if j < n else ""
-        boundary = (
-            j > end
-            and not is_abbrev
-            and (next_ch.isupper() or next_ch in "«\"“–—-([" or next_ch.isdigit())
-        )
+        boundary = j > end and not is_abbrev and (next_ch.isupper() or next_ch in '«"“–—-([' or next_ch.isdigit())
         if boundary:
             out.append([start, end])
             start = j
@@ -169,21 +165,27 @@ def extract(src: Path) -> dict:
         text, em, nrefs = inline_text(el)
         if not text.strip():
             return
-        blocks.append({
-            "id": bid or el.get("id") or f"b{len(blocks)}",
-            "kind": kind,
-            "chapter": chapter,
-            "stanza": stanza,
-            "text": text,
-            "em": em,
-            "notes": nrefs,
-            "sentences": [[0, len(text)]] if kind != "p" else split_sentences(text),
-            "audio": audio,
-        })
+        blocks.append(
+            {
+                "id": bid or el.get("id") or f"b{len(blocks)}",
+                "kind": kind,
+                "chapter": chapter,
+                "stanza": stanza,
+                "text": text,
+                "em": em,
+                "notes": nrefs,
+                "sentences": [[0, len(text)]] if kind != "p" else split_sentences(text),
+                "audio": audio,
+            }
+        )
 
     def walk_section(sec: Tag, level: int):
         h2 = sec.find("h2", recursive=False)
-        title = " ".join(p.get_text(" ", strip=True) for p in h2.find_all("p")) if h2 and h2.find("p") else (h2.get_text(" ", strip=True) if h2 else "")
+        title = (
+            " ".join(p.get_text(" ", strip=True) for p in h2.find_all("p"))
+            if h2 and h2.find("p")
+            else (h2.get_text(" ", strip=True) if h2 else "")
+        )
         title = re.sub(r"\s+", " ", title).strip()
         if title == "<title unassigned>":
             title = "* * *"
@@ -218,7 +220,9 @@ def extract(src: Path) -> dict:
                     handle(p, ch_idx, level, kind_override="author")
             elif "epigraph" in cls:
                 for p in el.find_all("p", recursive=False):
-                    handle(p, ch_idx, level, kind_override="author" if "text-author" in p.get("class", []) else "epigraph")
+                    handle(
+                        p, ch_idx, level, kind_override="author" if "text-author" in p.get("class", []) else "epigraph"
+                    )
             elif el.get("id") == "annotation":
                 for p in el.find_all("p", recursive=False):
                     handle(p, ch_idx, level, kind_override="annotation", audio=False)
@@ -260,6 +264,7 @@ def extract(src: Path) -> dict:
 
 def main() -> None:
     import argparse
+
     ap = argparse.ArgumentParser(description="book.html (fantasy-worlds reader page) -> book.json")
     ap.add_argument("book_dir", type=Path)
     args = ap.parse_args()
@@ -268,7 +273,10 @@ def main() -> None:
     n_audio = sum(1 for b in book["blocks"] if b["audio"])
     n_sent = sum(len(b["sentences"]) for b in book["blocks"])
     n_words = sum(len(b["text"].split()) for b in book["blocks"] if b["audio"])
-    print(f"chapters={len(book['chapters'])} blocks={len(book['blocks'])} audio_blocks={n_audio} sentences={n_sent} words={n_words} notes={len(book['notes'])}")
+    print(
+        f"chapters={len(book['chapters'])} blocks={len(book['blocks'])} audio_blocks={n_audio} "
+        f"sentences={n_sent} words={n_words} notes={len(book['notes'])}"
+    )
 
 
 if __name__ == "__main__":
