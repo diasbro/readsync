@@ -16,20 +16,34 @@
   const today = () => new Date().toISOString().slice(0, 10);
 
   // ---------------- settings ----------------
-  const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "serif", theme: "auto", word: true, wordStyle: "bg", dim: false, scroll: "zone", clickWord: false, speed: 1, hideUi: true, pauseHidden: true };
+  const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", word: true, wordStyle: "bg",
+    dimMode: "off", offset: 0, scroll: "zone", clickWord: false, speed: 1, hideUi: true, pauseHidden: true, rewind: true };
+  const FAMILIES = {
+    literata: '"Literata", "Iowan Old Style", Georgia, serif', ptserif: '"PT Serif", Georgia, serif', merriweather: '"Merriweather", Georgia, serif',
+    iowan: '"Iowan Old Style", "Palatino Linotype", Georgia, serif', charter: '"Charter", "Iowan Old Style", Georgia, serif', georgia: 'Georgia, "Times New Roman", serif',
+    inter: '"Inter", var(--sans)', golos: '"Golos Text", var(--sans)', plex: '"IBM Plex Sans", var(--sans)', system: "var(--sans)",
+  };
   const darkMedia = matchMedia("(prefers-color-scheme: dark)");
   darkMedia.addEventListener("change", () => applySettings());
   const settings = Object.assign({}, DEFAULTS, store.get("rs:settings", {}));
+  // migrate settings from earlier versions
+  if (settings.family === "serif") settings.family = "iowan";
+  if (settings.family === "sans") settings.family = "inter";
+  if (settings.dim === true) settings.dimMode = "para";
+  delete settings.dim;
   function applySettings() {
     const r = document.documentElement.style;
     r.setProperty("--font-size", settings.font + "px");
     r.setProperty("--lh", settings.lh);
     r.setProperty("--width", settings.width + "rem");
-    r.setProperty("--family", settings.family === "sans" ? "var(--sans)" : settings.family === "charter" ? '"Charter", "Iowan Old Style", Georgia, serif' : "var(--serif)");
+    r.setProperty("--family", FAMILIES[settings.family] || FAMILIES.literata);
+    r.setProperty("--ui", FAMILIES[settings.ui] || FAMILIES.inter);
+    r.setProperty("--weight", settings.weight);
     document.documentElement.dataset.theme = settings.theme === "auto" ? (darkMedia.matches ? "dark" : "light") : settings.theme;
     document.body.classList.toggle("word-hl", !!settings.word);
     document.body.classList.toggle("word-underline", settings.wordStyle === "underline");
-    document.body.classList.toggle("dim", !!settings.dim);
+    document.body.classList.toggle("dim-para", settings.dimMode === "para");
+    document.body.classList.toggle("dim-sent", settings.dimMode === "sent");
     store.set("rs:settings", settings);
   }
   applySettings();
@@ -188,7 +202,7 @@
     return lo;
   }
   function update(force) {
-    const t = audio.currentTime;
+    const t = audio.currentTime + settings.offset;
     const i = wordAt(t);
     if (i !== curWord || force) {
       if (curWord >= 0 && wordEls[curWord]) wordEls[curWord].classList.remove("cur");
@@ -251,7 +265,7 @@
   // 10 Hz sync loop while playing (cheap: one binary search + a few class toggles per tick)
   let tick = 0;
   audio.addEventListener("play", () => { clearInterval(tick); tick = setInterval(() => update(false), 100); $("#btn-play").textContent = "❚❚"; session.start(); document.body.classList.add("playing"); armIdle(); });
-  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; session.stop(); savePos(); document.body.classList.remove("playing", "idle"); });
+  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; session.stop(); savePos(); document.body.classList.remove("playing", "idle"); pausedAt = Date.now(); });
   // distraction-free chrome: fade bars after 4 s without pointer/keyboard activity while playing
   let idleTimer = 0;
   function armIdle() {
@@ -272,8 +286,16 @@
   function savePos() { store.set("rs:pos:" + slug, audio.currentTime); }
 
   // ---------------- controls ----------------
+  let pausedAt = 0;
+  function play() {
+    if (settings.rewind && pausedAt && Date.now() - pausedAt > 8000) {
+      const st = sentStart(curSent);
+      if (st != null && audio.currentTime - st > 1.5) { audio.currentTime = st; update(true); }
+    }
+    return audio.play();
+  }
   function seek(t) { audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
-  function toggle() { audio.paused ? audio.play() : audio.pause(); }
+  function toggle() { audio.paused ? play() : audio.pause(); }
   function sentStart(si) { return si >= 0 && sFirst[si] >= 0 ? wT0[sFirst[si]] : null; }
   function prevSentence() {
     // if we are >1.5s into the sentence, restart it; otherwise go to previous
@@ -283,6 +305,7 @@
   }
   function nextSentence() { for (let k = curSent + 1; k < sFirst.length; k++) if (sFirst[k] >= 0) return seek(wT0[sFirst[k]]); }
   function repeatSentence() { const st = sentStart(curSent); if (st != null) { seek(st); if (audio.paused) audio.play(); } }
+  function toggleDim() { settings.dimMode = settings.dimMode === "off" ? (settings.lastDim || "para") : "off"; if (settings.dimMode !== "off") settings.lastDim = settings.dimMode; applySettings(); syncSettingsUI(); }
   function setSpeed(v) { v = Math.min(2, Math.max(0.5, +v)); audio.playbackRate = v; settings.speed = v; $("#speed").value = String(v); store.set("rs:settings", settings); }
 
   $("#btn-play").onclick = toggle;
@@ -291,7 +314,7 @@
   $("#btn-prev-sent").onclick = prevSentence;
   $("#btn-next-sent").onclick = nextSentence;
   $("#speed").onchange = (e) => setSpeed(e.target.value);
-  $("#btn-focus").onclick = () => { settings.dim = !settings.dim; applySettings(); syncSettingsUI(); };
+  $("#btn-focus").onclick = toggleDim;
   let seekingUI = false;
   const prog = $("#progress");
   prog.addEventListener("input", () => { seekingUI = true; $("#time-cur").textContent = fmt(+prog.value); });
@@ -321,13 +344,13 @@
     else if (k === "r") repeatSentence();
     else if (k === "[") setSpeed(audio.playbackRate - 0.1);
     else if (k === "]") setSpeed(audio.playbackRate + 0.1);
-    else if (k === "f") { settings.dim = !settings.dim; applySettings(); syncSettingsUI(); }
+    else if (k === "f") toggleDim();
     else if (k === "t") toggleDrawer("#toc");
     else if (k === "a") { userScrolled = false; $("#return-pill").hidden = true; scrollToCurrent(true); }
     else if (k === "Escape") { closeDrawers(); $("#note-pop").hidden = true; $("#sprint-menu").hidden = true; }
   });
   if ("mediaSession" in navigator) {
-    navigator.mediaSession.setActionHandler("play", () => audio.play());
+    navigator.mediaSession.setActionHandler("play", () => play());
     navigator.mediaSession.setActionHandler("pause", () => audio.pause());
     navigator.mediaSession.setActionHandler("seekbackward", () => seek(audio.currentTime - 10));
     navigator.mediaSession.setActionHandler("seekforward", () => seek(audio.currentTime + 10));
@@ -344,15 +367,20 @@
   document.querySelectorAll("[data-close]").forEach((b) => (b.onclick = closeDrawers));
   function syncSettingsUI() {
     $("#set-font").value = settings.font; $("#set-lh").value = settings.lh; $("#set-width").value = settings.width;
-    $("#set-family").value = settings.family; $("#set-word").checked = !!settings.word; $("#set-dim").checked = !!settings.dim;
+    $("#set-family").value = settings.family; $("#set-word").checked = !!settings.word; $("#set-dim").value = settings.dimMode;
+    $("#set-ui").value = settings.ui; $("#set-weight").value = settings.weight; $("#set-rewind").checked = !!settings.rewind;
+    $("#set-offset").value = Math.round(settings.offset * 1000); $("#offset-out").textContent = (settings.offset > 0 ? "+" : "") + Math.round(settings.offset * 1000) + " мс";
     $("#set-scroll").value = settings.scroll; $("#set-click-word").checked = !!settings.clickWord;
     $("#set-word-style").value = settings.wordStyle; $("#set-hide-ui").checked = !!settings.hideUi; $("#set-pause-hidden").checked = !!settings.pauseHidden;
     document.querySelectorAll("#set-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
-    $("#btn-focus").classList.toggle("on", !!settings.dim);
+    $("#btn-focus").classList.toggle("on", settings.dimMode !== "off");
   }
   const bind = (sel, key, conv = (v) => v) => $(sel).addEventListener("input", (e) => { settings[key] = conv(e.target.type === "checkbox" ? e.target.checked : e.target.value); applySettings(); syncSettingsUI(); });
   bind("#set-font", "font", Number); bind("#set-lh", "lh", Number); bind("#set-width", "width", Number);
-  bind("#set-family", "family"); bind("#set-word", "word"); bind("#set-dim", "dim"); bind("#set-scroll", "scroll"); bind("#set-click-word", "clickWord");
+  bind("#set-family", "family"); bind("#set-word", "word"); bind("#set-dim", "dimMode"); bind("#set-scroll", "scroll"); bind("#set-click-word", "clickWord");
+  bind("#set-ui", "ui"); bind("#set-weight", "weight", Number); bind("#set-rewind", "rewind"); bind("#set-offset", "offset", (v) => Number(v) / 1000);
+  $("#set-dim").addEventListener("input", () => { if (settings.dimMode !== "off") settings.lastDim = settings.dimMode; });
+  $("#set-offset").addEventListener("input", () => update(true));
   bind("#set-word-style", "wordStyle"); bind("#set-hide-ui", "hideUi"); bind("#set-pause-hidden", "pauseHidden");
   $("#set-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); syncSettingsUI(); });
   syncSettingsUI();
@@ -391,7 +419,12 @@
     let streak = 0; const dt = new Date();
     for (;;) { const k = dt.toISOString().slice(0, 10); if (st.days[k]?.sec > 60) { streak++; dt.setDate(dt.getDate() - 1); } else break; }
     const pct = duration ? Math.round((audio.currentTime / duration) * 100) : 0;
-    $("#stats").innerHTML = `Сегодня: <b>${fmt(td.sec)}</b>, ${Math.round(td.words)} слов<br>Всего: <b>${fmt(tot)}</b>, ${Math.round(totW)} слов<br>Серия: <b>${streak}</b> дн.<br>Прогресс книги: <b>${pct}%</b> · осталось ${fmt((duration - audio.currentTime) / audio.playbackRate)}`;
+    const week = []; const d2 = new Date();
+    for (let i = 6; i >= 0; i--) { const x = new Date(d2); x.setDate(d2.getDate() - i); const k = x.toISOString().slice(0, 10); week.push({ k, sec: st.days[k]?.sec || 0, wd: ["вс", "пн", "вт", "ср", "чт", "пт", "сб"][x.getDay()] }); }
+    const max = Math.max(60, ...week.map((w) => w.sec));
+    const bars = `<div class="bars">${week.map((w) => `<div class="${w.k === today() ? "today" : ""}" style="height:${Math.max(4, (w.sec / max) * 100)}%" title="${fmt(w.sec)}"></div>`).join("")}</div>
+      <div class="bars-labels">${week.map((w) => `<span>${w.wd}</span>`).join("")}</div>`;
+    $("#stats").innerHTML = `Сегодня: <b>${fmt(td.sec)}</b>, ${Math.round(td.words)} слов<br>Всего: <b>${fmt(tot)}</b>, ${Math.round(totW)} слов<br>Серия: <b>${streak}</b> дн.<br>Прогресс книги: <b>${pct}%</b> · осталось ${fmt((duration - audio.currentTime) / audio.playbackRate)}${bars}`;
   }
 
   // ---------------- sprint timer ----------------
@@ -400,7 +433,7 @@
   $("#sprint-menu").addEventListener("click", (e) => { const b = e.target.closest("button[data-min]"); if (b) startSprint(+b.dataset.min); });
   $("#sprint-stop").onclick = () => { stopSprint(); $("#sprint-menu").hidden = true; };
   $("#sprint-close").onclick = () => { $("#sprint-done").hidden = true; };
-  $("#sprint-again").onclick = () => { $("#sprint-done").hidden = true; startSprint(sprint.minutes); if (audio.paused) audio.play(); };
+  $("#sprint-again").onclick = () => { $("#sprint-done").hidden = true; startSprint(sprint.minutes); };
   $("#sprint-break").onclick = () => { $("#sprint-done").hidden = true; startBreak(5); };
   $("#break-close").onclick = () => { $("#break-done").hidden = true; };
   $("#break-sprint").onclick = () => { $("#break-done").hidden = true; startSprint(sprint.minutes || 25); };
@@ -437,7 +470,7 @@
       if (left <= 0) { clearInterval(sprint.timer); badge.textContent = "финиш…"; badge.classList.add("ending"); if (audio.paused) finishSprint(); else sprint.stopAtSentence = true; return; }
       badge.textContent = fmt(left / 1000); badge.classList.toggle("ending", left < 60000);
     }, 500);
-    if (audio.paused) audio.play();
+    if (audio.paused) play();
   }
   function stopSprint() { clearInterval(sprint.timer); sprint.end = null; sprint.stopAtSentence = false; $("#sprint-badge").hidden = true; $("#sprint-badge").classList.remove("ending"); $("#btn-sprint").classList.remove("on"); }
   function finishSprint() {
