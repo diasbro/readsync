@@ -72,18 +72,25 @@
       <label>Шрифт
         <select id="set-family">
           <option value="serif">С засечками</option>
+          <option value="charter">Charter</option>
           <option value="sans">Без засечек</option>
         </select></label>
     </section>
     <section>
       <h4>Тема</h4>
       <div class="seg" id="set-theme">
-        <button data-v="light">Светлая</button><button data-v="sepia">Сепия</button><button data-v="dark">Тёмная</button>
+        <button data-v="auto">Как в системе</button><button data-v="light">Светлая</button><button data-v="sepia">Сепия</button>
+        <button data-v="dark">Тёмная</button><button data-v="night">Ночная (тёплая)</button>
       </div>
     </section>
     <section>
       <h4>Подсветка</h4>
       <label class="row"><input type="checkbox" id="set-word"> Подсвечивать слово</label>
+      <label>Стиль слова
+        <select id="set-word-style">
+          <option value="bg">Заливка</option>
+          <option value="underline">Подчёркивание (мягче)</option>
+        </select></label>
       <label class="row"><input type="checkbox" id="set-dim"> Приглушать остальной текст (фокус)</label>
       <label>Прокрутка
         <select id="set-scroll">
@@ -92,6 +99,11 @@
           <option value="off">Выключена</option>
         </select></label>
       <label class="row"><input type="checkbox" id="set-click-word"> Клик по слову = перемотка на слово</label>
+    </section>
+    <section>
+      <h4>Фокус</h4>
+      <label class="row"><input type="checkbox" id="set-hide-ui"> Прятать панели во время чтения</label>
+      <label class="row"><input type="checkbox" id="set-pause-hidden"> Пауза при уходе из вкладки</label>
     </section>
     <section>
       <h4>Статистика</h4>
@@ -119,12 +131,23 @@
       <h3>Спринт завершён</h3>
       <div id="sprint-summary"></div>
       <div class="row-btns">
+        <button id="sprint-close">Закрыть</button>
         <button id="sprint-again">Ещё один</button>
-        <button id="sprint-close" class="primary">Закрыть</button>
+        <button id="sprint-break" class="primary">Перерыв 5 мин</button>
       </div>
     </div>
   </div>
 
+  <div id="break-done" class="modal" hidden>
+    <div class="modal-box">
+      <h3>Перерыв окончен</h3>
+      <div>Глаза отдохнули. Продолжаем?</div>
+      <div class="row-btns">
+        <button id="break-close">Закрыть</button>
+        <button id="break-sprint" class="primary">Ещё спринт</button>
+      </div>
+    </div>
+  </div>
   <div id="note-pop" class="popup" hidden></div>
   <div id="scrim" hidden></div>
   <audio id="audio" preload="metadata"></audio>

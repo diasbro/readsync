@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -61,7 +62,13 @@ def main() -> None:
     ap.add_argument("--limit-sec", type=float, default=None, help="only align the first N seconds (for testing)")
     ap.add_argument("--providers", default="CPUExecutionProvider")
     ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--threads", type=int, default=4, help="CPU threads for the model (default 4 keeps the laptop cool)")
+    ap.add_argument("--fast", action="store_true", help="use all cores at normal priority")
     args = ap.parse_args()
+    if not args.fast:
+        os.nice(15)
+        if sys.platform == "darwin":  # run on efficiency cores: cool and quiet, roughly 2x slower
+            subprocess.run(["taskpolicy", "-b", "-p", str(os.getpid())], check=False)
     d = args.book_dir
     logging.getLogger("ctc_forced_aligner").setLevel(logging.ERROR)
     import ctc_forced_aligner as cfa
@@ -75,7 +82,10 @@ def main() -> None:
 
     al = cfa.AlignmentSingleton()
     model_path = al.model_path
-    session = ort.InferenceSession(model_path, providers=args.providers.split(","))
+    so = ort.SessionOptions()
+    if not args.fast:
+        so.intra_op_num_threads = args.threads
+    session = ort.InferenceSession(model_path, sess_options=so, providers=args.providers.split(","))
     tokenizer = al.alignment_tokenizer
     wav = sf.SoundFile(str(d / "audio16k.wav"))
     assert wav.samplerate == SR and wav.channels == 1, "audio16k.wav must be 16 kHz mono"
