@@ -97,7 +97,7 @@
       wB[i] = b; wT0[i] = t0; wT1[i] = t1;
       const sents = book.blocks[b].sentences;
       let k = sents.findIndex(([a, e]) => cs >= a && cs < e);
-      if (k < 0) k = sents.length - 1;
+      if (k < 0) { k = 0; for (let j = 0; j < sents.length; j++) if (sents[j][0] <= cs) k = j; }
       const si = sentIdx[b][k]; wS[i] = si;
       if (sFirst[si] < 0) sFirst[si] = i;
       sLast[si] = i;
@@ -208,11 +208,17 @@
         document.querySelectorAll("#toc-list li").forEach((li) => { const k = +li.dataset.ch; li.classList.toggle("cur", k === ci); li.classList.toggle("done", k < ci); });
       }
     }
-    if (!seekingUI) $("#progress").value = t;
-    $("#time-cur").textContent = fmt(t);
-    const chEnd = chapStartTime.slice(curChap + 1).find((x) => isFinite(x)) ?? duration;
-    $("#time-left").textContent = "−" + fmt((chEnd - t) / audio.playbackRate) + " · " + fmt(duration - t);
+    const sec = Math.floor(t);
+    if (sec !== lastSec || force) {
+      lastSec = sec;
+      if (!seekingUI) $("#progress").value = t;
+      $("#time-cur").textContent = fmt(t);
+      const chEnd = chapStartTime.slice(curChap + 1).find((x) => isFinite(x)) ?? duration;
+      const rate = audio.playbackRate || 1;
+      $("#time-left").textContent = "−" + fmt((chEnd - t) / rate) + " · " + fmt((duration - t) / rate);
+    }
   }
+  let lastSec = -1;
   function chapterAt(t) { let c = 0; for (let i = 0; i < chapStartTime.length; i++) if (chapStartTime[i] <= t) c = i; return c; }
 
   function onSentenceChange(prevSent) {
@@ -231,15 +237,14 @@
     const inZone = r.top > top + vh * 0.18 && r.bottom < top + vh * 0.62;
     if (settings.scroll === "line" || !inZone || force) {
       const y = scrollY + r.top - top - vh * target;
-      scrollTo({ top: y, behavior: force ? "smooth" : "smooth" });
+      scrollTo({ top: y, behavior: "smooth" });
     }
   }
 
-  // rAF loop while playing
-  let raf = 0;
-  function loop() { update(false); if (!audio.paused) raf = requestAnimationFrame(loop); }
-  audio.addEventListener("play", () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(loop); $("#btn-play").textContent = "❚❚"; session.start(); });
-  audio.addEventListener("pause", () => { cancelAnimationFrame(raf); update(true); $("#btn-play").textContent = "▶"; session.stop(); savePos(); });
+  // 10 Hz sync loop while playing (cheap: one binary search + a few class toggles per tick)
+  let tick = 0;
+  audio.addEventListener("play", () => { clearInterval(tick); tick = setInterval(() => update(false), 100); $("#btn-play").textContent = "❚❚"; session.start(); });
+  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; session.stop(); savePos(); });
   audio.addEventListener("seeked", () => update(true));
   audio.addEventListener("ratechange", () => update(true));
   audio.addEventListener("error", () => { $("#loading").hidden = false; $("#loading").textContent = "Ошибка аудио: " + (audio.error?.message || audio.error?.code); });
@@ -389,7 +394,7 @@
   function stopSprint() { clearInterval(sprint.timer); sprint.end = null; sprint.stopAtSentence = false; $("#sprint-badge").hidden = true; $("#sprint-badge").classList.remove("ending"); $("#btn-sprint").classList.remove("on"); }
   function finishSprint() {
     session.stop();
-    const sents = Math.max(0, curSent - sprint.sents0), words = Math.max(0, curWord - (sprint.startWord ?? curWord));
+    const sents = Math.max(0, curSent - sprint.sents0), words = Math.max(0, curWord - Math.max(0, sprint.startWord ?? curWord));
     stopSprint();
     $("#sprint-summary").innerHTML = `${sprint.minutes} мин фокуса.<br>Прочитано: <b>${sents}</b> предложений, <b>${words}</b> слов.<br>Сделай паузу — потом ещё один.`;
     $("#sprint-done").hidden = false;
