@@ -91,7 +91,7 @@ class Handler(SimpleHTTPRequestHandler):
     def send_range(self, path: str):
         size = os.path.getsize(path)
         m = re.match(r"bytes=(\d*)-(\d*)", self.headers["Range"])
-        if not m:
+        if not m or not (m.group(1) or m.group(2)):
             self.send_error(HTTPStatus.BAD_REQUEST)
             return
         start = int(m.group(1)) if m.group(1) else max(0, size - int(m.group(2)))
