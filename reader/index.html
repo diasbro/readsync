@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>readsync</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="library" hidden>
+  <h1>readsync</h1>
+  <p class="muted">Синхронное чтение книг с аудиокнигой</p>
+  <div id="library-list"></div>
+</div>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <button class="icon" id="btn-toc" title="Оглавление (t)">☰</button>
+    <div class="topbar-title">
+      <div id="book-title"></div>
+      <div id="chapter-title" class="muted"></div>
+    </div>
+    <div id="sprint-badge" class="badge" hidden></div>
+    <button class="icon" id="btn-settings" title="Настройки">⚙</button>
+  </header>
+
+  <main id="text"></main>
+
+  <button id="return-pill" class="pill" hidden>↧ вернуться к чтению</button>
+  <div id="loading" class="center-msg">Загрузка…</div>
+
+  <footer class="player">
+    <div class="progress-wrap">
+      <div id="chapter-ticks"></div>
+      <input type="range" id="progress" min="0" max="1000" step="0.1" value="0">
+    </div>
+    <div class="controls">
+      <span id="time-cur" class="time">0:00</span>
+      <div class="controls-main">
+        <button class="ctl" id="btn-prev-sent" title="Предыдущее предложение (←)">⏮</button>
+        <button class="ctl" id="btn-back" title="−10 с (Shift+←)">−10</button>
+        <button class="ctl big" id="btn-play" title="Играть / пауза (пробел)">▶</button>
+        <button class="ctl" id="btn-fwd" title="+10 с (Shift+→)">+10</button>
+        <button class="ctl" id="btn-next-sent" title="Следующее предложение (→)">⏭</button>
+      </div>
+      <div class="controls-right">
+        <select id="speed" title="Скорость ([ / ])">
+          <option value="0.75">0.75×</option><option value="0.9">0.9×</option>
+          <option value="1" selected>1×</option><option value="1.1">1.1×</option>
+          <option value="1.25">1.25×</option><option value="1.5">1.5×</option>
+          <option value="1.75">1.75×</option><option value="2">2×</option>
+        </select>
+        <button class="ctl" id="btn-focus" title="Режим фокуса (f)">◎</button>
+        <button class="ctl" id="btn-sprint" title="Спринт-таймер">⏱</button>
+      </div>
+      <span id="time-left" class="time"></span>
+    </div>
+  </footer>
+
+  <aside id="toc" class="drawer left" hidden>
+    <div class="drawer-head"><strong>Оглавление</strong><button class="icon" data-close>✕</button></div>
+    <ol id="toc-list"></ol>
+  </aside>
+
+  <aside id="settings" class="drawer right" hidden>
+    <div class="drawer-head"><strong>Настройки</strong><button class="icon" data-close>✕</button></div>
+    <section>
+      <h4>Текст</h4>
+      <label>Размер <input type="range" id="set-font" min="15" max="28" step="1"></label>
+      <label>Интервал <input type="range" id="set-lh" min="1.3" max="2.1" step="0.05"></label>
+      <label>Ширина <input type="range" id="set-width" min="30" max="60" step="1"></label>
+      <label>Шрифт
+        <select id="set-family">
+          <option value="serif">С засечками</option>
+          <option value="sans">Без засечек</option>
+        </select></label>
+    </section>
+    <section>
+      <h4>Тема</h4>
+      <div class="seg" id="set-theme">
+        <button data-v="light">Светлая</button><button data-v="sepia">Сепия</button><button data-v="dark">Тёмная</button>
+      </div>
+    </section>
+    <section>
+      <h4>Подсветка</h4>
+      <label class="row"><input type="checkbox" id="set-word"> Подсвечивать слово</label>
+      <label class="row"><input type="checkbox" id="set-dim"> Приглушать остальной текст (фокус)</label>
+      <label>Прокрутка
+        <select id="set-scroll">
+          <option value="zone">Держать в зоне чтения</option>
+          <option value="line">Всегда по центру</option>
+          <option value="off">Выключена</option>
+        </select></label>
+      <label class="row"><input type="checkbox" id="set-click-word"> Клик по слову = перемотка на слово</label>
+    </section>
+    <section>
+      <h4>Статистика</h4>
+      <div id="stats" class="stats"></div>
+    </section>
+    <section class="muted small">
+      <h4>Клавиши</h4>
+      пробел — играть/пауза · ← → — предложения · Shift+← → — ±10 с ·
+      r — повторить предложение · [ ] — скорость · f — фокус · t — оглавление · a — вернуться к чтению
+    </section>
+  </aside>
+
+  <div id="sprint-menu" class="popup" hidden>
+    <div class="popup-title">Спринт фокуса, минут</div>
+    <div class="seg">
+      <button data-min="10">10</button><button data-min="15">15</button>
+      <button data-min="25">25</button><button data-min="45">45</button>
+    </div>
+    <div class="muted small" style="margin-top:8px">Пауза наступит на границе предложения.</div>
+    <button id="sprint-stop" class="link" hidden>Остановить спринт</button>
+  </div>
+
+  <div id="sprint-done" class="modal" hidden>
+    <div class="modal-box">
+      <h3>Спринт завершён</h3>
+      <div id="sprint-summary"></div>
+      <div class="row-btns">
+        <button id="sprint-again">Ещё один</button>
+        <button id="sprint-close" class="primary">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="note-pop" class="popup" hidden></div>
+  <div id="scrim" hidden></div>
+  <audio id="audio" preload="metadata"></audio>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
