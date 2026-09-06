@@ -11,22 +11,45 @@
   <h1>readsync</h1>
   <p class="muted">Синхронное чтение книг с аудиокнигой</p>
   <div id="library-list"></div>
+  <details id="add-book">
+    <summary>Добавить книгу</summary>
+    <form id="add-form">
+      <label>Название <input name="title" required placeholder="Как в библиотеке"></label>
+      <label>Автор <input name="author"></label>
+      <label>Текст, ссылка <input name="text_url" placeholder="https://reader.fantasy-worlds.org/book/NNNNN/read.html"></label>
+      <label>или файл <input type="file" name="text_file" accept=".fb2,.zip,.html,.htm"></label>
+      <label>Аудио, ссылка YouTube <input name="audio_url" placeholder="необязательно"></label>
+      <label>или файл <input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3"></label>
+      <label>Чтец <input name="narrator"></label>
+      <label class="row"><input type="checkbox" name="align"> Точное выравнивание сразу (долго, греет ноутбук; можно позже: <code>make align slug=…</code>)</label>
+      <div class="row-btns"><button type="submit" class="primary">Загрузить</button></div>
+      <div id="add-msg" class="muted"></div>
+    </form>
+  </details>
+  <div id="jobs"></div>
 </div>
 
 <div id="app" hidden>
   <header class="topbar">
     <button class="icon" id="btn-toc" title="Оглавление (t)">☰</button>
     <div class="topbar-title">
-      <div id="book-title"></div>
+      <a id="book-title" href="/" title="Библиотека"></a>
       <div id="chapter-title" class="muted"></div>
     </div>
     <div id="sprint-badge" class="badge" hidden></div>
+    <button class="icon" id="btn-mode" title="Режим: книга без аудио / с аудио (m)">📖</button>
     <button class="icon" id="btn-settings" title="Настройки">⚙</button>
   </header>
 
   <main id="text"></main>
 
   <button id="return-pill" class="pill" hidden>↧ вернуться к чтению</button>
+  <footer id="pager" class="pager" hidden>
+    <button class="ctl" id="pg-prev" title="Назад (←)">‹</button>
+    <span id="pg-info"></span>
+    <button class="ctl" id="pg-next" title="Вперёд (→, пробел)">›</button>
+    <button class="ctl" id="pg-sprint" title="Спринт-таймер">⏱</button>
+  </footer>
   <div id="loading" class="center-msg">Загрузка…</div>
 
   <footer class="player">
@@ -68,7 +91,7 @@
       <h4>Текст</h4>
       <label>Размер <input type="range" id="set-font" min="15" max="28" step="1"></label>
       <label>Интервал <input type="range" id="set-lh" min="1.3" max="2.1" step="0.05"></label>
-      <label>Ширина <input type="range" id="set-width" min="30" max="60" step="1"></label>
+      <label>Ширина <input type="range" id="set-width" min="34" max="80" step="1"></label>
       <label>Насыщенность <input type="range" id="set-weight" min="330" max="600" step="10"></label>
       <label>Шрифт текста
         <select id="set-family">
@@ -103,7 +126,7 @@
         <button data-v="dark">Тёмная</button><button data-v="night">Ночная (тёплая)</button>
       </div>
     </section>
-    <section>
+    <section data-mode="audio">
       <h4>Подсветка</h4>
       <label class="row"><input type="checkbox" id="set-sent"> Подсвечивать предложение</label>
       <label class="row"><input type="checkbox" id="set-word"> Подсвечивать слово</label>
@@ -127,7 +150,7 @@
         </select></label>
       <label class="row"><input type="checkbox" id="set-click-word"> Клик по слову = перемотка на слово</label>
     </section>
-    <section>
+    <section data-mode="audio">
       <h4>Фокус</h4>
       <label class="row"><input type="checkbox" id="set-hide-ui"> Прятать панели во время чтения</label>
       <label class="row"><input type="checkbox" id="set-pause-hidden"> Пауза при уходе из вкладки</label>
@@ -137,10 +160,16 @@
       <h4>Статистика</h4>
       <div id="stats" class="stats"></div>
     </section>
-    <section class="muted small">
+    <section class="muted small" data-mode="audio">
       <h4>Клавиши</h4>
       пробел — играть/пауза · ← → — предложения · Shift+← → — ±10 с ·
-      r — повторить предложение · [ ] — скорость · f — фокус · t — оглавление · a — вернуться к чтению
+      r — повторить предложение · [ ] — скорость · f — фокус · t — оглавление · a — вернуться к чтению ·
+      m — режим книги
+    </section>
+    <section class="muted small" data-mode="pages">
+      <h4>Клавиши</h4>
+      ← → пробел — листать · Shift+пробел — назад · Home / End — начало и конец ·
+      t — оглавление · m — вернуться к аудио
     </section>
   </aside>
 

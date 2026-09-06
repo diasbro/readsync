@@ -127,7 +127,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("slug")
     ap.add_argument("--text", required=True)
-    ap.add_argument("--audio", required=True)
+    ap.add_argument("--audio", default="", help="YouTube URL or local audio file; omit for a text-only book")
     ap.add_argument("--title", default="")
     ap.add_argument("--author", default="")
     ap.add_argument("--narrator", default="")
@@ -140,15 +140,16 @@ def main() -> None:
     d.mkdir(parents=True, exist_ok=True)
     kind = fetch_text(args.text, d)
     run([PY, str(PIPE / ("extract_fb2.py" if kind == "fb2" else "extract_text.py")), str(d)])
-    audio_src = fetch_audio(args.audio, d, args.lang)
-    prepare_audio(audio_src, d)
-    if audio_src.suffix.lower() == ".mp3" and not (d / "audio.mp3").exists():
-        (d / "audio.mp3").symlink_to(audio_src.name)
-    if not list(d.glob("yt.*.json3")) and not (d / "whisper.json3").exists():
-        print("no captions: transcribing with faster-whisper (slow)", flush=True)
-        run([PY, str(PIPE / "transcribe.py"), str(d), "--model", args.whisper_model, "--lang", args.lang])
-    run([PY, str(PIPE / "anchors.py"), str(d)])
-    run([PY, str(PIPE / "timing_from_anchors.py"), str(d)])
+    if args.audio:
+        audio_src = fetch_audio(args.audio, d, args.lang)
+        prepare_audio(audio_src, d)
+        if audio_src.suffix.lower() == ".mp3" and not (d / "audio.mp3").exists():
+            (d / "audio.mp3").symlink_to(audio_src.name)
+        if not list(d.glob("yt.*.json3")) and not (d / "whisper.json3").exists():
+            print("no captions: transcribing with faster-whisper (slow)", flush=True)
+            run([PY, str(PIPE / "transcribe.py"), str(d), "--model", args.whisper_model, "--lang", args.lang])
+        run([PY, str(PIPE / "anchors.py"), str(d)])
+        run([PY, str(PIPE / "timing_from_anchors.py"), str(d)])
 
     import json
 
@@ -163,8 +164,10 @@ def main() -> None:
             f'narrator = "{esc(args.narrator)}"\n',
             encoding="utf-8",
         )
-    print(f"\nready: http://127.0.0.1:8765/?book={args.slug}  (caption timing)")
-    if not args.no_align:
+    print(
+        f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)")
+    )
+    if args.audio and not args.no_align:
         print("running precise MMS alignment (about 7 min per hour of audio)...", flush=True)
         run([PY, str(PIPE / "align.py"), str(d)])
         print("done: precise timing")

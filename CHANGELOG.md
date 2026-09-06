@@ -7,5 +7,8 @@
 - Reader: synced sentence/word highlighting, auto-scroll with a reading zone, focus dimming,
   sprint timer with sentence-boundary pause and rest breaks, stats, five themes, bundled fonts.
 - Server with HTTP Range support and a library page.
+- Library page with an add-book form (URL or file, audio optional) and job progress; text-only books.
+- Page mode: two-column spread without audio, keyboard/wheel/click turning, position kept by sentence.
+- Server-side state (position, settings, stats, mode) shared across browsers.
 - Bundled OFL fonts (Literata, PT Serif, Merriweather, Inter, Golos Text, IBM Plex Sans), text weight,
   sentence-level dimming, rewind to sentence start after a pause, highlight offset, weekly stats.
