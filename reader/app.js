@@ -50,10 +50,41 @@
     store.set("rs:settings", settings);
   }
   applySettings();
+  // Settings are global (books/settings.json); localStorage only caches them. Both pages use the
+  // same two functions: pull the newer copy from the server, push local changes after a short delay.
+  let settingsTimer = 0, onSettingsSynced = () => {};
+  function persistSettings() {
+    const at = Date.now(); store.set("rs:settingsAt", at);
+    clearTimeout(settingsTimer);
+    settingsTimer = setTimeout(() => fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings, settingsAt: at }) }).catch(() => {}), 400);
+  }
+  function adoptSettings(remoteSettings) {
+    if (remoteSettings && remoteSettings.settings && (remoteSettings.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
+      Object.assign(settings, remoteSettings.settings); store.set("rs:settingsAt", remoteSettings.settingsAt); applySettings(); onSettingsSynced();
+      return true;
+    }
+    if (store.get("rs:settingsAt", 0) > ((remoteSettings && remoteSettings.settingsAt) || 0)) persistSettings();
+    return false;
+  }
+  const fetchSettings = () => fetch("/api/settings").then((r) => r.json()).catch(() => ({}));
 
   // ---------------- library ----------------
   if (!slug) {
     $("#library").hidden = false;
+    fetchSettings().then(adoptSettings);
+    // view preferences: the two settings that shape every page (theme, interface font)
+    const prefs = $("#lib-prefs");
+    function syncPrefsUI() {
+      document.querySelectorAll("#lib-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
+      $("#lib-ui").value = settings.ui;
+    }
+    onSettingsSynced = syncPrefsUI;
+    syncPrefsUI();
+    $("#lib-settings").onclick = (e) => { e.stopPropagation(); prefs.hidden = !prefs.hidden; };
+    addEventListener("click", (e) => { if (!e.target.closest("#lib-prefs, #lib-settings")) prefs.hidden = true; });
+    addEventListener("keydown", (e) => { if (e.key === "Escape") prefs.hidden = true; });
+    $("#lib-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); persistSettings(); syncPrefsUI(); });
+    $("#lib-ui").addEventListener("input", (e) => { settings.ui = e.target.value; applySettings(); persistSettings(); syncPrefsUI(); });
     // header: the sentence you stopped at in the current book, with the word highlight walking
     // along it; a click opens the book right there (the reader always starts paused)
     // three looks: "audio" walks the word highlight along the line; "pages" is a still line with a
@@ -295,15 +326,9 @@
   let remote = {}, remoteSettings = {};
   const loadRemote = () => Promise.all([
     fetch(`/api/state/${slug}`).then((r) => r.json()).then((s) => (remote = s || {})).catch(() => (remote = {})),
-    fetch("/api/settings").then((r) => r.json()).then((s) => (remoteSettings = s || {})).catch(() => (remoteSettings = {})),
+    fetchSettings().then((s) => (remoteSettings = s || {})),
   ]);
   const putState = (patch, keepalive) => fetch(`/api/state/${slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch), keepalive: !!keepalive }).catch(() => {});
-  let settingsTimer = 0;
-  function persistSettings() {
-    const at = Date.now(); store.set("rs:settingsAt", at);
-    clearTimeout(settingsTimer);
-    settingsTimer = setTimeout(() => fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings, settingsAt: at }) }).catch(() => {}), 400);
-  }
 
   async function load() {
     const [meta, bookJ, timingJ] = await Promise.all([
@@ -313,15 +338,12 @@
       loadRemote(),
     ]);
     // settings are global on the server; older per-book copies migrate the first time they are seen
-    if (!remoteSettings.settings && remote.settings) {
+    if (!remoteSettings.settings && remote.settings) {  // per-book copy from an older version: promote it to global
       remoteSettings = { settings: remote.settings, settingsAt: remote.settingsAt || 1 };
       fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(remoteSettings) }).catch(() => {});
     }
-    if (remoteSettings.settings && (remoteSettings.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
-      Object.assign(settings, remoteSettings.settings); store.set("rs:settingsAt", remoteSettings.settingsAt); applySettings(); syncSettingsUI();
-    } else if (store.get("rs:settingsAt", 0) > (remoteSettings.settingsAt || 0)) {
-      persistSettings();
-    }
+    onSettingsSynced = syncSettingsUI;
+    adoptSettings(remoteSettings);
     const localStats = store.get("rs:stats:" + slug, null);
     if (localStats) putState({ stats: localStats }).then((r) => r && r.json()).then((s) => { if (s && s.stats) store.set("rs:stats:" + slug, s.stats); }).catch(() => {});
     else if (remote.stats) store.set("rs:stats:" + slug, remote.stats);
@@ -656,9 +678,7 @@
         audio.currentTime = remote.pos; posDirty = false; store.set("rs:pos:" + slug, remote.pos); store.set("rs:posAt:" + slug, remote.posAt);
         update(true); scrollToCurrent(true);
       }
-      if (remoteSettings.settings && (remoteSettings.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
-        Object.assign(settings, remoteSettings.settings); store.set("rs:settingsAt", remoteSettings.settingsAt); applySettings(); syncSettingsUI();
-      }
+      adoptSettings(remoteSettings);
     });
   });
   function toggle() { audio.paused ? play() : audio.pause(); }
