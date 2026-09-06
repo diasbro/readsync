@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Library: wishlist with multi-library text search and auto-load, shelves, covers, header line.
+- Library: one add line (title, link or file), titles without text wait in the catalog, multi-library
+  text search with auto-load, shelves, covers, header line, quick find.
 - Import: EPUB, TXT, HTML, multi-volume text, multi-part audio, illustrations.
 - Reader: page mode, server-side state and settings, fonts and themes, focus tools.
 
