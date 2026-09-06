@@ -73,6 +73,12 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .demo-line.link { cursor: pointer; }
 .demo-line.link:hover .w { color: var(--fg); }
 .demo-line .src { font-family: var(--ui); font-size: 12px; color: var(--muted); white-space: nowrap; }
+/* page look: a still line with a thin page edge on the left; random look: a quotation mark */
+.demo[data-look="pages"] .demo-line { padding-left: 14px; border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); color: var(--fg); }
+.demo[data-look="random"] .demo-line { font-style: italic; }
+.demo[data-look="random"] .demo-line::before { content: "«"; color: var(--accent); margin-right: 2px; }
+.demo[data-look="random"] .demo-line .src::before { content: "» "; color: var(--accent); font-style: normal; }
+.demo[data-look="plain"] .demo-line { color: var(--muted); }
 .demo-line { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .eq { display: inline-flex; align-items: flex-end; gap: 3px; height: 18px; width: 22px; }
 .eq i { flex: 1; background: var(--accent); border-radius: 2px; height: 30%; opacity: .8; animation: eq 1.1s ease-in-out infinite; }
@@ -197,8 +203,9 @@ body.sent-hl #text .s.cur { background: var(--sent-bg); }
 body.word-hl #text .w.cur { background: var(--word-bg); }
 body.word-hl.word-underline #text .w.cur { background: none; box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 65%, transparent); }
 /* focus dimming works through text color so the current sentence can stay bright inside a dimmed block */
-body.dim-para #text .blk, body.dim-sent #text .blk { color: color-mix(in srgb, var(--fg) 32%, var(--bg)); transition: color .3s; }
-body.dim-para #text .blk.cur, body.dim-sent #text .s.cur { color: var(--fg); }
+/* dimming belongs to audio mode only: in page mode and in books without audio nothing is "current" */
+body.dim-para:not(.pages) #text .blk, body.dim-sent:not(.pages) #text .blk { color: color-mix(in srgb, var(--fg) 32%, var(--bg)); transition: color .3s; }
+body.dim-para:not(.pages) #text .blk.cur, body.dim-sent:not(.pages) #text .s.cur { color: var(--fg); }
 #text .fig { margin: 1.4em 0; text-align: center; break-inside: avoid; }
 #text .fig img { max-width: 100%; height: auto; max-height: 70vh; border-radius: 6px; }
 body.pages #text .fig img { max-height: 60vh; }
@@ -209,7 +216,7 @@ html[data-theme="dark"] #text .fig img, html[data-theme="night"] #text .fig img 
 .center-msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); }
 
 /* ---------- page mode: two-column spread, turned like a book ---------- */
-body.pages { overflow: hidden; }
+body.pages { overflow: hidden; overscroll-behavior: none; }
 body.pages .player, body.pages #return-pill { display: none !important; }
 body.pages #text { position: fixed; top: var(--topbar-h); bottom: var(--pager-h); left: 50%; transform: translateX(-50%);
   width: min(100vw - 56px, calc(var(--width) * 2 + 4rem)); max-width: none; margin: 0; padding: 32px 0 12px;
@@ -301,7 +308,7 @@ body.hide-player .player.peek { opacity: 1; pointer-events: auto; }
   padding: 12px 14px; box-shadow: 0 10px 30px rgba(0,0,0,.2); max-width: 340px; font-size: 14px; line-height: 1.5; }
 .popup-title { font-weight: 600; margin-bottom: 8px; }
 #sprint-menu { right: 14px; bottom: calc(var(--player-h) + 10px); }
-#sprint-menu .seg button { padding: 8px 10px; }
+#sprint-menu .seg button { padding: 8px 10px; min-width: 0; flex: 1 1 0; }
 .link { background: none; border: 0; color: var(--accent); padding: 8px 0 0; }
 .modal { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; }
 .modal-box { background: var(--panel); border-radius: 14px; padding: 22px 24px; width: min(420px, 90vw); font-size: 15px; line-height: 1.6; }

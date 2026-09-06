@@ -451,12 +451,41 @@ def _book_and_timing(slug: str) -> tuple[dict, list]:
     return book, words
 
 
+def random_sentence(slug: str) -> dict:
+    """A random mid-length sentence from a paragraph of the book (for finished books on the library page)."""
+    import random
+
+    book, _ = _book_and_timing(slug)
+    paras = [b for b in book["blocks"] if b["kind"] == "p" and b.get("audio", True)]
+    for _ in range(200):
+        blk = random.choice(paras)
+        if not blk["sentences"]:
+            continue
+        a, e = random.choice(blk["sentences"])
+        text = blk["text"][a:e].strip()
+        if 40 <= len(text) <= 160:
+            return {
+                "text": text,
+                "chapter": book["chapters"][blk["chapter"]]["title"],
+                "title": book.get("title", ""),
+                "mode": "random",
+            }
+    blk = paras[0]
+    return {
+        "text": blk["text"][: blk["sentences"][0][1]] if blk["sentences"] else blk["text"][:120],
+        "chapter": "",
+        "title": book.get("title", ""),
+        "mode": "random",
+    }
+
+
 def where_now(slug: str) -> dict:
     """The sentence the reader stopped at: by audio position for audio books, by sentence index otherwise."""
     st = load_state(slug)
     book, words = _book_and_timing(slug)
     blocks = book["blocks"]
-    if words and st.get("mode") != "pages":
+    audio_mode = bool(words) and st.get("mode") != "pages"
+    if audio_mode:
         pos = float(st.get("pos", 0) or 0)
         lo, hi = 0, len(words) - 1
         while lo < hi:
@@ -484,7 +513,12 @@ def where_now(slug: str) -> dict:
             bi, rng = len(blocks) - 1, blocks[-1]["sentences"][-1] if blocks and blocks[-1]["sentences"] else [0, 0]
     blk = blocks[bi]
     chapter = book["chapters"][blk["chapter"]]["title"] if book.get("chapters") else ""
-    return {"text": blk["text"][rng[0] : rng[1]].strip(), "chapter": chapter, "title": book.get("title", "")}
+    return {
+        "text": blk["text"][rng[0] : rng[1]].strip(),
+        "chapter": chapter,
+        "title": book.get("title", ""),
+        "mode": "audio" if audio_mode else "pages",
+    }
 
 
 def slugify(title: str) -> str:
@@ -578,8 +612,8 @@ def start_job(form: dict) -> tuple[dict | None, str]:
     for k, flag in (("title", "--title"), ("author", "--author"), ("narrator", "--narrator")):
         if val(k):
             cmd += [flag, val(k)]
-    log = open(d / "add.log", "w", encoding="utf-8")  # noqa: SIM115
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)
+    with open(d / "add.log", "w", encoding="utf-8") as log:  # the child inherits the handle; ours closes here
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)
     JOBS[slug] = {"proc": proc, "started": time.time(), "slug": slug}
     return {"slug": slug}, ""
 
@@ -673,6 +707,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not SLUG_RE.match(slug) or not (BOOKS / slug / "book.json").exists():
                 return self.send_json({"error": "unknown book"}, HTTPStatus.NOT_FOUND)
             try:
+                if "random=1" in self.path:
+                    return self.send_json(random_sentence(slug))
                 return self.send_json(where_now(slug))
             except Exception as e:  # noqa: BLE001
                 return self.send_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)

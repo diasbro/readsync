@@ -1,6 +1,6 @@
 """Coarse anchoring of book words to audio time using YouTube auto-captions (json3).
 
-Produces data/anchors.json:
+Produces anchors.json in the book directory:
 {
   "words":   [[block_idx, char_start, char_end], ...],   # every word of narrated blocks, in order
   "anchors": [[word_idx, t_start, t_end], ...],           # confident matches (runs of >= MIN_RUN equal words)

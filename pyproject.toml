@@ -3,19 +3,25 @@ name = "readsync"
 version = "0.1.0"
 description = "Immersion reading: book text synced with an audiobook, with focus and eye-care tooling"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
 dependencies = [
   "beautifulsoup4",
   "lxml",
   "numpy",
   "soundfile",
   "ctc-forced-aligner==1.0.2",
+  "onnxruntime",
   "unidecode",
   "faster-whisper",
 ]
 
+# the repository is scripts plus a static reader, not an importable package: install only the dependencies
+[tool.setuptools]
+packages = []
+py-modules = []
+
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "fonttools", "brotli"]
+dev = ["pytest", "ruff==0.16.6", "fonttools", "brotli"]
 
 [tool.ruff]
 line-length = 120
