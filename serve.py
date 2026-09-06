@@ -95,6 +95,25 @@ def list_books() -> list[dict]:
             next((f for f in (d / "images").glob("cover.*") if f.is_file()), None) if (d / "images").is_dir() else None
         )
         meta["cover"] = f"images/{cover.name}" if cover else None
+        st = load_state(d.name)
+        duration = 0.0
+        if (d / "timing.json").exists():
+            with contextlib.suppress(OSError, ValueError), (d / "timing.json").open("rb") as fh:
+                m = re.search(rb'"duration":\s*([\d.]+)', fh.read(300))
+                duration = float(m.group(1)) if m else 0.0
+        pos = float(st.get("pos", 0) or 0)
+        # finished: the audio position is within a minute of the end, or the last spread of a text-only book
+        finished = (duration > 0 and pos >= duration - 60) or (duration == 0 and (st.get("sentPct") or 0) >= 99)
+        meta["state"] = {
+            "opened": st.get("opened", 0),
+            "shelf": st.get("shelf", ""),
+            "pos": pos,
+            "duration": duration,
+            "sent": st.get("sent", 0),
+            "sentPct": st.get("sentPct", 0),
+            "seconds": sum(v.get("sec", 0) for v in (st.get("stats") or {}).get("days", {}).values()),
+            "finished": bool(finished),
+        }
         if (d / "timing.json").exists():
             try:
                 with (d / "timing.json").open("rb") as fh:
@@ -126,7 +145,7 @@ def merge_state(slug: str, patch: dict) -> dict:
     """Last writer wins per key (by client timestamp in <key>At); stats days are merged by max."""
     with STATE_LOCK:
         st = load_state(slug)
-        for key in ("pos", "sent", "mode", "settings"):
+        for key in ("pos", "sent", "mode", "settings", "opened", "shelf"):
             if key in patch and patch.get(key + "At", 0) >= st.get(key + "At", 0):
                 st[key], st[key + "At"] = patch[key], patch.get(key + "At", 0)
                 if key == "sent" and "sentPct" in patch:
@@ -415,6 +434,59 @@ def search_text(query: str) -> dict:
     return {"hits": out[:12], "errors": errors}
 
 
+_WHERE_CACHE: dict[str, tuple[float, float, dict, list]] = {}
+
+
+def _book_and_timing(slug: str) -> tuple[dict, list]:
+    """book.json and timing words, cached by file mtimes (the files are a few MB)."""
+    d = BOOKS / slug
+    bm = (d / "book.json").stat().st_mtime
+    tm = (d / "timing.json").stat().st_mtime if (d / "timing.json").exists() else 0.0
+    hit = _WHERE_CACHE.get(slug)
+    if hit and hit[0] == bm and hit[1] == tm:
+        return hit[2], hit[3]
+    book = json.loads((d / "book.json").read_text(encoding="utf-8"))
+    words = json.loads((d / "timing.json").read_text(encoding="utf-8"))["words"] if tm else []
+    _WHERE_CACHE[slug] = (bm, tm, book, words)
+    return book, words
+
+
+def where_now(slug: str) -> dict:
+    """The sentence the reader stopped at: by audio position for audio books, by sentence index otherwise."""
+    st = load_state(slug)
+    book, words = _book_and_timing(slug)
+    blocks = book["blocks"]
+    if words and st.get("mode") != "pages":
+        pos = float(st.get("pos", 0) or 0)
+        lo, hi = 0, len(words) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if words[mid][3] <= pos:
+                lo = mid
+            else:
+                hi = mid - 1
+        bi, cs = words[lo][0], words[lo][1]
+        blk = blocks[bi]
+        rng = next(
+            (r for r in blk["sentences"] if r[0] <= cs < r[1]),
+            blk["sentences"][-1] if blk["sentences"] else [0, len(blk["text"])],
+        )
+    else:
+        target = int(st.get("sent", 0) or 0)
+        n = 0
+        bi, rng = 0, [0, 0]
+        for i, blk in enumerate(blocks):
+            if n + len(blk["sentences"]) > target:
+                bi, rng = i, blk["sentences"][target - n]
+                break
+            n += len(blk["sentences"])
+        else:
+            bi, rng = len(blocks) - 1, blocks[-1]["sentences"][-1] if blocks and blocks[-1]["sentences"] else [0, 0]
+    blk = blocks[bi]
+    chapter = book["chapters"][blk["chapter"]]["title"] if book.get("chapters") else ""
+    return {"text": blk["text"][rng[0] : rng[1]].strip(), "chapter": chapter, "title": book.get("title", "")}
+
+
 def slugify(title: str) -> str:
     s = "".join(TRANSLIT.get(c, c) for c in title.lower())
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:48]
@@ -542,6 +614,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return str(target)
             return str(BOOKS / "__forbidden__")
         rel = path.lstrip("/") or "index.html"
+        if rel == "favicon.ico":  # browsers ask for it regardless of <link rel=icon>
+            rel = "favicon.png"
         target = (READER / rel).resolve()
         if target == READER.resolve() or READER.resolve() in target.parents:
             return str(target)
@@ -594,6 +668,14 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(load_settings())
         if self.path.startswith("/api/wishlist"):
             return self.send_json(load_wishlist())
+        if self.path.startswith("/api/where/"):
+            slug = self.path.rsplit("/", 1)[-1].split("?")[0]
+            if not SLUG_RE.match(slug) or not (BOOKS / slug / "book.json").exists():
+                return self.send_json({"error": "unknown book"}, HTTPStatus.NOT_FOUND)
+            try:
+                return self.send_json(where_now(slug))
+            except Exception as e:  # noqa: BLE001
+                return self.send_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         if self.path.startswith("/api/search"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0].strip()
             if not q:

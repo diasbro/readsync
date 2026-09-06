@@ -54,27 +54,46 @@
   // ---------------- library ----------------
   if (!slug) {
     $("#library").hidden = false;
+    // header: the sentence you stopped at in the current book, with the word highlight walking
+    // along it; a click opens the book right there (the reader always starts paused)
+    let demoTimer = 0;
+    function runDemo(text, bookTitle, href) {
+      const line = $("#demo-line");
+      const words = text.split(/\s+/).filter(Boolean);
+      line.innerHTML = words.map((w) => `<span class="w">${esc(w)}</span>`).join(" ") + (bookTitle ? ` <span class="src">· ${esc(bookTitle)}</span>` : "");
+      line.classList.toggle("link", !!href);
+      line.onclick = href ? () => { location.href = href; } : null;
+      const ws = line.querySelectorAll(".w");
+      let i = 0; ws[0]?.classList.add("cur");
+      clearInterval(demoTimer);
+      if (!matchMedia("(prefers-reduced-motion: reduce)").matches && ws.length > 1) {
+        demoTimer = setInterval(() => { if (document.hidden) return; ws[i].classList.remove("cur"); i = (i + 1) % ws.length; ws[i].classList.add("cur"); }, 520);
+      }
+    }
+    runDemo("Голос ведёт, глаза не отстают", "", "");
     const toast = (msg) => { const el = document.createElement("div"); el.className = "toast"; el.textContent = msg; document.body.appendChild(el); setTimeout(() => el.remove(), 3000); };
     const q = (x) => encodeURIComponent(x);
     const norm = (x) => (x || "").toLowerCase().replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
     const SOURCE = { "fantasy-worlds": "fantasy-worlds", flibusta: "Flibusta", coollib: "Coollib" };
 
     // ---- library cards; text-only books can get audio attached right here ----
+    // Shelves: a book with more than 10 minutes of reading is "reading now" unless moved by hand;
+    // within a shelf the most recently opened book comes first, never-opened ones by title.
     let books = [], open = null;
-    async function renderLibrary() {
-      books = await fetch("/api/books").then((r) => r.json());
-      const list = $("#library-list");
-      if (!books.length) { list.innerHTML = '<p class="muted small">Пока нет книг. Сохрани название ниже.</p>'; return; }
-      const states = await Promise.all(books.map((b) => fetch(`/api/state/${b.slug}`).then((r) => r.json()).catch(() => ({}))));
-      list.innerHTML = books.map((b, i) => {
-        const st = states[i];
-        const pos = st.pos ?? store.get("rs:pos:" + b.slug, 0), dur = store.get("rs:dur:" + b.slug, 0);
-        const pct = b.has_audio ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
+    const READING_SEC = 600;
+    // finished books leave "reading now" on their own; a manual move (re-reading) always wins
+    const shelfOf = (b) => (b.state.shelf ? b.state.shelf : b.state.finished ? "library" : b.state.seconds > READING_SEC ? "reading" : "library");
+    const setShelf = (slug, shelf) => fetch(`/api/state/${slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shelf, shelfAt: Date.now() }) });
+    function cardHtml(b, shelf) {
+        const st = b.state;
+        const pos = st.pos || 0, dur = st.duration || store.get("rs:dur:" + b.slug, 0);
+        const pct = st.finished ? 100 : b.has_audio ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
         const meta = [b.author, b.has_audio && b.narrator ? "читает " + b.narrator : null, !b.ready ? (b.building ? "загружается…" : "не готово") : null].filter(Boolean).join(" · ");
-        const tags = b.ready ? '<span class="tag">текст</span>' + (b.has_audio ? '<span class="tag">аудио</span>' : "") : "";
-        const where = !b.ready ? "" : b.has_audio ? (pct ? `прочитано ${pct}% · ${fmt(pos)}` : "не начато") : (st.sent ? `прочитано ${pct}%` : "не начато");
+        const tags = b.ready ? '<span class="tag">текст</span>' + (b.has_audio ? '<span class="tag">аудио</span>' : "") + (st.finished ? '<span class="tag done">прочитано</span>' : "") : "";
+        const where = !b.ready ? "" : st.finished ? "прочитано целиком" : b.has_audio ? (pct ? `прочитано ${pct}% · ${fmt(pos)}` : "не начато") : (st.sent ? `прочитано ${pct}%` : "не начато");
         const cover = b.cover ? `<img class="cover" src="/books/${esc(b.slug)}/${esc(b.cover)}" alt="">` : `<div class="cover empty">${esc((b.title || b.slug).slice(0, 1))}</div>`;
-        const side = b.ready && !b.has_audio && !b.building ? `<div class="side"><button class="btn sm attach-btn" data-slug="${esc(b.slug)}">＋ аудио</button></div>` : "<div></div>";
+        const move = b.ready ? (shelf === "reading" ? `<button class="link-btn shelf-btn" data-slug="${esc(b.slug)}" data-shelf="library">убрать из текущих</button>` : `<button class="link-btn shelf-btn" data-slug="${esc(b.slug)}" data-shelf="reading">в текущие</button>`) : "";
+        const side = `<div class="side">${b.ready && !b.has_audio && !b.building ? `<button class="btn sm attach-btn" data-slug="${esc(b.slug)}">＋ аудио</button>` : ""}${move}</div>`;
         const form = open === b.slug ? `<div class="attach-form" data-slug="${esc(b.slug)}">
             <textarea name="audio_url" rows="2" placeholder="Ссылки на аудио: YouTube, части по одной в строке"></textarea>
             <input name="narrator" placeholder="Чтец (необязательно)">
@@ -83,10 +102,25 @@
         return `<div class="card${form ? " attach" : ""}" data-slug="${esc(b.slug)}">${form ? "" : `<a class="cover-link" href="${b.ready ? "?book=" + esc(b.slug) : "#"}">${cover}</a>`}
           <div class="body">${form ? `<div class="t">${esc(b.title || b.slug)}</div><div class="m">Аудио для этой книги. Найди голос сам: <a target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${q((b.title || "") + " аудиокнига")}">YouTube</a></div>${form}` :
             `<a href="${b.ready ? "?book=" + esc(b.slug) : "#"}" class="tlink"><div class="t">${esc(b.title || b.slug)}${tags}</div></a><div class="m">${esc(meta)}</div>
-          <div class="bar"><i style="width:${pct}%"></i></div><div class="m">${where}</div>`}</div>${form ? "" : side}</div>`;
-      }).join("");
+          <div class="bar${pct ? "" : " empty"}"><i style="width:${pct}%"></i></div><div class="m${pct ? "" : " empty"}">${where}</div>`}</div>${form ? "" : side}</div>`;
     }
-    $("#library-list").addEventListener("click", async (e) => {
+    async function renderLibrary() {
+      books = await fetch("/api/books").then((r) => r.json());
+      const list = $("#library-list");
+      if (!books.length) { list.innerHTML = '<p class="muted small">Пока нет книг. Сохрани название ниже.</p>'; $("#reading-section").hidden = true; return; }
+      const byOpened = (a, b) => (b.state.opened || 0) - (a.state.opened || 0) || (a.title || "").localeCompare(b.title || "", "ru");
+      const reading = books.filter((b) => shelfOf(b) === "reading").sort(byOpened);
+      const rest = books.filter((b) => shelfOf(b) !== "reading").sort(byOpened);
+      $("#lib-title").textContent = reading.length ? "Остальные" : "Библиотека";
+      const current = reading[0] || books.filter((b) => b.ready && b.state.opened).sort(byOpened)[0];
+      if (current) fetch(`/api/where/${current.slug}`).then((r) => r.json()).then((w) => { if (w && w.text) runDemo(w.text, current.title, "?book=" + current.slug); }).catch(() => {});
+      $("#reading-section").hidden = !reading.length;
+      $("#reading-list").innerHTML = reading.map((b) => cardHtml(b, "reading")).join("");
+      list.innerHTML = rest.map((b) => cardHtml(b, "library")).join("");
+    }
+    $("#library").addEventListener("click", async (e) => {
+      const mv = e.target.closest(".shelf-btn");
+      if (mv) { await setShelf(mv.dataset.slug, mv.dataset.shelf); renderLibrary(); return; }
       const btn = e.target.closest(".attach-btn");
       if (btn) { open = btn.dataset.slug; renderLibrary(); return; }
       if (e.target.closest(".attach-cancel")) { open = null; renderLibrary(); return; }
@@ -275,6 +309,7 @@
     if (!meta) throw new Error("книга не найдена");
     hasAudio = !!(timingJ && meta.audio);
     book = bookJ; duration = hasAudio ? timingJ.duration : 0;
+    { const now = Date.now(); putState({ opened: now, openedAt: now }); }  // library sorts by last opened
     document.title = book.title + " — readsync";
     $("#book-title").textContent = book.title;
     const words = hasAudio ? timingJ.words : [];
