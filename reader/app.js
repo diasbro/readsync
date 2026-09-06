@@ -14,6 +14,7 @@
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
   };
   const today = () => new Date().toISOString().slice(0, 10);
+  const pages = { on: false, spreadW: 0, total: 1, cur: 0, sent: 0 };  // page-mode state (declared early: applySettings reads it)
 
   // ---------------- settings ----------------
   const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", sent: true, word: true, wordStyle: "bg",
@@ -43,6 +44,7 @@
     document.body.classList.toggle("sent-hl", !!settings.sent);
     document.body.classList.toggle("word-hl", !!settings.word);
     document.body.classList.toggle("word-underline", settings.wordStyle === "underline");
+    if (pages.on) requestAnimationFrame(() => { pagesLayout(); goToSentence(pages.sent, false); });
     document.body.classList.toggle("dim-para", settings.dimMode === "para");
     document.body.classList.toggle("dim-sent", settings.dimMode === "sent");
     store.set("rs:settings", settings);
@@ -52,17 +54,42 @@
   // ---------------- library ----------------
   if (!slug) {
     $("#library").hidden = false;
-    fetch("/api/books").then((r) => r.json()).then(async (books) => {
+    async function renderLibrary() {
+      const books = await fetch("/api/books").then((r) => r.json());
       const list = $("#library-list");
-      if (!books.length) { list.innerHTML = '<p class="muted">Нет книг. Добавь папку в books/ с book.toml.</p>'; return; }
+      if (!books.length) { list.innerHTML = '<p class="muted">Пока нет книг. Добавь первую ниже.</p>'; return; }
       const states = await Promise.all(books.map((b) => fetch(`/api/state/${b.slug}`).then((r) => r.json()).catch(() => ({}))));
       list.innerHTML = books.map((b, i) => {
-        const pos = states[i].pos ?? store.get("rs:pos:" + b.slug, 0), dur = store.get("rs:dur:" + b.slug, 0);
-        const pct = dur ? Math.round((pos / dur) * 100) : 0;
-        const meta = [b.author, b.narrator ? "читает " + b.narrator : null, b.ready ? (b.timing_source === "mms" ? "точная синхронизация" : "синхронизация по субтитрам") : "не готово"].filter(Boolean).join(" · ");
-        return `<a class="card" href="?book=${esc(b.slug)}"><div class="t">${esc(b.title || b.slug)}</div><div class="m">${esc(meta)}</div>
-          <div class="bar"><i style="width:${pct}%"></i></div><div class="m">${pct ? "прочитано " + pct + "% · " + fmt(pos) : "не начато"}</div></a>`;
+        const st = states[i];
+        const pos = st.pos ?? store.get("rs:pos:" + b.slug, 0), dur = store.get("rs:dur:" + b.slug, 0);
+        const pct = b.has_audio ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
+        const sync = !b.ready ? (b.building ? "загружается…" : "не готово") : !b.has_audio ? "без аудио, режим книги"
+          : b.timing_source === "mms" ? "точная синхронизация" : "синхронизация по субтитрам";
+        const meta = [b.author, b.narrator ? "читает " + b.narrator : null, sync].filter(Boolean).join(" · ");
+        const where = b.has_audio ? (pct ? "прочитано " + pct + "% · " + fmt(pos) : "не начато") : (st.sent ? "прочитано " + pct + "%" : "не начато");
+        const tag = b.has_audio ? "" : '<span class="tag">текст</span>';
+        return `<a class="card" href="${b.ready ? "?book=" + esc(b.slug) : "#"}"><div class="t">${esc(b.title || b.slug)}${tag}</div><div class="m">${esc(meta)}</div>
+          <div class="bar"><i style="width:${pct}%"></i></div><div class="m">${where}</div></a>`;
       }).join("");
+    }
+    renderLibrary();
+    let jobsTimer = 0;
+    async function pollJobs() {
+      const jobs = await fetch("/api/jobs").then((r) => r.json()).catch(() => ({}));
+      const running = Object.values(jobs).some((j) => j.running);
+      $("#jobs").innerHTML = Object.entries(jobs).map(([s, j]) => `<div class="job"><b>${esc(s)}</b>: ${j.running ? "идёт загрузка…" : j.exit === 0 ? "готово" : "ошибка (код " + j.exit + "), см. books/" + esc(s) + "/add.log"}<pre>${esc(j.log.join("\n"))}</pre></div>`).join("");
+      clearTimeout(jobsTimer);
+      if (running) jobsTimer = setTimeout(pollJobs, 3000); else if (Object.keys(jobs).length) renderLibrary();
+    }
+    pollJobs();
+    $("#add-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target); const msg = $("#add-msg");
+      if (!fd.get("text_url") && !(fd.get("text_file") && fd.get("text_file").size)) { msg.textContent = "Нужен текст: ссылка или файл."; return; }
+      msg.textContent = "Отправляю…";
+      const r = await fetch("/api/add", { method: "POST", body: fd }).then((x) => x.json()).catch((err) => ({ error: String(err) }));
+      if (r.error) { msg.textContent = "Ошибка: " + r.error; return; }
+      msg.textContent = `Загрузка книги «${fd.get("title")}» запущена (${r.slug}). Прогресс ниже.`; e.target.reset(); pollJobs();
     });
     return;
   }
@@ -70,7 +97,7 @@
   // ---------------- book state ----------------
   const app = $("#app"); app.hidden = false;
   const audio = $("#audio"), textEl = $("#text");
-  let book, wB, wT0, wT1, wS, sFirst, sLast, sBlock, chapStartWord = [], chapStartTime = [], duration = 0;
+  let book, wB, wT0, wT1, wS, sFirst, sLast, sBlock, sWordsCum = [], chapStartWord = [], chapStartTime = [], duration = 0, hasAudio = false;
   let curWord = -1, curSent = -1, curBlock = -1, curChap = -1;
   let userScrolled = false, wordEls = [], sentEls = [], blockEls = [];
   // shared state lives on the server (books/<slug>/state.json) so every browser sees the same
@@ -98,15 +125,23 @@
     if (localStats) putState({ stats: localStats }).then((r) => r && r.json()).then((s) => { if (s && s.stats) store.set("rs:stats:" + slug, s.stats); }).catch(() => {});
     else if (remote.stats) store.set("rs:stats:" + slug, remote.stats);
     if (!meta) throw new Error("книга не найдена");
-    if (!timingJ) throw new Error("нет timing.json — запусти пайплайн");
-    book = bookJ; duration = timingJ.duration;
+    hasAudio = !!(timingJ && meta.audio);
+    book = bookJ; duration = hasAudio ? timingJ.duration : 0;
     document.title = book.title + " — readsync";
     $("#book-title").textContent = book.title;
-    audio.src = `/books/${slug}/${meta.audio}`;
-    buildIndex(timingJ.words);
-    render(timingJ.words);
+    const words = hasAudio ? timingJ.words : [];
+    buildIndex(words);
+    render(words);
     buildToc();
     $("#loading").hidden = true;
+    // reading mode: audio (scrolling text follows the narrator) or pages (two-column spread, no audio)
+    const remoteMode = (remote.modeAt || 0) > store.get("rs:modeAt:" + slug, 0) ? remote.mode : store.get("rs:mode:" + slug, null);
+    const remoteSent = (remote.sentAt || 0) > store.get("rs:sentAt:" + slug, 0) ? remote.sent : store.get("rs:sent:" + slug, 0);
+    pages.sent = Math.max(0, Math.min(sFirst.length - 1, remoteSent || 0));
+    if (!hasAudio) { $("#btn-mode").hidden = true; $(".player").hidden = true; }
+    if (!hasAudio || remoteMode === "pages") document.fonts.ready.then(() => enterPages(pages.sent, false));
+    if (!hasAudio) return;
+    audio.src = `/books/${slug}/${meta.audio}`;
     const remoteWins = (remote.posAt || 0) > store.get("rs:posAt:" + slug, 0) && typeof remote.pos === "number";
     const pos = remoteWins ? remote.pos : store.get("rs:pos:" + slug, 0);
     if (remoteWins) { store.set("rs:pos:" + slug, remote.pos); store.set("rs:posAt:" + slug, remote.posAt); }
@@ -127,9 +162,14 @@
     sFirst = []; sLast = []; sBlock = [];
     // sentences: global index per (block, sentence)
     const sentIdx = book.blocks.map(() => []);
+    let cum = 0;
     for (let b = 0; b < book.blocks.length; b++) {
-      for (let k = 0; k < book.blocks[b].sentences.length; k++) { sentIdx[b].push(sFirst.length); sFirst.push(-1); sLast.push(-1); sBlock.push(b); }
+      for (const [a, e] of book.blocks[b].sentences) {
+        sentIdx[b].push(sFirst.length); sFirst.push(-1); sLast.push(-1); sBlock.push(b);
+        sWordsCum.push(cum); cum += (book.blocks[b].text.slice(a, e).match(/[\p{L}\p{N}]+/gu) || []).length;
+      }
     }
+    sWordsCum.push(cum);
     for (let i = 0; i < n; i++) {
       const [b, cs, , t0, t1] = words[i];
       wB[i] = b; wT0[i] = t0; wT1[i] = t1;
@@ -201,14 +241,18 @@
 
   function buildToc() {
     const ol = $("#toc-list");
-    ol.innerHTML = book.chapters.map((c, i) => c.hidden ? "" : `<li class="l${c.level}" data-ch="${i}"><span>${esc(c.title)}</span><span class="tt">${isFinite(chapStartTime[i]) ? fmt(chapStartTime[i]) : ""}</span></li>`).join("");
+    ol.innerHTML = '<li class="lib" data-lib="1"><span>← Библиотека</span></li>' + book.chapters.map((c, i) => c.hidden ? "" : `<li class="l${c.level}" data-ch="${i}"><span>${esc(c.title)}</span><span class="tt">${isFinite(chapStartTime[i]) ? fmt(chapStartTime[i]) : ""}</span></li>`).join("");
     ol.addEventListener("click", (e) => {
       const li = e.target.closest("li"); if (!li) return;
+      if (li.dataset.lib) { location.href = "/"; return; }
       const i = +li.dataset.ch;
-      if (isFinite(chapStartTime[i])) seek(chapStartTime[i]);
+      if (pages.on) goToSentence(firstSentOfChapter(i));
+      else if (isFinite(chapStartTime[i])) seek(chapStartTime[i]);
       closeDrawers();
     });
   }
+  function firstSentOfChapter(ci) { const fb = book.chapters[ci].first_block; for (let s = 0; s < sBlock.length; s++) if (sBlock[s] >= fb) return s; return 0; }
+  function chapterOfSent(si) { const b = sBlock[si] ?? 0; let c = 0; book.chapters.forEach((ch, i) => { if (ch.first_block <= b && !ch.hidden) c = i; }); return c; }
   function drawTicks() {
     const el = $("#chapter-ticks");
     el.innerHTML = book.chapters.map((c, i) => !c.hidden && isFinite(chapStartTime[i]) && chapStartTime[i] > 0
@@ -224,6 +268,7 @@
   }
   let lastCounted = -1;
   function update(force) {
+    if (!hasAudio || pages.on) return;
     const t = audio.currentTime + settings.offset;
     const i = wordAt(t);
     if (!audio.paused && lastCounted >= 0 && i > lastCounted && i - lastCounted < 40) session.words += i - lastCounted;
@@ -300,8 +345,7 @@
   ["mousemove", "mousedown", "keydown", "wheel", "touchstart"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
   // focus aid: pause when the reader leaves the tab or window
   const onLeave = () => { if (settings.pauseHidden && !audio.paused) audio.pause(); };
-  document.addEventListener("visibilitychange", () => { if (document.hidden) onLeave(); });
-  addEventListener("blur", onLeave);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) { onLeave(); if (pages.on) session.stop(); } else if (pages.on) session.start(); });
   audio.addEventListener("seeked", () => update(true));
   audio.addEventListener("ratechange", () => update(true));
   audio.addEventListener("error", () => { $("#loading").hidden = false; $("#loading").textContent = "Ошибка аудио: " + (audio.error?.message || audio.error?.code); });
@@ -317,6 +361,61 @@
     store.set("rs:pos:" + slug, audio.currentTime); store.set("rs:posAt:" + slug, at);
     putState({ pos: audio.currentTime, posAt: at }, keepalive);
   }
+
+  // ---------------- page mode ----------------
+  function pagesLayout() {
+    const gap = parseFloat(getComputedStyle(textEl).columnGap) || 0;
+    pages.spreadW = textEl.clientWidth + gap;
+    pages.total = Math.max(1, Math.ceil((textEl.scrollWidth - 2) / pages.spreadW));
+  }
+  function flowX(el) { const r = el.getClientRects()[0] || el.getBoundingClientRect(); return r.left - textEl.getBoundingClientRect().left + textEl.scrollLeft; }
+  function sentAtSpread(n) {
+    const x0 = n * pages.spreadW - 1;
+    let lo = 0, hi = sentEls.length - 1, ans = hi;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (flowX(sentEls[mid]) >= x0) { ans = mid; hi = mid - 1; } else lo = mid + 1; }
+    return ans;
+  }
+  let sentTimer = 0;
+  function goSpread(n, save = true) {
+    n = Math.max(0, Math.min(pages.total - 1, n));
+    const prevSent = pages.sent;
+    pages.cur = n; textEl.scrollLeft = n * pages.spreadW; pages.sent = sentAtSpread(n);
+    if (save && pages.sent > prevSent && pages.sent - prevSent < 400) session.words += sWordsCum[pages.sent] - sWordsCum[prevSent];
+    $("#pg-info").textContent = `${pages.cur + 1} / ${pages.total} · ${book.chapters[chapterOfSent(pages.sent)]?.title || ""}`;
+    $("#chapter-title").textContent = book.chapters[chapterOfSent(pages.sent)]?.title || "";
+    if (save) {
+      const at = Date.now(); store.set("rs:sent:" + slug, pages.sent); store.set("rs:sentAt:" + slug, at);
+      clearTimeout(sentTimer); sentTimer = setTimeout(() => putState({ sent: pages.sent, sentAt: at, sentPct: Math.round((pages.sent / sFirst.length) * 100) }), 300);
+    }
+  }
+  function goToSentence(si, save = true) { const el = sentEls[si]; goSpread(el ? Math.floor((flowX(el) + 1) / pages.spreadW) : 0, save); }
+  function saveMode(m) { const at = Date.now(); store.set("rs:mode:" + slug, m); store.set("rs:modeAt:" + slug, at); putState({ mode: m, modeAt: at }); }
+  function enterPages(si, save = true) {
+    if (hasAudio && !audio.paused) audio.pause();
+    pages.on = true; document.body.classList.add("pages"); $("#pager").hidden = false; $("#btn-mode").textContent = "🎧"; $("#btn-mode").title = "Вернуться к аудио (m)";
+    closeDrawers(); pagesLayout(); goToSentence(si ?? pages.sent, false);
+    if (save) saveMode("pages");
+    session.start();
+  }
+  function exitPages() {
+    pages.on = false; document.body.classList.remove("pages"); $("#pager").hidden = true; $("#btn-mode").textContent = "📖"; $("#btn-mode").title = "Режим книги без аудио (m)";
+    session.stop(); saveMode("audio");
+    const st = sentStart(pages.sent);
+    if (st != null) seek(st); else update(true);
+  }
+  function toggleMode() { if (!hasAudio) return; pages.on ? exitPages() : enterPages(curSent >= 0 ? curSent : pages.sent); }
+  $("#btn-mode").onclick = toggleMode;
+  $("#pg-prev").onclick = () => goSpread(pages.cur - 1);
+  $("#pg-next").onclick = () => goSpread(pages.cur + 1);
+  let wheelLock = 0;
+  textEl.addEventListener("wheel", (e) => {
+    if (!pages.on) return;
+    e.preventDefault();
+    const now = Date.now(); if (now - wheelLock < 350 || Math.abs(e.deltaY) + Math.abs(e.deltaX) < 8) return;
+    wheelLock = now; goSpread(pages.cur + ((e.deltaY || e.deltaX) > 0 ? 1 : -1));
+  }, { passive: false });
+  addEventListener("resize", () => { if (pages.on) { pagesLayout(); goToSentence(pages.sent, false); } });
+  document.fonts.addEventListener("loadingdone", () => { if (pages.on) { pagesLayout(); goToSentence(pages.sent, false); } });
 
   // ---------------- controls ----------------
   let pausedAt = 0;
@@ -369,21 +468,38 @@
   textEl.addEventListener("click", (e) => {
     const nref = e.target.closest(".nref");
     if (nref) { showNote(nref); e.stopPropagation(); return; }
+    if (pages.on) {
+      if (getSelection().toString()) return;
+      const r = textEl.getBoundingClientRect(), x = (e.clientX - r.left) / r.width;
+      if (x < 0.3) goSpread(pages.cur - 1); else if (x > 0.7) goSpread(pages.cur + 1);
+      return;
+    }
     const w = e.target.closest(".w"), s = e.target.closest(".s");
     if (settings.clickWord && w) return seek(wT0[+w.dataset.w]);
     if (s) { const st = sentStart(+s.dataset.s); if (st != null) seek(st); }
   });
 
   // user scroll detection
-  const onUserScroll = () => { if (settings.scroll === "off") return; userScrolled = true; $("#return-pill").hidden = false; };
+  const onUserScroll = () => { if (settings.scroll === "off" || pages.on) return; userScrolled = true; $("#return-pill").hidden = false; };
   addEventListener("wheel", onUserScroll, { passive: true });
   addEventListener("touchmove", onUserScroll, { passive: true });
   $("#return-pill").onclick = () => { userScrolled = false; $("#return-pill").hidden = true; scrollToCurrent(true); };
 
   // keyboard
   addEventListener("keydown", (e) => {
-    if (e.target.matches("input, select, textarea")) return;
-    const k = e.key;
+    if (e.target && e.target.matches && e.target.matches("input, select, textarea")) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;  // leave browser/system shortcuts alone
+    const k = e.key === "Spacebar" || e.code === "Space" ? " " : e.key;
+    if (k === "m") { toggleMode(); return; }
+    if (pages.on) {
+      if (k === "ArrowRight" || k === "PageDown" || (k === " " && !e.shiftKey)) { e.preventDefault(); goSpread(pages.cur + 1); }
+      else if (k === "ArrowLeft" || k === "PageUp" || (k === " " && e.shiftKey)) { e.preventDefault(); goSpread(pages.cur - 1); }
+      else if (k === "Home") goSpread(0);
+      else if (k === "End") goSpread(pages.total - 1);
+      else if (k === "t") toggleDrawer("#toc");
+      else if (k === "Escape") { closeDrawers(); $("#note-pop").hidden = true; $("#sprint-menu").hidden = true; }
+      return;
+    }
     if (k === " ") { e.preventDefault(); toggle(); }
     else if (k === "ArrowLeft") { e.preventDefault(); e.shiftKey ? seek(audio.currentTime - 10) : prevSentence(); }
     else if (k === "ArrowRight") { e.preventDefault(); e.shiftKey ? seek(audio.currentTime + 10) : nextSentence(); }
@@ -446,7 +562,7 @@
     pop.style.left = Math.max(8, Math.min(innerWidth - 348, r.left - 100)) + "px";
     pop.style.top = (r.bottom + 8) + "px";
   }
-  addEventListener("click", (e) => { if (!e.target.closest("#note-pop, .nref")) $("#note-pop").hidden = true; if (!e.target.closest("#sprint-menu, #btn-sprint")) $("#sprint-menu").hidden = true; });
+  addEventListener("click", (e) => { if (!e.target.closest("#note-pop, .nref")) $("#note-pop").hidden = true; if (!e.target.closest("#sprint-menu, #btn-sprint, #pg-sprint")) $("#sprint-menu").hidden = true; });
 
   // ---------------- sessions & stats ----------------
   const session = {
@@ -472,30 +588,30 @@
     const td = st.days[today()] || { sec: 0, words: 0 };
     let streak = 0; const dt = new Date();
     for (;;) { const k = dt.toISOString().slice(0, 10); if (st.days[k]?.sec > 60) { streak++; dt.setDate(dt.getDate() - 1); } else break; }
-    const pct = duration ? Math.round((audio.currentTime / duration) * 100) : 0;
+    const pct = hasAudio && duration ? Math.round((audio.currentTime / duration) * 100) : Math.round((pages.sent / Math.max(1, sFirst.length)) * 100);
     const week = []; const d2 = new Date();
     for (let i = 6; i >= 0; i--) { const x = new Date(d2); x.setDate(d2.getDate() - i); const k = x.toISOString().slice(0, 10); week.push({ k, sec: st.days[k]?.sec || 0, wd: ["вс", "пн", "вт", "ср", "чт", "пт", "сб"][x.getDay()] }); }
     const max = Math.max(60, ...week.map((w) => w.sec));
     const bars = `<div class="bars">${week.map((w) => `<div class="${w.k === today() ? "today" : ""}" style="height:${Math.max(4, (w.sec / max) * 100)}%" title="${fmt(w.sec)}"></div>`).join("")}</div>
       <div class="bars-labels">${week.map((w) => `<span>${w.wd}</span>`).join("")}</div>`;
-    $("#stats").innerHTML = `Сегодня: <b>${fmt(td.sec)}</b>, ${Math.round(td.words)} слов<br>Всего: <b>${fmt(tot)}</b>, ${Math.round(totW)} слов<br>Серия: <b>${streak}</b> дн.<br>Прогресс книги: <b>${pct}%</b> · осталось ${fmt((duration - audio.currentTime) / audio.playbackRate)}${bars}`;
+    $("#stats").innerHTML = `Сегодня: <b>${fmt(td.sec)}</b>, ${Math.round(td.words)} слов<br>Всего: <b>${fmt(tot)}</b>, ${Math.round(totW)} слов<br>Серия: <b>${streak}</b> дн.<br>Прогресс книги: <b>${pct}%</b>${hasAudio ? " · осталось " + fmt((duration - audio.currentTime) / audio.playbackRate) : ""}${bars}`;
   }
 
   // ---------------- sprint timer ----------------
   const sprint = { end: null, timer: 0, minutes: 0, words: 0, sents0: 0, stopAtSentence: false };
-  $("#btn-sprint").onclick = (e) => { e.stopPropagation(); const m = $("#sprint-menu"); m.hidden = !m.hidden; $("#sprint-stop").hidden = !sprint.end; };
+  $("#btn-sprint").onclick = $("#pg-sprint").onclick = (e) => { e.stopPropagation(); const m = $("#sprint-menu"); m.hidden = !m.hidden; $("#sprint-stop").hidden = !sprint.end; };
   $("#sprint-menu").addEventListener("click", (e) => { const b = e.target.closest("button[data-min]"); if (b) startSprint(+b.dataset.min); });
   $("#sprint-stop").onclick = () => { stopSprint(); $("#sprint-menu").hidden = true; };
   $("#sprint-close").onclick = () => { $("#sprint-done").hidden = true; };
-  $("#sprint-again").onclick = () => { $("#sprint-done").hidden = true; startSprint(sprint.minutes); };
   $("#sprint-break").onclick = () => { $("#sprint-done").hidden = true; startBreak(5); };
   $("#break-close").onclick = () => { $("#break-done").hidden = true; };
   $("#break-sprint").onclick = () => { $("#break-done").hidden = true; startSprint(sprint.minutes || 25); };
+  $("#sprint-again").onclick = () => { $("#sprint-done").hidden = true; startSprint(sprint.minutes); };
   // rest break between sprints: audio stays paused, badge counts down, soft chime at the end
   function startBreak(min) {
     stopSprint(); if (!audio.paused) audio.pause();
     const end = Date.now() + min * 60000, badge = $("#sprint-badge"); badge.hidden = false; badge.classList.remove("ending");
-    $("#btn-sprint").classList.add("on");
+    $("#btn-sprint").classList.add("on"); $("#pg-sprint").classList.add("on");
     sprint.timer = setInterval(() => {
       const left = end - Date.now();
       if (left <= 0) { stopSprint(); chime(); $("#break-done").hidden = false; return; }
@@ -516,20 +632,20 @@
   }
   window.readsync = { startSprint, startBreak, seek, setSpeed };
   function startSprint(min) {
-    stopSprint(); sprint.minutes = min; sprint.end = Date.now() + min * 60000; sprint.words = 0; sprint.sents0 = curSent; sprint.startWord = curWord;
-    $("#sprint-menu").hidden = true; $("#btn-sprint").classList.add("on");
+    stopSprint(); sprint.minutes = min; sprint.end = Date.now() + min * 60000; sprint.words = 0; sprint.sents0 = pages.on ? pages.sent : curSent; sprint.startWord = curWord;
+    $("#sprint-menu").hidden = true; $("#btn-sprint").classList.add("on"); $("#pg-sprint").classList.add("on");
     const badge = $("#sprint-badge"); badge.hidden = false;
     sprint.timer = setInterval(() => {
       const left = sprint.end - Date.now();
-      if (left <= 0) { clearInterval(sprint.timer); badge.textContent = "финиш…"; badge.classList.add("ending"); if (audio.paused) finishSprint(); else sprint.stopAtSentence = true; return; }
+      if (left <= 0) { clearInterval(sprint.timer); badge.textContent = "финиш…"; badge.classList.add("ending"); if (audio.paused || pages.on) finishSprint(); else sprint.stopAtSentence = true; return; }
       badge.textContent = fmt(left / 1000); badge.classList.toggle("ending", left < 60000);
     }, 500);
-    if (audio.paused) play();
+    if (audio.paused && !pages.on && hasAudio) play();
   }
-  function stopSprint() { clearInterval(sprint.timer); sprint.end = null; sprint.stopAtSentence = false; $("#sprint-badge").hidden = true; $("#sprint-badge").classList.remove("ending"); $("#btn-sprint").classList.remove("on"); }
+  function stopSprint() { clearInterval(sprint.timer); sprint.end = null; sprint.stopAtSentence = false; $("#sprint-badge").hidden = true; $("#sprint-badge").classList.remove("ending"); $("#btn-sprint").classList.remove("on"); $("#pg-sprint").classList.remove("on"); }
   function finishSprint() {
     session.stop();
-    const sents = Math.max(0, curSent - sprint.sents0), words = Math.max(0, curWord - Math.max(0, sprint.startWord ?? curWord));
+    const sents = Math.max(0, (pages.on ? pages.sent : curSent) - sprint.sents0), words = pages.on ? Math.round(sprint.words) : Math.max(0, curWord - Math.max(0, sprint.startWord ?? curWord));
     stopSprint();
     $("#sprint-summary").innerHTML = `${sprint.minutes} мин фокуса.<br>Прочитано: <b>${sents}</b> предложений, <b>${words}</b> слов.<br>Сделай паузу — потом ещё один.`;
     $("#sprint-done").hidden = false;

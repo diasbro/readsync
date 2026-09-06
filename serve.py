@@ -10,9 +10,13 @@ import json
 import mimetypes
 import os
 import re
+import subprocess
 import sys
 import threading
+import time
 import tomllib
+from email.parser import BytesParser
+from email.policy import HTTP
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +26,49 @@ READER = ROOT / "reader"
 BOOKS = ROOT / "books"
 STATE_LOCK = threading.Lock()
 SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+JOBS: dict[str, dict] = {}
+PIPELINE_PY = ROOT / ".venv" / "bin" / "python"
+TRANSLIT = dict(
+    zip(
+        "абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+        [
+            "a",
+            "b",
+            "v",
+            "g",
+            "d",
+            "e",
+            "e",
+            "zh",
+            "z",
+            "i",
+            "y",
+            "k",
+            "l",
+            "m",
+            "n",
+            "o",
+            "p",
+            "r",
+            "s",
+            "t",
+            "u",
+            "f",
+            "h",
+            "c",
+            "ch",
+            "sh",
+            "sch",
+            "",
+            "y",
+            "",
+            "e",
+            "yu",
+            "ya",
+        ],
+        strict=True,
+    )
+)
 mimetypes.add_type("audio/mp4", ".m4a")
 mimetypes.add_type("audio/webm", ".webm")
 mimetypes.add_type("application/json", ".json")
@@ -36,8 +83,11 @@ def list_books() -> list[dict]:
             meta = {"slug": toml.parent.name, "title": toml.parent.name, "error": str(e)}
         d = toml.parent
         meta["slug"] = d.name
-        meta["ready"] = (d / "book.json").exists() and (d / "timing.json").exists()
+        meta["ready"] = (d / "book.json").exists()
         meta["audio"] = next((f.name for f in (d / "audio.m4a", d / "audio.mp3", d / "yt.webm") if f.exists()), None)
+        meta["has_audio"] = bool(meta["audio"]) and (d / "timing.json").exists()
+        job = JOBS.get(d.name)
+        meta["building"] = bool(job and job["proc"].poll() is None)
         if (d / "timing.json").exists():
             try:
                 with (d / "timing.json").open("rb") as fh:
@@ -66,13 +116,14 @@ def save_state(slug: str, state: dict) -> None:
 
 
 def merge_state(slug: str, patch: dict) -> dict:
-    """Last writer wins for position and settings (by client timestamp); stats days are merged by max."""
+    """Last writer wins per key (by client timestamp in <key>At); stats days are merged by max."""
     with STATE_LOCK:
         st = load_state(slug)
-        if "pos" in patch and patch.get("posAt", 0) >= st.get("posAt", 0):
-            st["pos"], st["posAt"] = float(patch["pos"]), patch.get("posAt", 0)
-        if "settings" in patch and patch.get("settingsAt", 0) >= st.get("settingsAt", 0):
-            st["settings"], st["settingsAt"] = patch["settings"], patch.get("settingsAt", 0)
+        for key in ("pos", "sent", "mode", "settings"):
+            if key in patch and patch.get(key + "At", 0) >= st.get(key + "At", 0):
+                st[key], st[key + "At"] = patch[key], patch.get(key + "At", 0)
+                if key == "sent" and "sentPct" in patch:
+                    st["sentPct"] = patch["sentPct"]
         if isinstance(patch.get("stats"), dict):
             days = st.setdefault("stats", {}).setdefault("days", {})
             for day, v in patch["stats"].get("days", {}).items():
@@ -87,13 +138,93 @@ def add_session(slug: str, delta: dict) -> dict:
         st = load_state(slug)
         days = st.setdefault("stats", {}).setdefault("days", {})
         day = str(delta.get("day", ""))[:10]
+        try:
+            sec, words = float(delta.get("sec", 0)), float(delta.get("words", 0))
+        except (TypeError, ValueError):
+            sec, words = 0.0, 0.0
         cur = days.get(day, {"sec": 0, "words": 0})
-        days[day] = {
-            "sec": cur["sec"] + float(delta.get("sec", 0)),
-            "words": cur["words"] + float(delta.get("words", 0)),
-        }
+        days[day] = {"sec": cur["sec"] + max(0.0, sec), "words": cur["words"] + max(0.0, words)}
         save_state(slug, st)
         return st
+
+
+def slugify(title: str) -> str:
+    s = "".join(TRANSLIT.get(c, c) for c in title.lower())
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:48]
+    return s or "book"
+
+
+def parse_multipart(content_type: str, body: bytes) -> dict[str, dict]:
+    """Return {field: {"value": str} | {"filename": str, "data": bytes}} from a multipart/form-data body."""
+    msg = BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body)
+    out: dict[str, dict] = {}
+    for part in msg.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        fn = part.get_filename()
+        payload = part.get_payload(decode=True) or b""
+        out[name] = {"filename": fn, "data": payload} if fn else {"value": payload.decode("utf-8", "replace").strip()}
+    return out
+
+
+def start_job(form: dict) -> tuple[dict | None, str]:
+    """Save uploads, launch pipeline/add_book.py in the background. Returns (job info, error)."""
+    val = lambda k: form.get(k, {}).get("value", "")  # noqa: E731
+    title = val("title")
+    slug = val("slug") or slugify(title or "book")
+    if not SLUG_RE.match(slug):
+        return None, "bad slug"
+    d = BOOKS / slug
+    if (d / "book.json").exists() or (slug in JOBS and JOBS[slug]["proc"].poll() is None):
+        return None, f"книга {slug} уже есть"
+    d.mkdir(parents=True, exist_ok=True)
+    text = val("text_url")
+    tf = form.get("text_file")
+    if tf and tf.get("filename") and tf["data"]:
+        ext = (
+            ".fb2.zip"
+            if tf["filename"].lower().endswith(".zip")
+            else ".fb2"
+            if tf["filename"].lower().endswith(".fb2")
+            else ".html"
+        )
+        (d / ("upload" + ext)).write_bytes(tf["data"])
+        text = str(d / ("upload" + ext))
+    if not text:
+        return None, "нужен текст: ссылка или файл"
+    audio = val("audio_url")
+    af = form.get("audio_file")
+    if af and af.get("filename") and af["data"]:
+        ext = os.path.splitext(af["filename"])[1].lower() or ".m4a"
+        (d / ("upload" + ext)).write_bytes(af["data"])
+        audio = str(d / ("upload" + ext))
+    py = str(PIPELINE_PY) if PIPELINE_PY.exists() else sys.executable
+    cmd = [py, str(ROOT / "pipeline" / "add_book.py"), slug, "--text", text]
+    if audio:
+        cmd += ["--audio", audio]
+    if val("align") != "on":
+        cmd.append("--no-align")
+    for k, flag in (("title", "--title"), ("author", "--author"), ("narrator", "--narrator")):
+        if val(k):
+            cmd += [flag, val(k)]
+    log = open(d / "add.log", "w", encoding="utf-8")  # noqa: SIM115
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)
+    JOBS[slug] = {"proc": proc, "started": time.time(), "slug": slug}
+    return {"slug": slug}, ""
+
+
+def job_status() -> dict:
+    out = {}
+    for slug, j in JOBS.items():
+        code = j["proc"].poll()
+        try:
+            log = (BOOKS / slug / "add.log").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            log = ""
+        lines = [ln for ln in log.splitlines() if ln.strip() and "warning" not in ln.lower()]
+        out[slug] = {"running": code is None, "exit": code, "log": lines[-6:], "started": j["started"]}
+    return out
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -133,6 +264,12 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("body too large")
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def read_form(self) -> dict:
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > 3_000_000_000:
+            raise ValueError("body too large")
+        return parse_multipart(self.headers.get("Content-Type", ""), self.rfile.read(n))
+
     def state_slug(self):
         m = re.match(r"^/api/state/([^/?]+)(/session)?$", self.path)
         if not m or not SLUG_RE.match(m.group(1)) or not (BOOKS / m.group(1)).is_dir():
@@ -147,6 +284,8 @@ class Handler(SimpleHTTPRequestHandler):
             if slug is None:
                 return self.send_json({"error": "unknown book"}, HTTPStatus.NOT_FOUND)
             return self.send_json(load_state(slug))
+        if self.path.startswith("/api/jobs"):
+            return self.send_json(job_status())
         path = self.translate_path(self.path)
         if os.path.isfile(path) and "Range" in self.headers:
             return self.send_range(path)
@@ -163,6 +302,14 @@ class Handler(SimpleHTTPRequestHandler):
         return self.send_json(merge_state(slug, patch))
 
     def do_POST(self):
+        if self.path.startswith("/api/add"):
+            try:
+                job, err = start_job(self.read_form())
+            except Exception as e:  # noqa: BLE001 - malformed multipart, bad paths, disk errors: report, don't crash
+                return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+            if err:
+                return self.send_json({"error": err}, HTTPStatus.BAD_REQUEST)
+            return self.send_json(job)
         slug, is_session = self.state_slug()
         if slug is None or not is_session:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
