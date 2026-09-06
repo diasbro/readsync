@@ -41,7 +41,7 @@
     <details class="hint">
       <summary>Сохранять с любой страницы</summary>
       <p>Перетащи ссылку <a id="bookmarklet" href="#" class="bm">+ readsync</a> на панель закладок. На странице книги нажми её: название страницы попадёт сюда. Работает, пока запущен сервер.</p>
-      <p>Или открой <code>http://127.0.0.1:8765/?wish=Название</code>.</p>
+      <p>Или открой <code id="wish-url">http://127.0.0.1:8765/?wish=Название</code>.</p>
     </details>
   </section>
 
@@ -55,7 +55,7 @@
       <label>Аудио, ссылки <textarea name="audio_url" rows="2" placeholder="Необязательно. YouTube, части — по одной ссылке в строке"></textarea></label>
       <label>или файл <input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3"></label>
       <label>Чтец <input name="narrator"></label>
-      <label class="row"><input type="checkbox" name="align"> Точное выравнивание сразу (долго, греет ноутбук; можно позже: <code>make align slug=…</code>)</label>
+      <label class="row"><input type="checkbox" name="align"> Точное выравнивание сразу (долго; можно и позже)</label>
       <div class="row-btns"><button type="submit" class="btn primary">Загрузить</button></div>
       <div id="add-msg" class="muted small"></div>
     </form>
@@ -213,7 +213,7 @@
       <button data-min="10">10</button><button data-min="15">15</button>
       <button data-min="25">25</button><button data-min="45">45</button>
     </div>
-    <div class="muted small" style="margin-top:8px">Пауза наступит на границе предложения.</div>
+    <div class="muted small" style="margin-top:8px" data-mode="audio">Пауза наступит на границе предложения.</div>
     <button id="sprint-stop" class="link" hidden>Остановить спринт</button>
   </div>
 

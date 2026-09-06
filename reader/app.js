@@ -56,21 +56,40 @@
     $("#library").hidden = false;
     // header: the sentence you stopped at in the current book, with the word highlight walking
     // along it; a click opens the book right there (the reader always starts paused)
+    // three looks: "audio" walks the word highlight along the line; "pages" is a still line with a
+    // page marker (the first sentence of the spread you are on); "random" is a quote from a finished book
     let demoTimer = 0;
-    function runDemo(text, bookTitle, href) {
-      const line = $("#demo-line");
+    function runDemo(text, meta, href, look) {
+      const line = $("#demo-line"), demo = $(".demo");
       const words = text.split(/\s+/).filter(Boolean);
-      line.innerHTML = words.map((w) => `<span class="w">${esc(w)}</span>`).join(" ") + (bookTitle ? ` <span class="src">· ${esc(bookTitle)}</span>` : "");
+      line.innerHTML = words.map((w) => `<span class="w">${esc(w)}</span>`).join(" ") + (meta ? ` <span class="src">· ${esc(meta)}</span>` : "");
       line.classList.toggle("link", !!href);
       line.onclick = href ? () => { location.href = href; } : null;
-      const ws = line.querySelectorAll(".w");
-      let i = 0; ws[0]?.classList.add("cur");
+      demo.dataset.look = look || "plain";
       clearInterval(demoTimer);
-      if (!matchMedia("(prefers-reduced-motion: reduce)").matches && ws.length > 1) {
-        demoTimer = setInterval(() => { if (document.hidden) return; ws[i].classList.remove("cur"); i = (i + 1) % ws.length; ws[i].classList.add("cur"); }, 520);
+      const ws = line.querySelectorAll(".w");
+      if (look === "audio") {
+        let i = 0; ws[0]?.classList.add("cur");
+        if (!matchMedia("(prefers-reduced-motion: reduce)").matches && ws.length > 1) {
+          demoTimer = setInterval(() => { if (document.hidden) return; ws[i].classList.remove("cur"); i = (i + 1) % ws.length; ws[i].classList.add("cur"); }, 520);
+        }
       }
     }
-    runDemo("Голос ведёт, глаза не отстают", "", "");
+    runDemo("Одна книга. Один голос. Одно внимание.", "", "", "plain");
+    async function headerLine(reading, all) {
+      const byOpened = (a, b) => (b.state.opened || 0) - (a.state.opened || 0);
+      const current = reading.slice().sort(byOpened)[0];
+      if (current) {
+        const w = await fetch(`/api/where/${current.slug}`).then((r) => r.json()).catch(() => null);
+        if (w && w.text) { runDemo(w.text, current.title + (w.mode === "pages" && w.chapter ? " · " + w.chapter : ""), "?book=" + current.slug, w.mode === "audio" ? "audio" : "pages"); return; }
+      }
+      const done = all.filter((b) => b.ready && b.state.finished);
+      if (done.length) {
+        const b = done[Math.floor(Math.random() * done.length)];
+        const w = await fetch(`/api/where/${b.slug}?random=1`).then((r) => r.json()).catch(() => null);
+        if (w && w.text) { runDemo(w.text, "из «" + b.title + "»", "?book=" + b.slug, "random"); return; }
+      }
+    }
     const toast = (msg) => { const el = document.createElement("div"); el.className = "toast"; el.textContent = msg; document.body.appendChild(el); setTimeout(() => el.remove(), 3000); };
     const q = (x) => encodeURIComponent(x);
     const norm = (x) => (x || "").toLowerCase().replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
@@ -112,8 +131,7 @@
       const reading = books.filter((b) => shelfOf(b) === "reading").sort(byOpened);
       const rest = books.filter((b) => shelfOf(b) !== "reading").sort(byOpened);
       $("#lib-title").textContent = reading.length ? "Остальные" : "Библиотека";
-      const current = reading[0] || books.filter((b) => b.ready && b.state.opened).sort(byOpened)[0];
-      if (current) fetch(`/api/where/${current.slug}`).then((r) => r.json()).then((w) => { if (w && w.text) runDemo(w.text, current.title, "?book=" + current.slug); }).catch(() => {});
+      headerLine(reading, books);
       $("#reading-section").hidden = !reading.length;
       $("#reading-list").innerHTML = reading.map((b) => cardHtml(b, "reading")).join("");
       list.innerHTML = rest.map((b) => cardHtml(b, "library")).join("");
@@ -256,6 +274,7 @@
       }
     });
     $("#bookmarklet").href = "javascript:(function(){window.open('" + location.origin + "/?wish='+encodeURIComponent(document.title),'_blank')})()";
+    $("#wish-url").textContent = location.origin + "/?wish=Название";
     const wishParam = new URLSearchParams(location.search).get("wish");
     if (wishParam) {
       history.replaceState(null, "", location.pathname);
@@ -321,7 +340,7 @@
     const remoteMode = (remote.modeAt || 0) > store.get("rs:modeAt:" + slug, 0) ? remote.mode : store.get("rs:mode:" + slug, null);
     const remoteSent = (remote.sentAt || 0) > store.get("rs:sentAt:" + slug, 0) ? remote.sent : store.get("rs:sent:" + slug, 0);
     pages.sent = Math.max(0, Math.min(sFirst.length - 1, remoteSent || 0));
-    if (!hasAudio) { $("#btn-mode").hidden = true; $(".player").hidden = true; }
+    if (!hasAudio) { $("#btn-mode").hidden = true; $(".player").hidden = true; document.body.classList.add("pages"); }
     if (!hasAudio || remoteMode === "pages") document.fonts.ready.then(() => enterPages(pages.sent, false));
     if (!hasAudio) return;
     audio.src = `/books/${slug}/${meta.audio}`;
@@ -616,13 +635,6 @@
   $("#btn-mode").onclick = toggleMode;
   $("#pg-prev").onclick = () => goSpread(pages.cur - 1);
   $("#pg-next").onclick = () => goSpread(pages.cur + 1);
-  let wheelLock = 0;
-  textEl.addEventListener("wheel", (e) => {
-    if (!pages.on) return;
-    e.preventDefault();
-    const now = Date.now(); if (now - wheelLock < 350 || Math.abs(e.deltaY) + Math.abs(e.deltaX) < 8) return;
-    wheelLock = now; goSpread(pages.cur + ((e.deltaY || e.deltaX) > 0 ? 1 : -1));
-  }, { passive: false });
   addEventListener("resize", () => { if (pages.on) { pagesLayout(); goToSentence(pages.sent, false); } });
   document.fonts.addEventListener("loadingdone", () => { if (pages.on) { pagesLayout(); goToSentence(pages.sent, false); } });
 

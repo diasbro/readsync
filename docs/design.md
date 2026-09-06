@@ -1,25 +1,28 @@
-# iphuck-sync — синхронное чтение книги с аудиокнигой
+# Архитектура readsync
 
-Цель: читать текст в браузере, пока играет аудиокнига, с подсветкой текущего
-предложения и слова (immersion reading), для тренировки фокуса.
+Один процесс `serve.py` (stdlib, порт 8765) отдаёт статичную читалку из `reader/` и данные
+книг из `books/`, хранит состояние чтения и запускает пайплайн фоновыми задачами.
 
-## Данные
-- `data/book.html` — страница читалки fantasy-worlds (рендер FB2).
-- `data/yt.webm` — аудио (opus) с YouTube, `data/yt.ru-orig.json3` — авто-субтитры YouTube.
-- `data/book.json` — извлечённый текст: главы, блоки (абзац/заголовок/стих/эпиграф),
-  предложения (смещения символов), курсив, сноски.
-- `data/anchors.json` — грубые якоря «слово книги → секунда» из авто-субтитров.
-- `data/align.json` — точные таймкоды слов (MMS forced alignment по окнам между якорями).
-- `reader/` — статичная читалка (index.html, app.js, style.css), сервер с Range.
+```
+books/<slug>/
+  book.toml      метаданные (slug, title, author, narrator, источники)
+  book.json      текст: chapters[], blocks[] (kind, text, em, notes, sentences, images), notes{}
+  timing.json    слова: [block, charStart, charEnd, t0, t1], монотонно по t0
+  audio.m4a      воспроизведение; audio16k.wav только на время выравнивания
+  images/        иллюстрации и cover.*
+  state.json     pos, sent, mode, opened, shelf, stats (последний писатель побеждает по <key>At)
+books/settings.json   общие настройки читалки
+books/wishlist.json   список «Хочу прочитать»
+```
 
-## Пайплайн
-1. `extract_text.py`  book.html → book.json
-2. `anchors.py`       book.json + json3 субтитры → anchors.json (diff слов, надёжные совпадения)
-3. `align.py`         окна между якорями → ctc-forced-aligner (MMS, MPS) → align.json
-4. `serve.py`         HTTP с Range на localhost:8765
+Пайплайн (`pipeline/`): извлечение текста по формату → `merge_books.py` для томов →
+`anchors.py` по субтитрам → `timing_from_anchors.py` → опционально `align.py` (MMS).
+`add_book.py` оркестрирует всё это, умеет несколько томов и несколько аудиочастей, и умеет
+добавить аудио к готовой книге.
 
-## Читалка
-Один экран: колонка текста, нижняя панель плеера. Подсветка предложения + слова,
-автоскролл с «удержанием» позиции, клик по предложению = seek, горячие клавиши,
-режим фокуса (затемнение остального), оглавление, скорость, размер шрифта, темы,
-таймер спринта (пауза на границе предложения), позиция и статистика в localStorage.
+Читалка (`reader/app.js`): одна IIFE. Аудиорежим: 10 Гц опрос `audio.currentTime`, бинарный
+поиск слова, классы `.cur` на слове, предложении, блоке, автоскролл с зоной чтения. Режим книги:
+`#text` в CSS-колонках с `column-fill: auto`, разворот = шаг `scrollLeft`, позиция по индексу
+предложения. Переключение режимов идёт через предложение, никогда через пиксели.
+
+Подробности выбора стратегии выравнивания: `docs/adr/0001-caption-anchors-plus-mms.md`.

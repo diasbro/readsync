@@ -1,4 +1,4 @@
-"""Extract book text from the fantasy-worlds reader HTML into data/book.json.
+"""Extract book text from a fantasy-worlds reader page (or any HTML page) into book.json.
 
 Output model:
 {

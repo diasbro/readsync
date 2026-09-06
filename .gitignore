@@ -2,11 +2,12 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-# book data (copyrighted text/audio, large generated files)
-books/*/*
-!books/*/book.toml
+# books are personal data (text, audio, reading state): nothing under books/ is tracked
+books/*
+!books/.gitkeep
 .DS_Store
+*.egg-info/
+.ruff_cache/
+.claude/settings.local.json
 
-books/settings.json
-books/wishlist.json
-books/*.tmp
+
