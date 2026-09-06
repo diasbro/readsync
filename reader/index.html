@@ -4,18 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>readsync</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23b4532a'/%3E%3Cpath d='M14 18c6-2 12-1 18 3 6-4 12-5 18-3v28c-6-2-12-1-18 3-6-4-12-5-18-3z' fill='%23fff6ee'/%3E%3Cpath d='M32 21v28' stroke='%23b4532a' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='27' fill='none' stroke='%23c96a3f' stroke-opacity='.35' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='15' fill='%23c96a3f'/%3E%3C/svg%3E">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="favicon.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div id="library" hidden>
   <header class="lib-head">
-    <h1>readsync</h1>
-    <p class="muted">Читать глазами и слушать одновременно. Тренировка фокуса без лишнего.</p>
+    <h1><span class="mark" aria-hidden="true"><i></i></span>readsync</h1>
+    <div class="demo" aria-hidden="true"><span class="demo-line" id="demo-line"></span></div>
   </header>
 
+  <section class="lib-section" id="reading-section" hidden>
+    <h2>Читаю сейчас</h2>
+    <div id="reading-list" class="lib-grid"></div>
+  </section>
+
   <section class="lib-section">
-    <h2>Библиотека</h2>
+    <h2 id="lib-title">Библиотека</h2>
     <div id="library-list" class="lib-grid"></div>
   </section>
 
