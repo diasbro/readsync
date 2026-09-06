@@ -231,11 +231,11 @@ def wishlist_delete(wid: str) -> list[dict]:
         return items
 
 
-def delete_unready(slug: str) -> None:
-    """Remove a book directory that never finished loading. A real book (with book.json) is never deleted here."""
+def delete_book(slug: str) -> None:
+    """Remove a book directory: text, audio, timing and reading state. The page asks for confirmation first."""
     d = BOOKS / slug
-    if not SLUG_RE.match(slug) or not d.is_dir() or (d / "book.json").exists():
-        raise ValueError("нельзя удалить: книга готова или не существует")
+    if not SLUG_RE.match(slug) or not d.is_dir():
+        raise ValueError("книга не существует")
     job = JOBS.get(slug)
     if job and job["proc"].poll() is None:
         raise ValueError("книга ещё загружается")
@@ -799,7 +799,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(wishlist_delete(self.path.rsplit("/", 1)[-1]))
         if self.path.startswith("/api/books/"):
             try:
-                delete_unready(self.path.rsplit("/", 1)[-1])
+                delete_book(self.path.rsplit("/", 1)[-1])
             except (ValueError, OSError) as e:
                 return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
             return self.send_json({"ok": True})
