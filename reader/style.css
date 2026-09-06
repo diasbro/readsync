@@ -57,6 +57,12 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 /* ---------- library ---------- */
 #library { max-width: 780px; margin: 0 auto; padding: 56px 24px 80px; }
 .lib-head { margin-bottom: 40px; }
+.lib-title-row { position: relative; display: flex; align-items: center; justify-content: space-between; }
+.lib-title-row .icon { color: var(--muted); }
+.lib-title-row .icon:hover { color: var(--fg); }
+.prefs { position: absolute; right: 0; top: 46px; width: 360px; z-index: 30; }
+.prefs .seg button { min-width: 0; flex: 1 1 30%; }
+.prefs select { width: 100%; margin-top: 2px; }
 .lib-head h1 { font-family: var(--serif); font-weight: 500; font-size: 44px; letter-spacing: -.01em; margin: 0 0 6px; display: flex; align-items: center; gap: 16px; }
 /* the mark: a still dot inside a halo that breathes slowly (about a calm breath cycle) */
 .mark { position: relative; width: 22px; height: 22px; flex: none; display: inline-block; top: .09em; }
