@@ -15,6 +15,9 @@ import sys
 import threading
 import time
 import tomllib
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from email.parser import BytesParser
 from email.policy import HTTP
 from http import HTTPStatus
@@ -88,6 +91,10 @@ def list_books() -> list[dict]:
         meta["has_audio"] = bool(meta["audio"]) and (d / "timing.json").exists()
         job = JOBS.get(d.name)
         meta["building"] = bool(job and job["proc"].poll() is None)
+        cover = (
+            next((f for f in (d / "images").glob("cover.*") if f.is_file()), None) if (d / "images").is_dir() else None
+        )
+        meta["cover"] = f"images/{cover.name}" if cover else None
         if (d / "timing.json").exists():
             try:
                 with (d / "timing.json").open("rb") as fh:
@@ -149,6 +156,58 @@ def add_session(slug: str, delta: dict) -> dict:
 
 
 SETTINGS_FILE = BOOKS / "settings.json"
+WISHLIST_FILE = BOOKS / "wishlist.json"
+
+
+def load_wishlist() -> list[dict]:
+    try:
+        return json.loads(WISHLIST_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def save_wishlist(items: list[dict]) -> None:
+    tmp = WISHLIST_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, WISHLIST_FILE)
+
+
+WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url")
+
+
+def wishlist_add(data: dict) -> list[dict]:
+    title = str(data.get("title", "")).strip()
+    if not title:
+        raise ValueError("нужно название")
+    with STATE_LOCK:
+        items = load_wishlist()
+        if any(i["title"].casefold() == title.casefold() for i in items):
+            return items
+        item = {"id": f"w{int(time.time() * 1000)}", "added": time.strftime("%Y-%m-%d"), "title": title}
+        for k in WISH_FIELDS[1:]:
+            item[k] = str(data.get(k, "") or "").strip()
+        items.insert(0, item)
+        save_wishlist(items)
+        return items
+
+
+def wishlist_update(wid: str, data: dict) -> list[dict]:
+    with STATE_LOCK:
+        items = load_wishlist()
+        for it in items:
+            if it["id"] == wid:
+                for k in WISH_FIELDS:
+                    if k in data:
+                        it[k] = str(data[k] or "").strip()
+        save_wishlist(items)
+        return items
+
+
+def wishlist_delete(wid: str) -> list[dict]:
+    with STATE_LOCK:
+        items = [i for i in load_wishlist() if i["id"] != wid]
+        save_wishlist(items)
+        return items
 
 
 def load_settings() -> dict:
@@ -170,6 +229,192 @@ def merge_settings(patch: dict) -> dict:
         return cur
 
 
+FW_SEARCH = "https://fantasy-worlds.org/search.json?q="
+FW_READER = "https://reader.fantasy-worlds.org/book/{id}/read.html"
+OPDS_SOURCES = [  # searched after fantasy-worlds, in this order
+    ("flibusta", "https://flibusta.is", "https://flibusta.is/opds/search?searchType=books&searchTerm="),
+    ("coollib", "https://coollib.net", "https://coollib.net/opds/search?searchType=books&searchTerm="),
+]
+VOLUME_RE = re.compile(r"\b(?:т|том|кн|книга|ч|часть|vol|volume|part)\.?\s*(\d+|[IVXLC]+)\b", re.I)
+
+
+def _get(url: str, timeout: int = 40) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    return urllib.request.urlopen(req, timeout=timeout).read()
+
+
+def norm_title(s: str) -> str:
+    s = (s or "").lower().replace("ё", "е")
+    s = VOLUME_RE.sub(" ", s)
+    s = re.sub(r"\bгл\.?\s.*$", " ", s)  # chapter ranges after the volume ("Гл. I - XL")
+    s = re.sub(r"\[[^\]]*\]|\([^)]*$", " ", s)  # edition tags like [litres], [СИ]; dangling "("
+    return re.sub(r"[^\w]+", " ", s).strip()
+
+
+def roman_to_int(s: str) -> int:
+    vals = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
+    total, prev = 0, 0
+    for ch in reversed(s.upper()):
+        v = vals.get(ch, 0)
+        total += -v if v < prev else v
+        prev = max(prev, v)
+    return total
+
+
+def volume_no(title: str) -> int | None:
+    m = VOLUME_RE.search(title or "")
+    if not m:
+        return None
+    v = m.group(1)
+    return int(v) if v.isdigit() else roman_to_int(v)
+
+
+def search_fw(query: str) -> list[dict]:
+    data = json.loads(_get(FW_SEARCH + urllib.parse.quote(query)).decode("utf-8", "replace"))
+    hits = []
+    for b in (data.get("books") or [])[:10]:
+        author = " ".join(x for x in (b.get("author_name"), b.get("author_surname")) if x)
+        yt = b.get("yt_id")
+        hits.append(
+            {
+                "source": "fantasy-worlds",
+                "id": str(b.get("id")),
+                "title": b.get("title") or "",
+                "author": author,
+                "year": b.get("year") or "",
+                "lang": b.get("lang_code") or "",
+                "series": b.get("series_name") or "",
+                "url": FW_READER.format(id=b.get("id")),
+                "kind": "html",
+                "audio_url": f"https://www.youtube.com/watch?v={yt}" if yt else "",
+                "narrator": b.get("yt_reader") or "",
+            }
+        )
+
+    def readable(h):
+        try:
+            r = urllib.request.Request(h["url"], method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
+            h["readable"] = urllib.request.urlopen(r, timeout=8).status == 200
+        except Exception:  # noqa: BLE001
+            h["readable"] = False
+        return h
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        return list(ex.map(readable, hits))
+
+
+def search_opds(name: str, base: str, search_url: str, query: str) -> list[dict]:
+    xml = _get(search_url + urllib.parse.quote(query)).decode("utf-8", "replace")
+    hits = []
+    for e in re.findall(r"<entry>(.*?)</entry>", xml, re.S)[:12]:
+        title = (
+            html_unescape(re.search(r"<title>(.*?)</title>", e, re.S).group(1)).strip()
+            if re.search(r"<title>", e)
+            else ""
+        )
+        authors = [html_unescape(x).strip() for x in re.findall(r"<author>\s*<name>(.*?)</name>", e, re.S)]
+        lang = re.search(r"<dc:language>(.*?)</dc:language>", e)
+        fb2 = re.search(r'href="([^"]+)"[^>]*type="application/fb2\+zip"', e) or re.search(
+            r'type="application/fb2\+zip"[^>]*href="([^"]+)"', e
+        )
+        epub = re.search(r'href="([^"]+)"[^>]*type="application/epub\+zip"', e)
+        link = fb2 or epub
+        if link:
+            href = link.group(1)
+        else:  # some catalogs (coollib) only link the book page from search results: derive /b/<id>/fb2
+            page = re.search(r'href="(?:https?://[^/"]+)?/b/(\d+)"', e)
+            if not page:
+                continue
+            href = f"/b/{page.group(1)}/fb2"
+            fb2 = True
+        if href.startswith("/"):
+            href = base + href
+        hits.append(
+            {
+                "source": name,
+                "id": href,
+                "title": title,
+                "author": ", ".join(authors),
+                "year": "",
+                "lang": lang.group(1) if lang else "",
+                "series": "",
+                "url": href,
+                "kind": "fb2" if fb2 else "epub",
+                "audio_url": "",
+                "narrator": "",
+                "readable": True,
+            }
+        )
+    return hits
+
+
+def html_unescape(s: str) -> str:
+    import html as _html
+
+    return _html.unescape(s)
+
+
+def search_text(query: str) -> dict:
+    """Query every source in parallel; group volumes of the same work so they load as one book.
+    Ranking: exact and complete first, then source priority (fantasy-worlds, flibusta, coollib)."""
+    hits, errors = [], []
+    with ThreadPoolExecutor(max_workers=1 + len(OPDS_SOURCES)) as ex:
+        futures = {ex.submit(search_fw, query): "fantasy-worlds"}
+        futures.update({ex.submit(search_opds, n, b, u, query): n for n, b, u in OPDS_SOURCES})
+        for f, n in futures.items():
+            try:
+                hits += f.result(timeout=45)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{n}: {e}")
+    want = norm_title(query)
+    groups: dict[tuple, dict] = {}
+    for h in hits:
+        key = (h["source"], norm_title(h["title"]), norm_title(h["author"]))
+        g = groups.setdefault(
+            key,
+            {
+                "source": h["source"],
+                "title": h["title"],
+                "author": h["author"],
+                "year": h["year"],
+                "lang": h["lang"],
+                "series": h["series"],
+                "audio_url": h["audio_url"],
+                "narrator": h["narrator"],
+                "readable": h["readable"],
+                "parts": [],
+            },
+        )
+        g["parts"].append({"title": h["title"], "url": h["url"], "kind": h["kind"], "no": volume_no(h["title"])})
+        g["readable"] = g["readable"] or h["readable"]
+    out = []
+    for g in groups.values():
+        singles = [p for p in g["parts"] if not p["no"]]
+        volumes = [p for p in g["parts"] if p["no"]]
+        if singles:  # a complete one-file edition beats volumes; several editions: keep the first
+            g["parts"] = [singles[0]]
+            g["title"] = singles[0]["title"]
+            g["complete"] = True
+        else:
+            seen: set = set()  # several editions of the same volume: keep the first
+            vols = [p for p in sorted(volumes, key=lambda p: p["no"]) if not (p["no"] in seen or seen.add(p["no"]))]
+            g["parts"] = vols
+            g["title"] = re.sub(r"[\s.,:;(–—-]+$", "", VOLUME_RE.split(vols[0]["title"])[0]).strip() or g["title"]
+            g["complete"] = [p["no"] for p in vols] == list(range(1, len(vols) + 1)) and (
+                len(vols) > 1 or vols[0]["no"] == 1
+            )
+        t = norm_title(g["title"])
+        g["exact"] = bool(want) and (
+            t == want or norm_title(f"{g['author']} {g['title']}") == want or t.startswith(want + " ")
+        )
+        out.append(g)
+    order = {"fantasy-worlds": 0, "flibusta": 1, "coollib": 2}
+    out.sort(
+        key=lambda g: (not (g["exact"] and g["complete"] and g["readable"]), not g["exact"], order.get(g["source"], 9))
+    )
+    return {"hits": out[:12], "errors": errors}
+
+
 def slugify(title: str) -> str:
     s = "".join(TRANSLIT.get(c, c) for c in title.lower())
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:48]
@@ -186,7 +431,23 @@ def parse_multipart(content_type: str, body: bytes) -> dict[str, dict]:
             continue
         fn = part.get_filename()
         payload = part.get_payload(decode=True) or b""
-        out[name] = {"filename": fn, "data": payload} if fn else {"value": payload.decode("utf-8", "replace").strip()}
+        if fn:
+            out[name] = {"filename": fn, "data": payload}
+        else:
+            value = payload.decode("utf-8", "replace").strip()
+            if name in out and "value" in out[name]:  # repeated field: keep every value (volumes / parts)
+                out[name]["values"] = out[name].get("values", [out[name]["value"]]) + [value]
+            else:
+                out[name] = {"value": value}
+    return out
+
+
+def form_values(form: dict, key: str) -> list[str]:
+    f = form.get(key) or {}
+    vals = f.get("values") or ([f["value"]] if f.get("value") else [])
+    out: list[str] = []
+    for v in vals:
+        out += [x.strip() for x in re.split(r"[\n,]+", v) if x.strip()]
     return out
 
 
@@ -198,33 +459,48 @@ def start_job(form: dict) -> tuple[dict | None, str]:
     if not SLUG_RE.match(slug):
         return None, "bad slug"
     d = BOOKS / slug
-    if (d / "book.json").exists() or (slug in JOBS and JOBS[slug]["proc"].poll() is None):
+    if slug in JOBS and JOBS[slug]["proc"].poll() is None:
+        return None, f"книга {slug} уже загружается"
+    texts = form_values(form, "text_url")
+    tf = form.get("text_file")
+    has_file = bool(tf and tf.get("filename") and tf["data"])
+    attach_audio = (d / "book.json").exists() and not texts and not has_file
+    if (d / "book.json").exists() and not attach_audio:
         return None, f"книга {slug} уже есть"
     d.mkdir(parents=True, exist_ok=True)
-    text = val("text_url")
-    tf = form.get("text_file")
-    if tf and tf.get("filename") and tf["data"]:
-        ext = (
-            ".fb2.zip"
-            if tf["filename"].lower().endswith(".zip")
-            else ".fb2"
-            if tf["filename"].lower().endswith(".fb2")
-            else ".html"
-        )
-        (d / ("upload" + ext)).write_bytes(tf["data"])
-        text = str(d / ("upload" + ext))
-    if not text:
+    if has_file:
+        fname = "upload_" + re.sub(r"[^\w.-]+", "_", tf["filename"])
+        (d / fname).write_bytes(tf["data"])
+        texts.append(str(d / fname))
+    if not texts and not attach_audio:
         return None, "нужен текст: ссылка или файл"
-    audio = val("audio_url")
+
+    def allowed(src: str) -> bool:
+        if src.startswith(("http://", "https://")):
+            return True
+        try:
+            return BOOKS.resolve() in Path(src).resolve().parents
+        except OSError:
+            return False
+
+    if not all(allowed(t) for t in texts):
+        return None, "ссылка должна начинаться с http(s)"
+    audios = form_values(form, "audio_url")
     af = form.get("audio_file")
     if af and af.get("filename") and af["data"]:
         ext = os.path.splitext(af["filename"])[1].lower() or ".m4a"
         (d / ("upload" + ext)).write_bytes(af["data"])
-        audio = str(d / ("upload" + ext))
+        audios.append(str(d / ("upload" + ext)))
+    if attach_audio and not audios:
+        return None, "нужна ссылка на аудио или файл"
+    if not all(allowed(a) for a in audios):
+        return None, "ссылка на аудио должна начинаться с http(s)"
     py = str(PIPELINE_PY) if PIPELINE_PY.exists() else sys.executable
-    cmd = [py, str(ROOT / "pipeline" / "add_book.py"), slug, "--text", text]
-    if audio:
-        cmd += ["--audio", audio]
+    cmd = [py, str(ROOT / "pipeline" / "add_book.py"), slug]
+    for t in texts:
+        cmd += ["--text", t]
+    for a in audios:
+        cmd += ["--audio", a]
     if val("align") != "on":
         cmd.append("--no-align")
     for k, flag in (("title", "--title"), ("author", "--author"), ("narrator", "--narrator")):
@@ -316,6 +592,16 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(job_status())
         if self.path.startswith("/api/settings"):
             return self.send_json(load_settings())
+        if self.path.startswith("/api/wishlist"):
+            return self.send_json(load_wishlist())
+        if self.path.startswith("/api/search"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0].strip()
+            if not q:
+                return self.send_json([])
+            try:
+                return self.send_json(search_text(q))
+            except Exception as e:  # noqa: BLE001 - upstream site down or changed: report, don't crash
+                return self.send_json({"error": f"поиск недоступен: {e}"}, HTTPStatus.BAD_GATEWAY)
         path = self.translate_path(self.path)
         if os.path.isfile(path) and "Range" in self.headers:
             return self.send_range(path)
@@ -330,6 +616,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
         if self.path.startswith("/api/settings"):
             return self.send_json(merge_settings(body))
+        if self.path.startswith("/api/wishlist/"):
+            return self.send_json(wishlist_update(self.path.rsplit("/", 1)[-1], body))
         slug, is_session = self.state_slug()
         if slug is None or is_session:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -338,7 +626,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         if self.path.startswith("/api/add"):
             try:
-                job, err = start_job(self.read_form())
+                form = self.read_form()
+                with STATE_LOCK:
+                    job, err = start_job(form)
             except Exception as e:  # noqa: BLE001 - malformed multipart, bad paths, disk errors: report, don't crash
                 return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
             if err:
@@ -348,10 +638,20 @@ class Handler(SimpleHTTPRequestHandler):
             delta = self.read_json()
         except ValueError as e:
             return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+        if self.path.startswith("/api/wishlist"):
+            try:
+                return self.send_json(wishlist_add(delta))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
         slug, is_session = self.state_slug()
         if slug is None or not is_session:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         return self.send_json(add_session(slug, delta))
+
+    def do_DELETE(self):
+        if self.path.startswith("/api/wishlist/"):
+            return self.send_json(wishlist_delete(self.path.rsplit("/", 1)[-1]))
+        return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def end_headers(self):
         self.send_header("Accept-Ranges", "bytes")

@@ -153,9 +153,68 @@ def split_sentences(text: str) -> list[list[int]]:
     return cleaned
 
 
+def extract_generic(soup: BeautifulSoup, src: Path) -> dict:
+    """Any HTML page: take the container holding most paragraph text, keep headings and paragraphs."""
+    for t in soup(["script", "style", "nav", "header", "footer", "aside", "form", "noscript"]):
+        t.decompose()
+    best, best_len = soup.body or soup, 0
+    for cand in (soup.body or soup).find_all(["div", "article", "section", "main", "td"]):
+        n = sum(len(p.get_text()) for p in cand.find_all("p", recursive=False))
+        if n > best_len:
+            best, best_len = cand, n
+    blocks: list[dict] = []
+    chapters: list[dict] = [{"id": "s0", "title": "", "level": 1, "first_block": 0}]
+
+    def add(el: Tag, kind: str):
+        text, em, nrefs = inline_text(el)
+        if not text.strip():
+            return
+        blocks.append(
+            {
+                "images": [],
+                "id": el.get("id") or f"b{len(blocks)}",
+                "kind": kind,
+                "chapter": len(chapters) - 1,
+                "stanza": None,
+                "text": text,
+                "em": em,
+                "notes": [],
+                "sentences": split_sentences(text) if kind == "p" else [[0, len(text)]],
+                "audio": True,
+            }
+        )
+
+    for el in best.find_all(["h1", "h2", "h3", "h4", "p", "blockquote"]):
+        if el.name in ("h1", "h2", "h3"):
+            chapters.append(
+                {
+                    "id": f"s{len(chapters)}",
+                    "title": el.get_text(" ", strip=True),
+                    "level": 2,
+                    "first_block": len(blocks),
+                }
+            )
+            add(el, "title")
+        elif el.name == "h4":
+            add(el, "subtitle")
+        elif el.name == "blockquote":
+            for p in el.find_all("p"):
+                add(p, "cite")
+        elif el.find_parent("blockquote") is None:
+            add(el, "p")
+    if chapters[0]["title"] == "" and len(chapters) > 1 and chapters[1]["first_block"] == 0:
+        chapters.pop(0)
+        for b in blocks:
+            b["chapter"] = max(0, b["chapter"] - 1)
+    title = soup.title.get_text(strip=True) if soup.title else src.stem
+    return {"title": title, "author": "", "chapters": chapters, "blocks": blocks, "notes": {}}
+
+
 def extract(src: Path) -> dict:
-    soup = BeautifulSoup(src.read_text(encoding="utf-8"), "html.parser")
+    soup = BeautifulSoup(src.read_text(encoding="utf-8", errors="replace"), "html.parser")
     article = soup.find("article", id="book-content")
+    if article is None:
+        return extract_generic(soup, src)
     blocks: list[dict] = []
     chapters: list[dict] = []
     notes: dict[str, str] = {}

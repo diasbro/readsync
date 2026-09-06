@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
-"""Add a book to readsync: fetch text and audio, build the sync map, prepare playback audio.
+"""Add a book to readsync, or add audio to an existing one.
 
 Usage:
-  python pipeline/add_book.py <slug> --text <url|book.html|book.fb2|book.fb2.zip> --audio <youtube-url|file> \
+  python pipeline/add_book.py <slug> --text <url|file> [--text <url|file> ...] [--audio <url|file> ...]
       [--title T] [--author A] [--narrator N] [--lang ru] [--no-align] [--whisper-model small]
+  python pipeline/add_book.py <slug> --audio <url|file> [...]      # attach audio to an existing text-only book
 
-Text sources: reader.fantasy-worlds.org "read.html" pages, or FB2 files.
-Audio sources: a YouTube URL (audio + auto-captions via yt-dlp) or a local audio file.
+Text sources: fantasy-worlds reader pages, any HTML page, FB2 / FB2.zip, EPUB, TXT (local files or
+direct download links). Several --text values are volumes of one book and are merged in order.
+Audio sources: YouTube URLs or local files; several --audio values are parts and are joined in order.
 Without captions the audio is transcribed with faster-whisper for coarse anchoring.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
 PIPE = ROOT / "pipeline"
+UA = {"User-Agent": "Mozilla/5.0"}
 
 
 def run(cmd: list[str], **kw) -> None:
@@ -34,38 +39,95 @@ def is_url(s: str) -> bool:
     return s.startswith(("http://", "https://"))
 
 
-def fetch_text(src: str, d: Path) -> str:
-    """Return the extractor kind: 'html' or 'fb2'."""
-    if is_url(src):
-        req = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0"})
-        data = urllib.request.urlopen(req, timeout=60).read()
-        if data.lstrip().startswith(b"<?xml") or b"<FictionBook" in data[:2000]:
-            (d / "book.fb2").write_bytes(data)
-            return "fb2"
-        (d / "book.html").write_bytes(data)
-        # fantasy-worlds serves illustrations from /book/<id>/images/<name>
-        names = sorted(set(re.findall(rb'data-src="([^"]+)"', data)))
-        if names:
-            (d / "images").mkdir(exist_ok=True)
-            base = src.rsplit("/", 1)[0]
-            for name in names:
-                n = name.decode()
-                try:
-                    r = urllib.request.Request(f"{base}/images/{n}", headers={"User-Agent": "Mozilla/5.0"})
-                    (d / "images" / n).write_bytes(urllib.request.urlopen(r, timeout=60).read())
-                except (OSError, ValueError):
-                    print("image not downloaded:", n, flush=True)
-        return "html"
-    p = Path(src).expanduser()
-    if p.name.lower().endswith((".fb2", ".fb2.zip")):
-        shutil.copy(p, d / ("book.fb2.zip" if p.name.lower().endswith(".zip") else "book.fb2"))
+def sniff(data: bytes, hint: str) -> str:
+    """Return one of html, fb2, fb2zip, epub, txt."""
+    head = data[:4096].lstrip()
+    hint = hint.lower()
+    if data[:2] == b"PK":
+        try:
+            names = zipfile.ZipFile(__import__("io").BytesIO(data)).namelist()
+        except zipfile.BadZipFile:
+            names = []
+        if "META-INF/container.xml" in names or hint.endswith(".epub"):
+            return "epub"
+        return "fb2zip"
+    if b"<FictionBook" in head or hint.endswith(".fb2"):
         return "fb2"
-    shutil.copy(p, d / "book.html")
-    return "html"
+    if re.search(rb"<(html|!doctype html|body|p)\b", head, re.I) or hint.endswith((".html", ".htm")):
+        return "html"
+    return "txt"
 
 
-def fetch_audio(src: str, d: Path, lang: str) -> Path:
+def fetch_text(src: str, part_dir: Path) -> str:
+    """Download or copy one text source into part_dir; return the extractor kind."""
+    part_dir.mkdir(parents=True, exist_ok=True)
     if is_url(src):
+        req = urllib.request.Request(src, headers=UA)
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = r.read()
+            final = r.geturl()
+        kind = sniff(data, final)
+    else:
+        p = Path(src).expanduser()
+        data = p.read_bytes()
+        kind = sniff(data, p.name)
+        final = p.name
+    name = {"html": "book.html", "fb2": "book.fb2", "fb2zip": "book.fb2.zip", "epub": "book.epub", "txt": "book.txt"}[
+        kind
+    ]
+    (part_dir / name).write_bytes(data)
+    if kind == "html" and is_url(src):
+        download_site_images(data, src, part_dir)
+    return kind
+
+
+def download_site_images(data: bytes, src: str, d: Path) -> None:
+    """fantasy-worlds reader pages reference illustrations as data-src under /book/<id>/images/."""
+    names = sorted(set(re.findall(rb'data-src="([^"]+)"', data)))
+    if not names or b'id="book-content"' not in data:
+        return
+    (d / "images").mkdir(exist_ok=True)
+    base = src.rsplit("/", 1)[0]
+    for name in names:
+        n = name.decode()
+        try:
+            r = urllib.request.Request(f"{base}/images/{n}", headers=UA)
+            (d / "images" / n).write_bytes(urllib.request.urlopen(r, timeout=60).read())
+        except (OSError, ValueError):
+            print("image not downloaded:", n, flush=True)
+
+
+EXTRACTORS = {
+    "html": "extract_text.py",
+    "fb2": "extract_fb2.py",
+    "fb2zip": "extract_fb2.py",
+    "epub": "extract_epub.py",
+    "txt": "extract_txt.py",
+}
+
+
+def build_text(sources: list[str], d: Path, title: str, author: str) -> None:
+    parts_dir = d / "parts"
+    if parts_dir.exists():
+        shutil.rmtree(parts_dir)
+    for i, src in enumerate(sources, 1):
+        part = parts_dir / f"{i:02d}"
+        kind = fetch_text(src, part)
+        run([PY, str(PIPE / EXTRACTORS[kind]), str(part)])
+    # merge parts (a single part is copied through), then gather images into the book's images/
+    cmd = [PY, str(PIPE / "merge_books.py"), str(d), "--title", title, "--author", author]
+    run(cmd)
+    (d / "images").mkdir(exist_ok=True)
+    for part in sorted(parts_dir.iterdir()):
+        if (part / "images").is_dir():
+            for f in (part / "images").iterdir():
+                shutil.copy(f, d / "images" / f.name)
+
+
+def fetch_audio(src: str, d: Path, idx: int, lang: str) -> Path:
+    """Download one audio part (YouTube via yt-dlp, with auto captions) or copy a local file."""
+    if is_url(src):
+        out = f"part{idx:02d}.%(ext)s"
         run(
             [
                 "yt-dlp",
@@ -78,69 +140,106 @@ def fetch_audio(src: str, d: Path, lang: str) -> Path:
                 "json3",
                 "--no-progress",
                 "-o",
-                "yt.%(ext)s",
+                out,
                 src,
             ],
             cwd=d,
         )
-        return next(f for f in d.iterdir() if f.stem == "yt" and f.suffix not in (".json3", ".part"))
+        return next(f for f in d.iterdir() if f.stem == f"part{idx:02d}" and f.suffix not in (".json3", ".part"))
     p = Path(src).expanduser()
-    dst = d / ("source" + p.suffix.lower())
+    dst = d / f"part{idx:02d}{p.suffix.lower()}"
     if not dst.exists():
         shutil.copy(p, dst)
     return dst
 
 
-def prepare_audio(src: Path, d: Path) -> None:
-    if not (d / "audio16k.wav").exists():
-        run(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-i",
-                str(src),
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-c:a",
-                "pcm_s16le",
-                str(d / "audio16k.wav"),
-            ]
-        )
-    if src.suffix.lower() == ".mp3":
-        return  # browsers play mp3 directly (serve.py picks audio.mp3)
-    if not (d / "audio.m4a").exists():
-        codec = (
-            ["-c:a", "copy"]
-            if src.suffix.lower() in (".m4a", ".m4b", ".mp4", ".aac")
-            else ["-c:a", "aac", "-b:a", "96k"]
-        )
-        run(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-i",
-                str(src),
-                "-vn",
-                *codec,
-                "-movflags",
-                "+faststart",
-                str(d / "audio.m4a"),
-            ]
-        )
+def duration_of(path: Path) -> float:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return float(out or 0)
+
+
+def build_audio(sources: list[str], d: Path, lang: str) -> None:
+    parts = [fetch_audio(src, d, i, lang) for i, src in enumerate(sources, 1)]
+    offsets, total = [], 0.0
+    for p in parts:
+        offsets.append(total)
+        total += duration_of(p)
+    # playable file (AAC) and 16 kHz mono WAV for alignment, both from the concatenation of all parts
+    lst = d / "parts.txt"
+    lst.write_text("".join(f"file '{p.resolve()}'\n" for p in parts), encoding="utf-8")
+    run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(lst),
+            "-vn",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-movflags",
+            "+faststart",
+            str(d / "audio.m4a"),
+        ]
+    )
+    run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(d / "audio.m4a"),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(d / "audio16k.wav"),
+        ]
+    )
+    # captions: shift each part's events by its offset and join into one json3
+    events = []
+    for p, off in zip(parts, offsets, strict=True):
+        caps = sorted(d.glob(f"{p.stem}.*.json3"))
+        if not caps:
+            continue
+        data = json.loads(caps[0].read_text(encoding="utf-8"))
+        for ev in data.get("events", []):
+            if "tStartMs" in ev:
+                ev["tStartMs"] = int(ev["tStartMs"] + off * 1000)
+                events.append(ev)
+    for old in d.glob("yt.*.json3"):
+        old.unlink()
+    if events:
+        (d / "yt.merged.json3").write_text(json.dumps({"events": events}, ensure_ascii=False), encoding="utf-8")
+    elif (d / "whisper.json3").exists():
+        (d / "whisper.json3").unlink()
+    for p in parts:
+        if len(parts) > 1 or p.suffix != ".webm":
+            p.unlink()  # the concatenated m4a is the source from now on
+    lst.unlink()
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("slug")
-    ap.add_argument("--text", required=True)
-    ap.add_argument("--audio", default="", help="YouTube URL or local audio file; omit for a text-only book")
+    ap.add_argument("--text", action="append", default=[], help="text source; repeat for volumes")
+    ap.add_argument("--audio", action="append", default=[], help="audio source; repeat for parts")
     ap.add_argument("--title", default="")
     ap.add_argument("--author", default="")
     ap.add_argument("--narrator", default="")
@@ -151,39 +250,48 @@ def main() -> None:
 
     d = ROOT / "books" / args.slug
     d.mkdir(parents=True, exist_ok=True)
-    kind = fetch_text(args.text, d)
-    run([PY, str(PIPE / ("extract_fb2.py" if kind == "fb2" else "extract_text.py")), str(d)])
+    if args.text:
+        build_text(args.text, d, args.title, args.author)
+    elif not (d / "book.json").exists():
+        raise SystemExit("no text: pass --text, or use an existing book slug to attach audio")
+    book = json.loads((d / "book.json").read_text(encoding="utf-8"))
+
     if args.audio:
-        audio_src = fetch_audio(args.audio, d, args.lang)
-        prepare_audio(audio_src, d)
-        if audio_src.suffix.lower() == ".mp3" and not (d / "audio.mp3").exists():
-            (d / "audio.mp3").symlink_to(audio_src.name)
-        if not list(d.glob("yt.*.json3")) and not (d / "whisper.json3").exists():
+        for stale in ("timing.json", "anchors.json", "align.log"):
+            (d / stale).unlink(missing_ok=True)
+        build_audio(args.audio, d, args.lang)
+        if not (d / "yt.merged.json3").exists() and not (d / "whisper.json3").exists():
             print("no captions: transcribing with faster-whisper (slow)", flush=True)
             run([PY, str(PIPE / "transcribe.py"), str(d), "--model", args.whisper_model, "--lang", args.lang])
         run([PY, str(PIPE / "anchors.py"), str(d)])
         run([PY, str(PIPE / "timing_from_anchors.py"), str(d)])
 
-    import json
-
-    book = json.loads((d / "book.json").read_text(encoding="utf-8"))
     toml = d / "book.toml"
-    if not toml.exists():
-        esc = lambda s: s.replace('"', '\\"')  # noqa: E731
-        toml.write_text(
-            f'slug = "{args.slug}"\ntitle = "{esc(args.title or book.get("title", args.slug))}"\n'
-            f'author = "{esc(args.author or book.get("author", ""))}"\nlanguage = "{args.lang}"\n'
-            f'text_source = "{esc(args.text)}"\naudio_source = "{esc(args.audio)}"\n'
-            f'narrator = "{esc(args.narrator)}"\n',
-            encoding="utf-8",
-        )
+    esc = lambda s: str(s).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
+    meta = {}
+    if toml.exists():
+        import tomllib
+
+        meta = tomllib.loads(toml.read_text(encoding="utf-8"))
+    meta.setdefault("slug", args.slug)
+    meta["title"] = args.title or meta.get("title") or book.get("title", args.slug)
+    meta["author"] = args.author or meta.get("author") or book.get("author", "")
+    meta["language"] = args.lang
+    if args.text:
+        meta["text_source"] = " | ".join(args.text)
+    if args.audio:
+        meta["audio_source"] = " | ".join(args.audio)
+        meta["narrator"] = args.narrator or meta.get("narrator", "")
+    toml.write_text("".join(f'{k} = "{esc(v)}"\n' for k, v in meta.items()), encoding="utf-8")
+
     print(
-        f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)")
+        f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)"),
+        flush=True,
     )
     if args.audio and not args.no_align:
-        print("running precise MMS alignment (about 7 min per hour of audio)...", flush=True)
+        print("running precise MMS alignment (about 15 min per hour of audio, low priority)...", flush=True)
         run([PY, str(PIPE / "align.py"), str(d)])
-        print("done: precise timing")
+        print("done: precise timing", flush=True)
 
 
 if __name__ == "__main__":
