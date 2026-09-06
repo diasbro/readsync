@@ -14,7 +14,10 @@
   <header class="lib-head">
     <div class="lib-title-row">
       <h1><span class="mark" aria-hidden="true"><i></i></span>readsync</h1>
-      <button class="icon" id="lib-settings" title="Вид: тема и шрифт">⚙</button>
+      <div class="lib-tools">
+        <button class="icon" id="lib-find" title="Найти в библиотеке (/)">⌕</button>
+        <button class="icon" id="lib-settings" title="Вид: тема и шрифт">⚙</button>
+      </div>
       <div id="lib-prefs" class="popup prefs" hidden>
         <div class="popup-title">Тема</div>
         <div class="seg" id="lib-theme">
@@ -30,6 +33,7 @@
       </div>
     </div>
     <div class="demo" aria-hidden="true"><span class="demo-line" id="demo-line"></span></div>
+    <input id="lib-search" class="lib-search" placeholder="Название или автор… Esc — закрыть" hidden>
   </header>
 
   <section class="lib-section" id="reading-section" hidden>
@@ -50,7 +54,7 @@
       </label>
     </div>
     <form id="wish-form" class="wish-add">
-      <input name="title" placeholder="Название книги, можно с автором" autocomplete="off" required>
+      <input name="title" placeholder="Название книги или ссылка на текст. Файл можно перетащить сюда" autocomplete="off" required>
       <button type="submit" class="btn primary">Сохранить</button>
     </form>
     <div id="wish-list"></div>

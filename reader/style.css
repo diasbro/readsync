@@ -58,7 +58,16 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 #library { max-width: 780px; margin: 0 auto; padding: 56px 24px 80px; }
 .lib-head { margin-bottom: 40px; }
 .lib-title-row { position: relative; display: flex; align-items: center; justify-content: space-between; }
+.lib-tools { display: flex; gap: 4px; }
 .lib-title-row .icon { color: var(--muted); }
+.lib-search { display: block; width: 100%; margin-top: 18px; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 8px 2px; font-size: 18px; font-family: var(--serif); color: var(--fg); outline: none; }
+.lib-search:focus { border-bottom-color: var(--accent); }
+.lib-section.empty { display: none; }
+.card.hit-off { display: none; }
+body.dropping #wishlist .wish-add input { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+.wish .status .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; margin-right: 6px; vertical-align: -1px; animation: spin .9s linear infinite; }
+.wish .status.err { color: #c0392b; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .lib-title-row .icon:hover { color: var(--fg); }
 .prefs { position: absolute; right: 0; top: 46px; width: 360px; z-index: 30; }
 .prefs .seg button { min-width: 0; flex: 1 1 30%; }
