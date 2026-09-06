@@ -52,11 +52,12 @@
   // ---------------- library ----------------
   if (!slug) {
     $("#library").hidden = false;
-    fetch("/api/books").then((r) => r.json()).then((books) => {
+    fetch("/api/books").then((r) => r.json()).then(async (books) => {
       const list = $("#library-list");
       if (!books.length) { list.innerHTML = '<p class="muted">Нет книг. Добавь папку в books/ с book.toml.</p>'; return; }
-      list.innerHTML = books.map((b) => {
-        const pos = store.get("rs:pos:" + b.slug, 0), dur = store.get("rs:dur:" + b.slug, 0);
+      const states = await Promise.all(books.map((b) => fetch(`/api/state/${b.slug}`).then((r) => r.json()).catch(() => ({}))));
+      list.innerHTML = books.map((b, i) => {
+        const pos = states[i].pos ?? store.get("rs:pos:" + b.slug, 0), dur = store.get("rs:dur:" + b.slug, 0);
         const pct = dur ? Math.round((pos / dur) * 100) : 0;
         const meta = [b.author, b.narrator ? "читает " + b.narrator : null, b.ready ? (b.timing_source === "mms" ? "точная синхронизация" : "синхронизация по субтитрам") : "не готово"].filter(Boolean).join(" · ");
         return `<a class="card" href="?book=${esc(b.slug)}"><div class="t">${esc(b.title || b.slug)}</div><div class="m">${esc(meta)}</div>
@@ -72,13 +73,30 @@
   let book, wB, wT0, wT1, wS, sFirst, sLast, sBlock, chapStartWord = [], chapStartTime = [], duration = 0;
   let curWord = -1, curSent = -1, curBlock = -1, curChap = -1;
   let userScrolled = false, wordEls = [], sentEls = [], blockEls = [];
+  // shared state lives on the server (books/<slug>/state.json) so every browser sees the same
+  // position, settings and stats; localStorage is only a cache. Last writer wins by timestamp.
+  let remote = {};
+  const loadRemote = () => fetch(`/api/state/${slug}`).then((r) => r.json()).then((s) => (remote = s || {})).catch(() => (remote = {}));
+  const putState = (patch, keepalive) => fetch(`/api/state/${slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch), keepalive: !!keepalive }).catch(() => {});
+  let settingsTimer = 0;
+  function persistSettings() {
+    const at = Date.now(); store.set("rs:settingsAt", at);
+    clearTimeout(settingsTimer); settingsTimer = setTimeout(() => putState({ settings, settingsAt: at }), 400);
+  }
 
   async function load() {
     const [meta, bookJ, timingJ] = await Promise.all([
       fetch("/api/books").then((r) => r.json()).then((bs) => bs.find((b) => b.slug === slug)),
       fetch(`/books/${slug}/book.json`).then((r) => r.json()),
       fetch(`/books/${slug}/timing.json`).then((r) => (r.ok ? r.json() : null)),
+      loadRemote(),
     ]);
+    if (remote.settings && (remote.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
+      Object.assign(settings, remote.settings); store.set("rs:settingsAt", remote.settingsAt); applySettings(); syncSettingsUI();
+    }
+    const localStats = store.get("rs:stats:" + slug, null);
+    if (localStats) putState({ stats: localStats }).then((r) => r && r.json()).then((s) => { if (s && s.stats) store.set("rs:stats:" + slug, s.stats); }).catch(() => {});
+    else if (remote.stats) store.set("rs:stats:" + slug, remote.stats);
     if (!meta) throw new Error("книга не найдена");
     if (!timingJ) throw new Error("нет timing.json — запусти пайплайн");
     book = bookJ; duration = timingJ.duration;
@@ -89,7 +107,9 @@
     render(timingJ.words);
     buildToc();
     $("#loading").hidden = true;
-    const pos = store.get("rs:pos:" + slug, 0);
+    const remoteWins = (remote.posAt || 0) > store.get("rs:posAt:" + slug, 0) && typeof remote.pos === "number";
+    const pos = remoteWins ? remote.pos : store.get("rs:pos:" + slug, 0);
+    if (remoteWins) { store.set("rs:pos:" + slug, remote.pos); store.set("rs:posAt:" + slug, remote.posAt); }
     audio.addEventListener("loadedmetadata", () => {
       if (isFinite(audio.duration)) { duration = audio.duration; store.set("rs:dur:" + slug, duration); }
       if (pos > 0 && pos < duration - 5) audio.currentTime = pos;
@@ -202,9 +222,12 @@
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (wT0[mid] <= t) lo = mid; else hi = mid - 1; }
     return lo;
   }
+  let lastCounted = -1;
   function update(force) {
     const t = audio.currentTime + settings.offset;
     const i = wordAt(t);
+    if (!audio.paused && lastCounted >= 0 && i > lastCounted && i - lastCounted < 40) session.words += i - lastCounted;
+    lastCounted = i;
     if (i !== curWord || force) {
       if (curWord >= 0 && wordEls[curWord]) wordEls[curWord].classList.remove("cur");
       curWord = i; wordEls[i]?.classList.add("cur");
@@ -283,8 +306,17 @@
   audio.addEventListener("ratechange", () => update(true));
   audio.addEventListener("error", () => { $("#loading").hidden = false; $("#loading").textContent = "Ошибка аудио: " + (audio.error?.message || audio.error?.code); });
   setInterval(() => { if (!audio.paused) savePos(); }, 5000);
-  addEventListener("beforeunload", () => { savePos(); session.stop(); });
-  function savePos() { store.set("rs:pos:" + slug, audio.currentTime); }
+  addEventListener("beforeunload", () => { savePos(true); session.stop(); });
+  // a tab only publishes its position after it played or seeked, so a stale background tab
+  // closed later cannot clobber progress made in another browser
+  let posDirty = false;
+  audio.addEventListener("playing", () => { posDirty = true; });
+  function savePos(keepalive) {
+    if (!posDirty) return;
+    const at = Date.now();
+    store.set("rs:pos:" + slug, audio.currentTime); store.set("rs:posAt:" + slug, at);
+    putState({ pos: audio.currentTime, posAt: at }, keepalive);
+  }
 
   // ---------------- controls ----------------
   let pausedAt = 0;
@@ -295,7 +327,20 @@
     }
     return audio.play();
   }
-  function seek(t) { audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
+  function seek(t) { audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); posDirty = true; userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
+  // coming back to a paused tab: adopt a newer position/settings written by another browser
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !audio.paused) return;
+    loadRemote().then(() => {
+      if ((remote.posAt || 0) > store.get("rs:posAt:" + slug, 0) && typeof remote.pos === "number") {
+        audio.currentTime = remote.pos; posDirty = false; store.set("rs:pos:" + slug, remote.pos); store.set("rs:posAt:" + slug, remote.posAt);
+        update(true); scrollToCurrent(true);
+      }
+      if (remote.settings && (remote.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
+        Object.assign(settings, remote.settings); store.set("rs:settingsAt", remote.settingsAt); applySettings(); syncSettingsUI();
+      }
+    });
+  });
   function toggle() { audio.paused ? play() : audio.pause(); }
   function sentStart(si) { return si >= 0 && sFirst[si] >= 0 ? wT0[sFirst[si]] : null; }
   function prevSentence() {
@@ -306,8 +351,8 @@
   }
   function nextSentence() { for (let k = curSent + 1; k < sFirst.length; k++) if (sFirst[k] >= 0) return seek(wT0[sFirst[k]]); }
   function repeatSentence() { const st = sentStart(curSent); if (st != null) { seek(st); if (audio.paused) audio.play(); } }
-  function toggleDim() { settings.dimMode = settings.dimMode === "off" ? (settings.lastDim || "para") : "off"; if (settings.dimMode !== "off") settings.lastDim = settings.dimMode; applySettings(); syncSettingsUI(); }
-  function setSpeed(v) { v = Math.min(2, Math.max(0.5, +v)); audio.playbackRate = v; settings.speed = v; $("#speed").value = String(v); store.set("rs:settings", settings); }
+  function toggleDim() { settings.dimMode = settings.dimMode === "off" ? (settings.lastDim || "para") : "off"; if (settings.dimMode !== "off") settings.lastDim = settings.dimMode; applySettings(); syncSettingsUI(); persistSettings(); }
+  function setSpeed(v) { v = Math.min(2, Math.max(0.5, +v)); audio.playbackRate = v; settings.speed = v; $("#speed").value = String(v); store.set("rs:settings", settings); persistSettings(); }
 
   $("#btn-play").onclick = toggle;
   $("#btn-back").onclick = () => seek(audio.currentTime - 10);
@@ -360,7 +405,13 @@
   }
 
   // ---------------- drawers / settings ----------------
-  function toggleDrawer(sel) { const el = $(sel); const open = el.hidden; closeDrawers(); if (open) { el.hidden = false; $("#scrim").hidden = false; if (sel === "#settings") renderStats(); } }
+  function toggleDrawer(sel) {
+    const el = $(sel); const open = el.hidden; closeDrawers();
+    if (open) {
+      el.hidden = false; $("#scrim").hidden = false;
+      if (sel === "#settings") { renderStats(); loadRemote().then(() => { if (remote.stats) { store.set("rs:stats:" + slug, remote.stats); renderStats(); } }); }
+    }
+  }
   function closeDrawers() { $("#toc").hidden = true; $("#settings").hidden = true; $("#scrim").hidden = true; }
   $("#btn-toc").onclick = () => toggleDrawer("#toc");
   $("#btn-settings").onclick = () => toggleDrawer("#settings");
@@ -376,14 +427,14 @@
     document.querySelectorAll("#set-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
     $("#btn-focus").classList.toggle("on", settings.dimMode !== "off");
   }
-  const bind = (sel, key, conv = (v) => v) => $(sel).addEventListener("input", (e) => { settings[key] = conv(e.target.type === "checkbox" ? e.target.checked : e.target.value); applySettings(); syncSettingsUI(); });
+  const bind = (sel, key, conv = (v) => v) => $(sel).addEventListener("input", (e) => { settings[key] = conv(e.target.type === "checkbox" ? e.target.checked : e.target.value); applySettings(); syncSettingsUI(); persistSettings(); });
   bind("#set-font", "font", Number); bind("#set-lh", "lh", Number); bind("#set-width", "width", Number);
   bind("#set-family", "family"); bind("#set-sent", "sent"); bind("#set-word", "word"); bind("#set-dim", "dimMode"); bind("#set-scroll", "scroll"); bind("#set-click-word", "clickWord");
   bind("#set-ui", "ui"); bind("#set-weight", "weight", Number); bind("#set-rewind", "rewind"); bind("#set-offset", "offset", (v) => Number(v) / 1000);
   $("#set-dim").addEventListener("input", () => { if (settings.dimMode !== "off") settings.lastDim = settings.dimMode; });
   $("#set-offset").addEventListener("input", () => update(true));
   bind("#set-word-style", "wordStyle"); bind("#set-hide-ui", "hideUi"); bind("#set-pause-hidden", "pauseHidden");
-  $("#set-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); syncSettingsUI(); });
+  $("#set-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); syncSettingsUI(); persistSettings(); });
   syncSettingsUI();
 
   // ---------------- notes ----------------
@@ -399,17 +450,19 @@
 
   // ---------------- sessions & stats ----------------
   const session = {
-    t0: null, w0: null,
-    start() { if (this.t0 != null) return; this.t0 = Date.now(); this.w0 = curWord; },
+    t0: null, words: 0,
+    start() { if (this.t0 != null) return; this.t0 = Date.now(); this.words = 0; lastCounted = curWord; },
     stop() {
       if (this.t0 == null) return;
-      const sec = (Date.now() - this.t0) / 1000, words = Math.max(0, curWord - this.w0);
-      this.t0 = null;
+      const sec = (Date.now() - this.t0) / 1000, words = Math.round(this.words);
+      this.t0 = null; this.words = 0;
       if (sec < 2) return;
       const st = store.get("rs:stats:" + slug, { days: {} });
       const d = st.days[today()] || { sec: 0, words: 0 };
       d.sec += sec; d.words += words; st.days[today()] = d; store.set("rs:stats:" + slug, st);
       sprint.words += words;
+      fetch(`/api/state/${slug}/session`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ day: today(), sec, words }), keepalive: true })
+        .then((r) => r.json()).then((s) => { if (s && s.stats) store.set("rs:stats:" + slug, s.stats); }).catch(() => {});
     },
   };
   function renderStats() {
