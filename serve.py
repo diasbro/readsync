@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -91,6 +92,7 @@ def list_books() -> list[dict]:
         meta["has_audio"] = bool(meta["audio"]) and (d / "timing.json").exists()
         job = JOBS.get(d.name)
         meta["building"] = bool(job and job["proc"].poll() is None)
+        meta["added"] = int(toml.stat().st_mtime * 1000)
         cover = (
             next((f for f in (d / "images").glob("cover.*") if f.is_file()), None) if (d / "images").is_dir() else None
         )
@@ -191,7 +193,7 @@ def save_wishlist(items: list[dict]) -> None:
     os.replace(tmp, WISHLIST_FILE)
 
 
-WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url")
+WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url", "found", "searched")  # found: none|some|error
 
 
 def wishlist_add(data: dict) -> list[dict]:
@@ -227,6 +229,19 @@ def wishlist_delete(wid: str) -> list[dict]:
         items = [i for i in load_wishlist() if i["id"] != wid]
         save_wishlist(items)
         return items
+
+
+def delete_unready(slug: str) -> None:
+    """Remove a book directory that never finished loading. A real book (with book.json) is never deleted here."""
+    d = BOOKS / slug
+    if not SLUG_RE.match(slug) or not d.is_dir() or (d / "book.json").exists():
+        raise ValueError("нельзя удалить: книга готова или не существует")
+    job = JOBS.get(slug)
+    if job and job["proc"].poll() is None:
+        raise ValueError("книга ещё загружается")
+    with STATE_LOCK:
+        shutil.rmtree(d)
+        JOBS.pop(slug, None)
 
 
 def load_settings() -> dict:
@@ -782,6 +797,12 @@ class Handler(SimpleHTTPRequestHandler):
     def do_DELETE(self):
         if self.path.startswith("/api/wishlist/"):
             return self.send_json(wishlist_delete(self.path.rsplit("/", 1)[-1]))
+        if self.path.startswith("/api/books/"):
+            try:
+                delete_unready(self.path.rsplit("/", 1)[-1])
+            except (ValueError, OSError) as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True})
         return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def end_headers(self):

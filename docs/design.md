@@ -3,7 +3,7 @@
 `serve.py` отдаёт читалку из `reader/`, данные из `books/`, хранит состояние чтения и запускает
 пайплайн фоном. Книга: `books/<slug>/` с `book.toml`, `book.json` (текст блоками и
 предложениями), `timing.json` (слово → секунды), `audio.m4a`, `images/`, `state.json`.
-Общие настройки в `books/settings.json`, список желаний в `books/wishlist.json`.
+Общие настройки в `books/settings.json`, названия без текста в `books/wishlist.json`.
 
 Пайплайн: извлечение текста по формату → склейка томов → якоря по субтитрам → интерполяция →
 опционально точное выравнивание MMS. Всё через `pipeline/add_book.py`.
