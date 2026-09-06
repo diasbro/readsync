@@ -41,11 +41,12 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
 - Data files are large: never `cat` `book.json`/`timing.json`/`*.json3`; inspect with Python.
 - The reader must stay light at runtime (10 Hz sync loop, no per-frame DOM work).
 - Heavy CPU work belongs in the pipeline, runs once per book, and defaults to low priority.
-- Branch names use dashes, never slashes. Commit messages: imperative subject, why in the body.
+- Branch names use dashes, never slashes. Commit messages follow Conventional Commits
+  (`feat:`, `fix:`, `docs:`, `chore:`, optional scope), subject only unless the why is not obvious.
 
 ## Boundaries
 - Never commit book text, audio or reading state; sources are recorded in each `book.toml`.
 - No analytics, no accounts, no network calls at runtime beyond the book search and the
   pipeline downloads the user asked for. Everything else is local.
-- Do not add features "because readers usually have them": the owner wants only what helps
-  focus training and eye comfort, with a toggle for each.
+- Do not add features "because readers usually have them": only what helps reading and focus,
+  each behind a toggle.
