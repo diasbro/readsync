@@ -13,6 +13,7 @@ Without captions the audio is transcribed with faster-whisper for coarse anchori
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,18 @@ def fetch_text(src: str, d: Path) -> str:
             (d / "book.fb2").write_bytes(data)
             return "fb2"
         (d / "book.html").write_bytes(data)
+        # fantasy-worlds serves illustrations from /book/<id>/images/<name>
+        names = sorted(set(re.findall(rb'data-src="([^"]+)"', data)))
+        if names:
+            (d / "images").mkdir(exist_ok=True)
+            base = src.rsplit("/", 1)[0]
+            for name in names:
+                n = name.decode()
+                try:
+                    r = urllib.request.Request(f"{base}/images/{n}", headers={"User-Agent": "Mozilla/5.0"})
+                    (d / "images" / n).write_bytes(urllib.request.urlopen(r, timeout=60).read())
+                except (OSError, ValueError):
+                    print("image not downloaded:", n, flush=True)
         return "html"
     p = Path(src).expanduser()
     if p.name.lower().endswith((".fb2", ".fb2.zip")):

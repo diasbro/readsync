@@ -102,13 +102,17 @@
   let userScrolled = false, wordEls = [], sentEls = [], blockEls = [];
   // shared state lives on the server (books/<slug>/state.json) so every browser sees the same
   // position, settings and stats; localStorage is only a cache. Last writer wins by timestamp.
-  let remote = {};
-  const loadRemote = () => fetch(`/api/state/${slug}`).then((r) => r.json()).then((s) => (remote = s || {})).catch(() => (remote = {}));
+  let remote = {}, remoteSettings = {};
+  const loadRemote = () => Promise.all([
+    fetch(`/api/state/${slug}`).then((r) => r.json()).then((s) => (remote = s || {})).catch(() => (remote = {})),
+    fetch("/api/settings").then((r) => r.json()).then((s) => (remoteSettings = s || {})).catch(() => (remoteSettings = {})),
+  ]);
   const putState = (patch, keepalive) => fetch(`/api/state/${slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch), keepalive: !!keepalive }).catch(() => {});
   let settingsTimer = 0;
   function persistSettings() {
     const at = Date.now(); store.set("rs:settingsAt", at);
-    clearTimeout(settingsTimer); settingsTimer = setTimeout(() => putState({ settings, settingsAt: at }), 400);
+    clearTimeout(settingsTimer);
+    settingsTimer = setTimeout(() => fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings, settingsAt: at }) }).catch(() => {}), 400);
   }
 
   async function load() {
@@ -118,8 +122,15 @@
       fetch(`/books/${slug}/timing.json`).then((r) => (r.ok ? r.json() : null)),
       loadRemote(),
     ]);
-    if (remote.settings && (remote.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
-      Object.assign(settings, remote.settings); store.set("rs:settingsAt", remote.settingsAt); applySettings(); syncSettingsUI();
+    // settings are global on the server; older per-book copies migrate the first time they are seen
+    if (!remoteSettings.settings && remote.settings) {
+      remoteSettings = { settings: remote.settings, settingsAt: remote.settingsAt || 1 };
+      fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(remoteSettings) }).catch(() => {});
+    }
+    if (remoteSettings.settings && (remoteSettings.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
+      Object.assign(settings, remoteSettings.settings); store.set("rs:settingsAt", remoteSettings.settingsAt); applySettings(); syncSettingsUI();
+    } else if (store.get("rs:settingsAt", 0) > (remoteSettings.settingsAt || 0)) {
+      persistSettings();
     }
     const localStats = store.get("rs:stats:" + slug, null);
     if (localStats) putState({ stats: localStats }).then((r) => r && r.json()).then((s) => { if (s && s.stats) store.set("rs:stats:" + slug, s.stats); }).catch(() => {});
@@ -150,7 +161,7 @@
       if (pos > 0 && pos < duration - 5) audio.currentTime = pos;
       $("#progress").max = duration;
       drawTicks();
-      update(true);
+      update(true); scrollToCurrent(true, true); settle();
     }, { once: true });
     audio.playbackRate = settings.speed; $("#speed").value = String(settings.speed);
     update(true);
@@ -230,6 +241,10 @@
       const lvl = blk.kind === "title" ? " lvl" + (book.chapters[blk.chapter]?.level || 2) : "";
       const nextBlk = book.blocks[bi + 1];
       const stanzaEnd = blk.kind === "verse" && (!nextBlk || nextBlk.stanza !== blk.stanza) ? " stanza-end" : "";
+      for (const im of blk.images || []) {
+        const src = typeof im === "string" ? im : im.src, dims = im.w && im.h ? ` width="${im.w}" height="${im.h}"` : "";
+        out.push(`<figure class="fig"><img src="/books/${slug}/${esc(src)}"${dims} alt="" loading="lazy"></figure>`);
+      }
       out.push(`<p class="blk k-${blk.kind}${lvl}${stanzaEnd}" data-b="${bi}">${html}</p>`);
     });
     textEl.innerHTML = out.join("");
@@ -315,7 +330,8 @@
     if (sprint.stopAtSentence && prevSent >= 0) { sprint.stopAtSentence = false; audio.pause(); finishSprint(); return; }
     scrollToCurrent(false);
   }
-  function scrollToCurrent(force) {
+  let settling = true;  // until the reader plays or seeks, every scroll is instant (initial positioning)
+  function scrollToCurrent(force, instant) {
     const el = sentEls[curSent]; if (!el) return;
     if (settings.scroll === "off" && !force) return;
     if (userScrolled && !force) return;
@@ -327,22 +343,43 @@
     const inZone = r.top > top + vh * 0.18 && r.bottom < top + vh * 0.62;
     if (settings.scroll === "line" || !inZone || force) {
       const y = scrollY + r.top - top - vh * target;
-      scrollTo({ top: y, behavior: "smooth" });
+      const far = Math.abs(y - scrollY) > vh * 1.5;  // long jumps are instant, short follows are smooth
+      scrollTo({ top: y, behavior: instant || settling || far ? "auto" : "smooth" });
     }
+  }
+  function settle() {
+    // fonts and images arrive after the first layout and move the text; re-anchor until the user takes over
+    const again = () => { if (settling && !userScrolled && !pages.on) scrollToCurrent(true, true); };
+    document.fonts.ready.then(again);
+    addEventListener("load", again, { once: true });
+    [400, 1200, 2500].forEach((ms) => setTimeout(again, ms));
   }
 
   // 10 Hz sync loop while playing (cheap: one binary search + a few class toggles per tick)
   let tick = 0;
-  audio.addEventListener("play", () => { clearInterval(tick); tick = setInterval(() => update(false), 100); $("#btn-play").textContent = "❚❚"; session.start(); document.body.classList.add("playing"); armIdle(); });
-  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; session.stop(); savePos(); document.body.classList.remove("playing", "idle"); pausedAt = Date.now(); });
-  // distraction-free chrome: fade bars after 4 s without pointer/keyboard activity while playing
-  let idleTimer = 0;
+  audio.addEventListener("play", () => { settling = false; clearInterval(tick); tick = setInterval(() => update(false), 100); $("#btn-play").textContent = "❚❚"; session.start(); document.body.classList.add("playing"); armIdle(); armHidePlayer(); });
+  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; session.stop(); savePos(); document.body.classList.remove("playing", "idle"); showPlayer(); pausedAt = Date.now(); });
+  // distraction-free chrome: the top bar fades after 4 s without pointer/keyboard activity while
+  // playing; the player bar hides 1.5 s after play starts (scrolling does not bring it back) and
+  // returns on pause or when the pointer reaches the bottom edge
+  let idleTimer = 0, hideTimer = 0;
   function armIdle() {
     clearTimeout(idleTimer);
     document.body.classList.remove("idle");
     if (settings.hideUi) idleTimer = setTimeout(() => { if (!audio.paused && $("#toc").hidden && $("#settings").hidden) document.body.classList.add("idle"); }, 4000);
   }
-  ["mousemove", "mousedown", "keydown", "wheel", "touchstart"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
+  ["mousemove", "mousedown", "keydown", "touchstart"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
+  function armHidePlayer() {
+    clearTimeout(hideTimer);
+    if (settings.hideUi && !pages.on) hideTimer = setTimeout(() => { if (!audio.paused) document.body.classList.add("hide-player"); }, 1500);
+  }
+  function showPlayer() { clearTimeout(hideTimer); document.body.classList.remove("hide-player"); $(".player").classList.remove("peek"); }
+  addEventListener("mousemove", (e) => {
+    if (!document.body.classList.contains("hide-player")) return;
+    const player = $(".player"), peek = player.classList.contains("peek");
+    const zone = peek ? innerHeight - player.offsetHeight - 8 : innerHeight - 20;  // offsetHeight: the bar may still be sliding in
+    player.classList.toggle("peek", e.clientY >= zone);
+  }, { passive: true });
   // focus aid: pause when the reader leaves the tab or window
   const onLeave = () => { if (settings.pauseHidden && !audio.paused) audio.pause(); };
   document.addEventListener("visibilitychange", () => { if (document.hidden) { onLeave(); if (pages.on) session.stop(); } else if (pages.on) session.start(); });
@@ -426,7 +463,7 @@
     }
     return audio.play();
   }
-  function seek(t) { audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); posDirty = true; userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
+  function seek(t) { settling = false; audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); posDirty = true; userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
   // coming back to a paused tab: adopt a newer position/settings written by another browser
   document.addEventListener("visibilitychange", () => {
     if (document.hidden || !audio.paused) return;
@@ -435,8 +472,8 @@
         audio.currentTime = remote.pos; posDirty = false; store.set("rs:pos:" + slug, remote.pos); store.set("rs:posAt:" + slug, remote.posAt);
         update(true); scrollToCurrent(true);
       }
-      if (remote.settings && (remote.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
-        Object.assign(settings, remote.settings); store.set("rs:settingsAt", remote.settingsAt); applySettings(); syncSettingsUI();
+      if (remoteSettings.settings && (remoteSettings.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
+        Object.assign(settings, remoteSettings.settings); store.set("rs:settingsAt", remoteSettings.settingsAt); applySettings(); syncSettingsUI();
       }
     });
   });

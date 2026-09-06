@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import sys
@@ -86,6 +87,20 @@ def extract(path: Path) -> dict:
     chapters: list[dict] = []
     notes: dict[str, str] = {}
     stanza_n = 0
+    pending_images: list[str] = []
+    cover_ids = {
+        (im.get(f"{{{NS['l']}}}href") or "").lstrip("#")
+        for cp in root.iter()
+        if tag(cp) == "coverpage"
+        for im in cp
+        if tag(im) == "image"
+    }
+    img_dir = path.parent / "images"
+    for binary in root.findall("fb:binary", NS):
+        bid = binary.get("id")
+        if bid and binary.text and bid not in cover_ids:
+            img_dir.mkdir(exist_ok=True)
+            (img_dir / bid).write_bytes(base64.b64decode(binary.text))
 
     def add_block(el, kind, ch, audio=True, stanza=None, bid=None):
         text, em, nrefs = inline(el)
@@ -93,6 +108,7 @@ def extract(path: Path) -> dict:
             return
         blocks.append(
             {
+                "images": pending_images.copy(),
                 "id": bid or el.get("id") or f"b{len(blocks)}",
                 "kind": kind,
                 "chapter": ch,
@@ -104,6 +120,7 @@ def extract(path: Path) -> dict:
                 "audio": audio,
             }
         )
+        pending_images.clear()
 
     def handle(el, ch, kind_override=None, stanza=None):
         nonlocal stanza_n
@@ -138,7 +155,12 @@ def extract(path: Path) -> dict:
                 handle(c, ch, kind_override="author" if tag(c) == "text-author" else "cite")
         elif t == "text-author":
             add_block(el, "author", ch)
-        elif t in ("empty-line", "image", "table"):
+        elif t == "image":
+            href = (el.get(f"{{{NS['l']}}}href") or el.get("href") or "").lstrip("#")
+            if href and href not in cover_ids:
+                pending_images.append({"src": "images/" + href})
+            return
+        elif t in ("empty-line", "table"):
             return
         else:
             for c in el:

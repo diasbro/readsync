@@ -37,6 +37,19 @@ def test_fb2_extract(tmp_path):
     assert book["blocks"][3]["stanza"] == book["blocks"][4]["stanza"] == 1
 
 
+def test_fb2_images(tmp_path):
+    import base64
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 8).decode()
+    fb2 = FB2.replace("<p>Текст.</p>", '<image l:href="#pic.png"/><p>Текст.</p>').replace(
+        "</FictionBook>", f'<binary id="pic.png" content-type="image/png">{png}</binary></FictionBook>'
+    )
+    (tmp_path / "book.fb2").write_text(fb2, encoding="utf-8")
+    book = extract(tmp_path / "book.fb2")
+    assert [b["images"] for b in book["blocks"] if b["images"]] == [[{"src": "images/pic.png"}]]
+    assert (tmp_path / "images" / "pic.png").exists()
+
+
 def test_fb2_zip(tmp_path):
     import zipfile
 

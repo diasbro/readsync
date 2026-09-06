@@ -148,6 +148,28 @@ def add_session(slug: str, delta: dict) -> dict:
         return st
 
 
+SETTINGS_FILE = BOOKS / "settings.json"
+
+
+def load_settings() -> dict:
+    try:
+        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def merge_settings(patch: dict) -> dict:
+    """Reader settings are global (not per book); last writer wins by client timestamp."""
+    with STATE_LOCK:
+        cur = load_settings()
+        if isinstance(patch.get("settings"), dict) and patch.get("settingsAt", 0) >= cur.get("settingsAt", 0):
+            cur = {"settings": patch["settings"], "settingsAt": patch.get("settingsAt", 0)}
+            tmp = SETTINGS_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, SETTINGS_FILE)
+        return cur
+
+
 def slugify(title: str) -> str:
     s = "".join(TRANSLIT.get(c, c) for c in title.lower())
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:48]
@@ -261,12 +283,18 @@ class Handler(SimpleHTTPRequestHandler):
     def read_json(self):
         n = int(self.headers.get("Content-Length") or 0)
         if n > 1_000_000:
+            self.close_connection = True  # do not try to resync the stream after a refused body
             raise ValueError("body too large")
-        return json.loads(self.rfile.read(n) or b"{}")
+        raw = self.rfile.read(n) or b"{}"
+        try:
+            return json.loads(raw)
+        except ValueError as e:
+            raise ValueError(f"bad json: {e}") from None
 
     def read_form(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
         if n > 3_000_000_000:
+            self.close_connection = True
             raise ValueError("body too large")
         return parse_multipart(self.headers.get("Content-Type", ""), self.rfile.read(n))
 
@@ -286,20 +314,26 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(load_state(slug))
         if self.path.startswith("/api/jobs"):
             return self.send_json(job_status())
+        if self.path.startswith("/api/settings"):
+            return self.send_json(load_settings())
         path = self.translate_path(self.path)
         if os.path.isfile(path) and "Range" in self.headers:
             return self.send_range(path)
         return super().do_GET()
 
+    # The request body is always read before responding: on a keep-alive connection an unread
+    # body would be parsed as the start of the next request.
     def do_PUT(self):
+        try:
+            body = self.read_json()
+        except ValueError as e:
+            return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+        if self.path.startswith("/api/settings"):
+            return self.send_json(merge_settings(body))
         slug, is_session = self.state_slug()
         if slug is None or is_session:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-        try:
-            patch = self.read_json()
-        except ValueError as e:
-            return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
-        return self.send_json(merge_state(slug, patch))
+        return self.send_json(merge_state(slug, body))
 
     def do_POST(self):
         if self.path.startswith("/api/add"):
@@ -310,13 +344,13 @@ class Handler(SimpleHTTPRequestHandler):
             if err:
                 return self.send_json({"error": err}, HTTPStatus.BAD_REQUEST)
             return self.send_json(job)
-        slug, is_session = self.state_slug()
-        if slug is None or not is_session:
-            return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         try:
             delta = self.read_json()
         except ValueError as e:
             return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+        slug, is_session = self.state_slug()
+        if slug is None or not is_session:
+            return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         return self.send_json(add_session(slug, delta))
 
     def end_headers(self):
