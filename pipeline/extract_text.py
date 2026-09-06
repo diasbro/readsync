@@ -160,6 +160,7 @@ def extract(src: Path) -> dict:
     chapters: list[dict] = []
     notes: dict[str, str] = {}
     stanza_counter = [0]
+    pending_images: list[str] = []  # illustrations seen since the last block; attached to the next block
 
     def add_block(el: Tag, kind: str, chapter: int, audio: bool = True, stanza=None, bid=None):
         text, em, nrefs = inline_text(el)
@@ -167,6 +168,7 @@ def extract(src: Path) -> dict:
             return
         blocks.append(
             {
+                "images": pending_images.copy(),
                 "id": bid or el.get("id") or f"b{len(blocks)}",
                 "kind": kind,
                 "chapter": chapter,
@@ -178,6 +180,7 @@ def extract(src: Path) -> dict:
                 "audio": audio,
             }
         )
+        pending_images.clear()
 
     def walk_section(sec: Tag, level: int):
         h2 = sec.find("h2", recursive=False)
@@ -226,7 +229,16 @@ def extract(src: Path) -> dict:
             elif el.get("id") == "annotation":
                 for p in el.find_all("p", recursive=False):
                     handle(p, ch_idx, level, kind_override="annotation", audio=False)
-            elif "img-wrap" in cls or "empty-line" in cls:
+            elif "img-wrap" in cls:
+                img = el.find("img")
+                src = (img.get("data-src") or img.get("src") or "") if img else ""
+                if src and not src.startswith("cover"):
+                    entry = {"src": "images/" + src.rsplit("/", 1)[-1]}
+                    if img.get("width") and img.get("height"):
+                        entry["w"], entry["h"] = int(img["width"]), int(img["height"])
+                    pending_images.append(entry)
+                return
+            elif "empty-line" in cls:
                 return
             else:
                 for c in el.children:

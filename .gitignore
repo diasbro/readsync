@@ -6,3 +6,6 @@ __pycache__/
 books/*/*
 !books/*/book.toml
 .DS_Store
+
+books/settings.json
+books/*.tmp
