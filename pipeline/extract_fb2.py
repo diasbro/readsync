@@ -98,9 +98,10 @@ def extract(path: Path) -> dict:
     img_dir = path.parent / "images"
     for binary in root.findall("fb:binary", NS):
         bid = binary.get("id")
-        if bid and binary.text and bid not in cover_ids:
+        if bid and binary.text:
             img_dir.mkdir(exist_ok=True)
-            (img_dir / bid).write_bytes(base64.b64decode(binary.text))
+            name = ("cover" + Path(bid).suffix.lower()) if bid in cover_ids else bid
+            (img_dir / name).write_bytes(base64.b64decode(binary.text))
 
     def add_block(el, kind, ch, audio=True, stanza=None, bid=None):
         text, em, nrefs = inline(el)

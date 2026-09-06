@@ -4,26 +4,53 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>readsync</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23b4532a'/%3E%3Cpath d='M14 18c6-2 12-1 18 3 6-4 12-5 18-3v28c-6-2-12-1-18 3-6-4-12-5-18-3z' fill='%23fff6ee'/%3E%3Cpath d='M32 21v28' stroke='%23b4532a' stroke-width='3'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div id="library" hidden>
-  <h1>readsync</h1>
-  <p class="muted">Синхронное чтение книг с аудиокнигой</p>
-  <div id="library-list"></div>
-  <details id="add-book">
+  <header class="lib-head">
+    <h1>readsync</h1>
+    <p class="muted">Читать глазами и слушать одновременно. Тренировка фокуса без лишнего.</p>
+  </header>
+
+  <section class="lib-section">
+    <h2>Библиотека</h2>
+    <div id="library-list" class="lib-grid"></div>
+  </section>
+
+  <section id="wishlist" class="lib-section">
+    <div class="sec-head">
+      <h2>Хочу прочитать</h2>
+      <label class="switch" title="Искать текст по библиотекам (fantasy-worlds, Flibusta, Coollib) и загружать сразу, если нашлась ровно эта книга целиком">
+        <input type="checkbox" id="wish-auto" checked> <span>искать и загружать сразу</span>
+      </label>
+    </div>
+    <form id="wish-form" class="wish-add">
+      <input name="title" placeholder="Название книги, можно с автором" autocomplete="off" required>
+      <button type="submit" class="btn primary">Сохранить</button>
+    </form>
+    <div id="wish-list"></div>
+    <details class="hint">
+      <summary>Сохранять с любой страницы</summary>
+      <p>Перетащи ссылку <a id="bookmarklet" href="#" class="bm">+ readsync</a> на панель закладок. На странице книги нажми её: название страницы попадёт сюда. Работает, пока запущен сервер.</p>
+      <p>Или открой <code>http://127.0.0.1:8765/?wish=Название</code>.</p>
+    </details>
+  </section>
+
+  <details id="add-book" class="lib-section">
     <summary>Добавить книгу</summary>
     <form id="add-form">
       <label>Название <input name="title" required placeholder="Как в библиотеке"></label>
       <label>Автор <input name="author"></label>
-      <label>Текст, ссылка <input name="text_url" placeholder="https://reader.fantasy-worlds.org/book/NNNNN/read.html"></label>
-      <label>или файл <input type="file" name="text_file" accept=".fb2,.zip,.html,.htm"></label>
-      <label>Аудио, ссылка YouTube <input name="audio_url" placeholder="необязательно"></label>
+      <label>Текст, ссылки <textarea name="text_url" rows="2" placeholder="Страница книги или прямая ссылка на fb2/epub/txt. Тома — по одной ссылке в строке"></textarea></label>
+      <label>или файл <input type="file" name="text_file" accept=".fb2,.zip,.epub,.txt,.html,.htm"></label>
+      <label>Аудио, ссылки <textarea name="audio_url" rows="2" placeholder="Необязательно. YouTube, части — по одной ссылке в строке"></textarea></label>
       <label>или файл <input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3"></label>
       <label>Чтец <input name="narrator"></label>
       <label class="row"><input type="checkbox" name="align"> Точное выравнивание сразу (долго, греет ноутбук; можно позже: <code>make align slug=…</code>)</label>
-      <div class="row-btns"><button type="submit" class="primary">Загрузить</button></div>
-      <div id="add-msg" class="muted"></div>
+      <div class="row-btns"><button type="submit" class="btn primary">Загрузить</button></div>
+      <div id="add-msg" class="muted small"></div>
     </form>
   </details>
   <div id="jobs"></div>

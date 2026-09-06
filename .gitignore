@@ -8,4 +8,5 @@ books/*/*
 .DS_Store
 
 books/settings.json
+books/wishlist.json
 books/*.tmp

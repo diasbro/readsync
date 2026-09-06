@@ -54,34 +54,72 @@
   // ---------------- library ----------------
   if (!slug) {
     $("#library").hidden = false;
+    const toast = (msg) => { const el = document.createElement("div"); el.className = "toast"; el.textContent = msg; document.body.appendChild(el); setTimeout(() => el.remove(), 3000); };
+    const q = (x) => encodeURIComponent(x);
+    const norm = (x) => (x || "").toLowerCase().replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    const SOURCE = { "fantasy-worlds": "fantasy-worlds", flibusta: "Flibusta", coollib: "Coollib" };
+
+    // ---- library cards; text-only books can get audio attached right here ----
+    let books = [], open = null;
     async function renderLibrary() {
-      const books = await fetch("/api/books").then((r) => r.json());
+      books = await fetch("/api/books").then((r) => r.json());
       const list = $("#library-list");
-      if (!books.length) { list.innerHTML = '<p class="muted">Пока нет книг. Добавь первую ниже.</p>'; return; }
+      if (!books.length) { list.innerHTML = '<p class="muted small">Пока нет книг. Сохрани название ниже.</p>'; return; }
       const states = await Promise.all(books.map((b) => fetch(`/api/state/${b.slug}`).then((r) => r.json()).catch(() => ({}))));
       list.innerHTML = books.map((b, i) => {
         const st = states[i];
         const pos = st.pos ?? store.get("rs:pos:" + b.slug, 0), dur = store.get("rs:dur:" + b.slug, 0);
         const pct = b.has_audio ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
-        const sync = !b.ready ? (b.building ? "загружается…" : "не готово") : !b.has_audio ? "без аудио, режим книги"
-          : b.timing_source === "mms" ? "точная синхронизация" : "синхронизация по субтитрам";
-        const meta = [b.author, b.narrator ? "читает " + b.narrator : null, sync].filter(Boolean).join(" · ");
-        const where = b.has_audio ? (pct ? "прочитано " + pct + "% · " + fmt(pos) : "не начато") : (st.sent ? "прочитано " + pct + "%" : "не начато");
-        const tag = b.has_audio ? "" : '<span class="tag">текст</span>';
-        return `<a class="card" href="${b.ready ? "?book=" + esc(b.slug) : "#"}"><div class="t">${esc(b.title || b.slug)}${tag}</div><div class="m">${esc(meta)}</div>
-          <div class="bar"><i style="width:${pct}%"></i></div><div class="m">${where}</div></a>`;
+        const meta = [b.author, b.has_audio && b.narrator ? "читает " + b.narrator : null, !b.ready ? (b.building ? "загружается…" : "не готово") : null].filter(Boolean).join(" · ");
+        const tags = b.ready ? '<span class="tag">текст</span>' + (b.has_audio ? '<span class="tag">аудио</span>' : "") : "";
+        const where = !b.ready ? "" : b.has_audio ? (pct ? `прочитано ${pct}% · ${fmt(pos)}` : "не начато") : (st.sent ? `прочитано ${pct}%` : "не начато");
+        const cover = b.cover ? `<img class="cover" src="/books/${esc(b.slug)}/${esc(b.cover)}" alt="">` : `<div class="cover empty">${esc((b.title || b.slug).slice(0, 1))}</div>`;
+        const side = b.ready && !b.has_audio && !b.building ? `<div class="side"><button class="btn sm attach-btn" data-slug="${esc(b.slug)}">＋ аудио</button></div>` : "<div></div>";
+        const form = open === b.slug ? `<div class="attach-form" data-slug="${esc(b.slug)}">
+            <textarea name="audio_url" rows="2" placeholder="Ссылки на аудио: YouTube, части по одной в строке"></textarea>
+            <input name="narrator" placeholder="Чтец (необязательно)">
+            <label class="row small muted"><input type="checkbox" name="align"> точное выравнивание сразу (долго)</label>
+            <div class="row-btns"><button class="btn sm primary attach-go">Загрузить аудио</button><button class="btn sm attach-cancel">Отмена</button></div></div>` : "";
+        return `<div class="card${form ? " attach" : ""}" data-slug="${esc(b.slug)}">${form ? "" : `<a class="cover-link" href="${b.ready ? "?book=" + esc(b.slug) : "#"}">${cover}</a>`}
+          <div class="body">${form ? `<div class="t">${esc(b.title || b.slug)}</div><div class="m">Аудио для этой книги. Найди голос сам: <a target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${q((b.title || "") + " аудиокнига")}">YouTube</a></div>${form}` :
+            `<a href="${b.ready ? "?book=" + esc(b.slug) : "#"}" class="tlink"><div class="t">${esc(b.title || b.slug)}${tags}</div></a><div class="m">${esc(meta)}</div>
+          <div class="bar"><i style="width:${pct}%"></i></div><div class="m">${where}</div>`}</div>${form ? "" : side}</div>`;
       }).join("");
     }
+    $("#library-list").addEventListener("click", async (e) => {
+      const btn = e.target.closest(".attach-btn");
+      if (btn) { open = btn.dataset.slug; renderLibrary(); return; }
+      if (e.target.closest(".attach-cancel")) { open = null; renderLibrary(); return; }
+      if (e.target.closest(".attach-go")) {
+        const f = e.target.closest(".attach-form"); const urls = f.querySelector("[name=audio_url]").value.trim();
+        if (!urls) { toast("Нужна хотя бы одна ссылка на аудио"); return; }
+        const ok = await startAdd({ slug: f.dataset.slug, audio_url: urls, narrator: f.querySelector("[name=narrator]").value, align: f.querySelector("[name=align]").checked ? "on" : "" });
+        if (ok) { open = null; toast("Аудио загружается, книга появится с плеером"); renderLibrary(); }
+      }
+    });
     renderLibrary();
+
+    // ---- jobs: background pipeline runs started from this page ----
     let jobsTimer = 0;
     async function pollJobs() {
       const jobs = await fetch("/api/jobs").then((r) => r.json()).catch(() => ({}));
       const running = Object.values(jobs).some((j) => j.running);
-      $("#jobs").innerHTML = Object.entries(jobs).map(([s, j]) => `<div class="job"><b>${esc(s)}</b>: ${j.running ? "идёт загрузка…" : j.exit === 0 ? "готово" : "ошибка (код " + j.exit + "), см. books/" + esc(s) + "/add.log"}<pre>${esc(j.log.join("\n"))}</pre></div>`).join("");
+      $("#jobs").innerHTML = Object.entries(jobs).filter(([, j]) => j.running || j.exit !== 0).map(([sl, j]) => `<div class="job"><b>${esc(sl)}</b>: ${j.running ? "идёт загрузка…" : "ошибка (код " + j.exit + "), см. books/" + esc(sl) + "/add.log"}<pre>${esc(j.log.slice(-3).join("\n"))}</pre></div>`).join("");
       clearTimeout(jobsTimer);
       if (running) jobsTimer = setTimeout(pollJobs, 3000); else if (Object.keys(jobs).length) renderLibrary();
     }
     pollJobs();
+    let adding = false;  // one /api/add at a time: a double click must not start a second job
+    async function startAdd(fields) {
+      if (adding) return false;
+      adding = true;
+      try {
+        const fd = new FormData(); Object.entries(fields).forEach(([k, v]) => { if (v != null) fd.set(k, v); });
+        const r = await fetch("/api/add", { method: "POST", body: fd }).then((x) => x.json()).catch((err) => ({ error: String(err) }));
+        if (r.error) { toast("Ошибка: " + r.error); return false; }
+        pollJobs(); return r.slug;
+      } finally { adding = false; }
+    }
     $("#add-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target); const msg = $("#add-msg");
@@ -89,8 +127,107 @@
       msg.textContent = "Отправляю…";
       const r = await fetch("/api/add", { method: "POST", body: fd }).then((x) => x.json()).catch((err) => ({ error: String(err) }));
       if (r.error) { msg.textContent = "Ошибка: " + r.error; return; }
-      msg.textContent = `Загрузка книги «${fd.get("title")}» запущена (${r.slug}). Прогресс ниже.`; e.target.reset(); pollJobs();
+      msg.textContent = `Загрузка «${fd.get("title")}» запущена.`; e.target.reset(); pollJobs();
     });
+
+    // ---- wishlist: capture a title now; the text is searched across libraries, audio you pick yourself ----
+    const wishApi = (method, path, body) => fetch("/api/wishlist" + (path || ""), { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined }).then((r) => r.json());
+    const searching = new Map();  // wish id -> {status, hits, busy}
+    $("#wish-auto").checked = store.get("rs:wishAuto", true);
+    $("#wish-auto").addEventListener("change", (e) => store.set("rs:wishAuto", e.target.checked));
+
+    const hitMeta = (h) => [h.author, h.year, h.parts.length > 1 ? `${h.parts.length} тома` : "", h.parts[0].kind === "html" ? "страница" : h.parts[0].kind, SOURCE[h.source] || h.source, h.lang && h.lang !== "ru" ? h.lang : ""].filter(Boolean).join(" · ");
+    const loadBtn = (h, cls) => `<button class="btn sm primary pick ${cls || ""}" data-hit='${esc(JSON.stringify({ title: h.title, author: h.author, narrator: h.narrator, urls: h.parts.map((p) => p.url), audio: h.audio_url }))}' ${h.readable ? "" : "disabled"}>Загрузить</button>`;
+    function renderWishlist(items) {
+      const el = $("#wish-list");
+      if (!items.length) { el.innerHTML = '<p class="muted small">Список пуст. Наткнулся на книгу — сохрани название, остальное потом.</p>'; return; }
+      el.innerHTML = items.map((w) => {
+        const s = searching.get(w.id) || {};
+        const best = s.hits && s.hits[0];
+        const found = best ? `<div class="found"><div class="ft">${esc(best.title)}<div class="fm">${esc(hitMeta(best))}</div></div>${loadBtn(best)}</div>` : "";
+        const others = s.hits && s.hits.length > 1 ? `<details class="more"><summary>ещё варианты (${s.hits.length - 1})</summary><div class="cands">${s.hits.slice(1).map((h) => `<div class="cand"><div class="ct">${esc(h.title)}<div class="cm">${esc(hitMeta(h))}</div></div>${loadBtn(h)}</div>`).join("")}</div></details>` : "";
+        const status = s.status ? `<div class="status ${s.ok ? "ok" : ""}">${esc(s.status)}</div>` : "";
+        return `<div class="wish ${s.busy ? "busy" : ""}" data-id="${esc(w.id)}">
+        <div class="wt"><span>${esc(w.title)}${w.author ? ' <span class="muted">· ' + esc(w.author) + "</span>" : ""}</span><small>${esc(w.added || "")}</small></div>
+        ${status}${found}${others}
+        <div class="links">
+          <a href="#" class="fw">${s.hits ? "искать снова" : "найти текст"}</a>
+          <a target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${q(w.title + " аудиокнига")}">аудио на YouTube</a>
+        </div>
+        <details class="more"><summary>своя ссылка или файл</summary>
+          <div class="fields">
+            <input name="author" placeholder="Автор" value="${esc(w.author || "")}">
+            <input name="note" placeholder="Заметка" value="${esc(w.note || "")}">
+            <input name="text_url" placeholder="Ссылка на текст: страница, fb2, epub, txt" value="${esc(w.text_url || "")}">
+            <input name="audio_url" placeholder="Ссылка на аудио (YouTube), необязательно" value="${esc(w.audio_url || "")}">
+          </div>
+          <div class="actions"><button class="btn sm primary load" ${w.text_url ? "" : "disabled"}>Загрузить по ссылке</button></div>
+        </details>
+        <div class="actions"><button class="del" title="Удалить из списка">✕ убрать</button></div></div>`;
+      }).join("");
+    }
+    let wishItems = [];
+    const refresh = (items) => { wishItems = items; renderWishlist(items); };
+    const loadWishlist = () => wishApi("GET").then(refresh).catch(() => {});
+
+    async function searchFor(w, auto) {
+      if (searching.get(w.id)?.busy) return;  // a search for this title is already running
+      searching.set(w.id, { status: "ищу текст: fantasy-worlds, Flibusta, Coollib…", busy: true }); renderWishlist(wishItems);
+      let res;
+      try { res = await fetch("/api/search?q=" + q(w.title)).then((r) => r.json()); if (res.error) throw new Error(res.error); }
+      catch (e) { searching.set(w.id, { status: "поиск не удался: " + e.message }); renderWishlist(wishItems); return; }
+      const hits = res.hits.filter((h) => h.readable);
+      const want = norm(w.title);
+      const strict = hits.filter((h) => h.complete && (norm(h.title) === want || norm(h.author + " " + h.title) === want));
+      if (auto && strict.length) {
+        const h = strict[0];
+        if (await loadHit(w, h)) { toast(`Нашлось на ${SOURCE[h.source] || h.source}, загружаю: ${h.title}`); return; }
+      }
+      searching.set(w.id, hits.length ? { hits, status: strict.length ? "нашлось, но есть похожие. Выбери:" : "точного совпадения нет, ближайшее:", ok: true }
+        : { status: (res.errors && res.errors.length ? "часть библиотек не ответила. " : "") + "В библиотеках не нашлось. Вставь свою ссылку или файл." });
+      renderWishlist(wishItems);
+    }
+    async function loadHit(w, h) {
+      const s = await startAdd({ title: h.title, author: h.author || w.author, narrator: h.narrator, text_url: h.parts.map((p) => p.url).join("\n"), audio_url: h.audio_url || "" });
+      if (!s) return false;
+      searching.delete(w.id); refresh(await wishApi("DELETE", "/" + w.id)); return true;
+    }
+
+    $("#wish-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const title = e.target.title.value.trim(); if (!title) return;
+      const items = await wishApi("POST", "", { title }); e.target.reset(); refresh(items); toast("Сохранено: " + title);
+      const w = items.find((x) => norm(x.title) === norm(title));
+      if (w && $("#wish-auto").checked) searchFor(w, true);
+    });
+    $("#wish-list").addEventListener("change", async (e) => {
+      const card = e.target.closest(".wish"); if (!card || !e.target.name) return;
+      const items = await wishApi("PUT", "/" + card.dataset.id, { [e.target.name]: e.target.value }); wishItems = items;
+    });
+    $("#wish-list").addEventListener("click", async (e) => {
+      const card = e.target.closest(".wish"); if (!card) return;
+      const w = wishItems.find((x) => x.id === card.dataset.id); if (!w) return;
+      if (e.target.closest(".del")) { searching.delete(w.id); refresh(await wishApi("DELETE", "/" + w.id)); return; }
+      if (e.target.closest(".fw")) { e.preventDefault(); searchFor(w, false); return; }
+      const pick = e.target.closest(".pick");
+      if (pick) {
+        const h = JSON.parse(pick.dataset.hit);
+        if (await loadHit(w, { title: h.title, author: h.author, narrator: h.narrator, parts: h.urls.map((u) => ({ url: u })), audio_url: h.audio, source: "" })) toast("Загружаю: " + h.title);
+        return;
+      }
+      if (e.target.closest(".load")) {
+        const fresh = (await wishApi("GET")).find((x) => x.id === w.id) || w;
+        if (!fresh.text_url) return;
+        if (await loadHit(w, { title: fresh.title, author: fresh.author, narrator: "", parts: [{ url: fresh.text_url }], audio_url: fresh.audio_url, source: "" })) toast("Загружаю: " + fresh.title);
+      }
+    });
+    $("#bookmarklet").href = "javascript:(function(){window.open('" + location.origin + "/?wish='+encodeURIComponent(document.title),'_blank')})()";
+    const wishParam = new URLSearchParams(location.search).get("wish");
+    if (wishParam) {
+      history.replaceState(null, "", location.pathname);
+      const title = wishParam.replace(/\s+[-–—|].*$/, "").trim() || wishParam;
+      wishApi("POST", "", { title }).then((items) => { refresh(items); toast("Сохранено: " + title); const w = items.find((x) => norm(x.title) === norm(title)); if (w && $("#wish-auto").checked) searchFor(w, true); });
+    } else loadWishlist();
     return;
   }
 
