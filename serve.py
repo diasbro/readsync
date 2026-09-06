@@ -521,6 +521,19 @@ def where_now(slug: str) -> dict:
     }
 
 
+def slug_from_source(urls: list[str]) -> str:
+    """A slug for a book added by link without a title: site label plus the id from the URL."""
+    if urls:
+        u = urllib.parse.urlparse(urls[0])
+        digits = sorted(re.findall(r"\d{2,}", u.path), key=len)  # the id, not the "2" of "fb2"
+        host = u.hostname or ""
+        label = "fw" if "fantasy-worlds" in host else host.split(".")[-2] if host.count(".") else "book"
+        return re.sub(r"[^a-z0-9]+", "-", f"{label}-{digits[-1] if digits else int(time.time())}".lower()).strip("-")[
+            :48
+        ]
+    return f"book-{int(time.time())}"
+
+
 def slugify(title: str) -> str:
     s = "".join(TRANSLIT.get(c, c) for c in title.lower())
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:48]
@@ -561,7 +574,7 @@ def start_job(form: dict) -> tuple[dict | None, str]:
     """Save uploads, launch pipeline/add_book.py in the background. Returns (job info, error)."""
     val = lambda k: form.get(k, {}).get("value", "")  # noqa: E731
     title = val("title")
-    slug = val("slug") or slugify(title or "book")
+    slug = val("slug") or (slugify(title) if title else slug_from_source(form_values(form, "text_url")))
     if not SLUG_RE.match(slug):
         return None, "bad slug"
     d = BOOKS / slug

@@ -84,6 +84,19 @@
     addEventListener("click", (e) => { if (!e.target.closest("#lib-prefs, #lib-settings")) prefs.hidden = true; });
     addEventListener("keydown", (e) => { if (e.key === "Escape") prefs.hidden = true; });
     $("#lib-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); persistSettings(); syncPrefsUI(); });
+    // find in the library: filters the cards as you type; "/" opens it, Esc clears and closes
+    const search = $("#lib-search");
+    function applyFilter() {
+      const q = norm(search.value);
+      document.querySelectorAll(".card").forEach((c) => c.classList.toggle("hit-off", !!q && !norm(c.querySelector(".t")?.textContent + " " + c.querySelector(".m")?.textContent).includes(q)));
+      document.querySelectorAll(".lib-section").forEach((s) => { const grid = s.querySelector(".lib-grid"); if (grid) s.classList.toggle("empty", !!q && !grid.querySelector(".card:not(.hit-off)")); });
+    }
+    function openSearch() { search.hidden = false; search.focus(); }
+    function closeSearch() { search.value = ""; search.hidden = true; applyFilter(); }
+    $("#lib-find").onclick = () => (search.hidden ? openSearch() : closeSearch());
+    search.addEventListener("input", applyFilter);
+    search.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSearch(); });
+    addEventListener("keydown", (e) => { if (e.key === "/" && !e.target.matches("input, textarea, select")) { e.preventDefault(); openSearch(); } });
     $("#lib-ui").addEventListener("input", (e) => { settings.ui = e.target.value; applySettings(); persistSettings(); syncPrefsUI(); });
     // header: the sentence you stopped at in the current book, with the word highlight walking
     // along it; a click opens the book right there (the reader always starts paused)
@@ -166,6 +179,7 @@
       $("#reading-section").hidden = !reading.length;
       $("#reading-list").innerHTML = reading.map((b) => cardHtml(b, "reading")).join("");
       list.innerHTML = rest.map((b) => cardHtml(b, "library")).join("");
+      applyFilter();
     }
     $("#library").addEventListener("click", async (e) => {
       const mv = e.target.closest(".shelf-btn");
@@ -229,7 +243,7 @@
         const best = s.hits && s.hits[0];
         const found = best ? `<div class="found"><div class="ft">${esc(best.title)}<div class="fm">${esc(hitMeta(best))}</div></div>${loadBtn(best)}</div>` : "";
         const others = s.hits && s.hits.length > 1 ? `<details class="more"><summary>ещё варианты (${s.hits.length - 1})</summary><div class="cands">${s.hits.slice(1).map((h) => `<div class="cand"><div class="ct">${esc(h.title)}<div class="cm">${esc(hitMeta(h))}</div></div>${loadBtn(h)}</div>`).join("")}</div></details>` : "";
-        const status = s.status ? `<div class="status ${s.ok ? "ok" : ""}">${esc(s.status)}</div>` : "";
+        const status = s.status ? `<div class="status ${s.ok ? "ok" : ""}${s.err ? " err" : ""}">${s.html ? s.status : esc(s.status)}</div>` : "";
         return `<div class="wish ${s.busy ? "busy" : ""}" data-id="${esc(w.id)}">
         <div class="wt"><span>${esc(w.title)}${w.author ? ' <span class="muted">· ' + esc(w.author) + "</span>" : ""}</span><small>${esc(w.added || "")}</small></div>
         ${status}${found}${others}
@@ -253,12 +267,21 @@
     const refresh = (items) => { wishItems = items; renderWishlist(items); };
     const loadWishlist = () => wishApi("GET").then(refresh).catch(() => {});
 
+    const SOURCES_LABEL = "fantasy-worlds, Flibusta, Coollib";
     async function searchFor(w, auto) {
       if (searching.get(w.id)?.busy) return;  // a search for this title is already running
-      searching.set(w.id, { status: "ищу текст: fantasy-worlds, Flibusta, Coollib…", busy: true }); renderWishlist(wishItems);
+      const t0 = Date.now();
+      const tickStatus = () => { const el = document.querySelector(`.wish[data-id="${w.id}"] .status`); if (el) el.innerHTML = `<span class="spin"></span>ищу в ${SOURCES_LABEL}… ${Math.round((Date.now() - t0) / 1000)} с`; };
+      searching.set(w.id, { status: "ищу…", busy: true, html: true }); renderWishlist(wishItems); tickStatus();
+      const ticker = setInterval(tickStatus, 1000);
+      const ctrl = new AbortController(); const killer = setTimeout(() => ctrl.abort(), 60000);
       let res;
-      try { res = await fetch("/api/search?q=" + q(w.title)).then((r) => r.json()); if (res.error) throw new Error(res.error); }
-      catch (e) { searching.set(w.id, { status: "поиск не удался: " + e.message }); renderWishlist(wishItems); return; }
+      try { res = await fetch("/api/search?q=" + q(w.title), { signal: ctrl.signal }).then((r) => r.json()); if (res.error) throw new Error(res.error); }
+      catch (e) {
+        clearInterval(ticker); clearTimeout(killer);
+        searching.set(w.id, { status: e.name === "AbortError" ? "Поиск не ответил за минуту. Попробуй ещё раз." : "Поиск не удался: " + e.message, err: true }); renderWishlist(wishItems); return;
+      }
+      clearInterval(ticker); clearTimeout(killer);
       const hits = res.hits.filter((h) => h.readable);
       const want = norm(w.title);
       const strict = hits.filter((h) => h.complete && (norm(h.title) === want || norm(h.author + " " + h.title) === want));
@@ -266,8 +289,11 @@
         const h = strict[0];
         if (await loadHit(w, h)) { toast(`Нашлось на ${SOURCE[h.source] || h.source}, загружаю: ${h.title}`); return; }
       }
-      searching.set(w.id, hits.length ? { hits, status: strict.length ? "нашлось, но есть похожие. Выбери:" : "точного совпадения нет, ближайшее:", ok: true }
-        : { status: (res.errors && res.errors.length ? "часть библиотек не ответила. " : "") + "В библиотеках не нашлось. Вставь свою ссылку или файл." });
+      const failed = (res.errors || []).map((x) => SOURCE[x.split(":")[0]] || x.split(":")[0]);
+      const failedNote = failed.length ? ` ${failed.join(", ")} не ответил${failed.length > 1 ? "и" : ""}.` : "";
+      searching.set(w.id, hits.length
+        ? { hits, status: (strict.length ? "Нашлось, есть похожие, выбери:" : "Точного совпадения нет, ближайшее:") + failedNote, ok: true }
+        : { status: `Не нашлось в ${SOURCES_LABEL}.${failedNote} Вставь свою ссылку или файл.`, err: !failed.length ? false : true });
       renderWishlist(wishItems);
     }
     async function loadHit(w, h) {
@@ -276,9 +302,21 @@
       searching.delete(w.id); refresh(await wishApi("DELETE", "/" + w.id)); return true;
     }
 
+    async function addByLink(url) {
+      const s = await startAdd({ text_url: url });
+      if (s) { toast("Загружаю по ссылке, название возьму из книги"); }
+    }
+    async function addByFile(file) {
+      const s = await startAdd({ title: file.name.replace(/\.(fb2\.zip|zip|fb2|epub|txt|html?)$/i, ""), text_file: file });
+      if (s) toast("Загружаю файл: " + file.name);
+    }
+    ["dragenter", "dragover"].forEach((ev) => addEventListener(ev, (e) => { if (e.dataTransfer?.types.includes("Files")) { e.preventDefault(); document.body.classList.add("dropping"); } }));
+    ["dragleave", "drop"].forEach((ev) => addEventListener(ev, (e) => { if (ev === "drop" || e.relatedTarget == null) document.body.classList.remove("dropping"); }));
+    addEventListener("drop", (e) => { if (!e.dataTransfer?.files?.length) return; e.preventDefault(); [...e.dataTransfer.files].forEach(addByFile); });
     $("#wish-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const title = e.target.title.value.trim(); if (!title) return;
+      if (/^https?:\/\//i.test(title)) { e.target.reset(); addByLink(title); return; }
       const items = await wishApi("POST", "", { title }); e.target.reset(); refresh(items); toast("Сохранено: " + title);
       const w = items.find((x) => norm(x.title) === norm(title));
       if (w && $("#wish-auto").checked) searchFor(w, true);
