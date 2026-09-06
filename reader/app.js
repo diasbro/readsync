@@ -148,7 +148,7 @@
     // within a shelf the most recent activity (opened, or added) comes first.
     // A title saved without text is a "shell" card: it waits in the catalog until a text is found
     // by the library search or attached by hand; audio is attached to a ready book the same way.
-    let books = [], wishes = [], jobs = {}, open = null;
+    let books = [], wishes = [], jobs = {}, open = null, confirmDel = null;  // confirmDel: slug awaiting "delete?" answer
     const READING_SEC = 600;
     const SOURCE = { "fantasy-worlds": "fantasy-worlds", flibusta: "Flibusta", coollib: "Coollib" };
     const SOURCES_LABEL = "fantasy-worlds, Flibusta, Coollib";
@@ -168,8 +168,11 @@
         const where = !b.ready ? "" : st.finished ? "прочитано целиком" : b.has_audio ? (pct ? `прочитано ${pct}% · ${fmt(pos)}` : "не начато") : (st.sent ? `прочитано ${pct}%` : "не начато");
         const cover = b.cover ? `<img class="cover" src="/books/${esc(b.slug)}/${esc(b.cover)}" alt="">` : `<div class="cover empty">${esc((b.title || b.slug).slice(0, 1))}</div>`;
         const move = b.ready ? (shelf === "reading" ? `<button class="link-btn shelf-btn" data-slug="${esc(b.slug)}" data-shelf="library">убрать из текущих</button>` : `<button class="link-btn shelf-btn" data-slug="${esc(b.slug)}" data-shelf="reading">в текущие</button>`)
-          : b.building ? "" : `<button class="link-btn del-book" data-slug="${esc(b.slug)}">убрать</button>`;
-        const side = `<div class="side">${b.ready && !b.has_audio && !b.building ? `<button class="btn sm attach-btn" data-slug="${esc(b.slug)}">＋ аудио</button>` : ""}${move}</div>`;
+          : "";
+        const del = b.building ? "" : confirmDel === b.slug
+          ? `<span class="confirm">удалить книгу${b.has_audio ? " с аудио" : ""}? <button class="link-btn del-book" data-slug="${esc(b.slug)}">да</button> <button class="link-btn del-cancel">нет</button></span>`
+          : `<button class="link-btn del-ask" data-slug="${esc(b.slug)}">удалить</button>`;
+        const side = `<div class="side">${b.ready && !b.has_audio && !b.building ? `<button class="btn sm attach-btn" data-slug="${esc(b.slug)}">＋ аудио</button>` : ""}${move}${del}</div>`;
         const form = open === b.slug ? `<div class="attach-form" data-slug="${esc(b.slug)}">
             <textarea name="audio_url" rows="2" placeholder="Ссылки на аудио: YouTube, части по одной в строке"></textarea>
             <label class="file-row">или файл <input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3"></label>
@@ -313,8 +316,12 @@
       const ab = t.closest(".attach-btn, .text-btn");
       if (ab) { open = ab.dataset.slug || ab.dataset.id; paint(); return; }
       if (t.closest(".attach-cancel")) { open = null; paint(); return; }
+      const da = t.closest(".del-ask");
+      if (da) { confirmDel = da.dataset.slug; paint(); return; }
+      if (t.closest(".del-cancel")) { confirmDel = null; paint(); return; }
       const db = t.closest(".del-book");
       if (db) {
+        confirmDel = null;
         const r = await fetch("/api/books/" + db.dataset.slug, { method: "DELETE" }).then((x) => x.json()).catch((err) => ({ error: String(err) }));
         if (r.error) toast("Ошибка: " + r.error); else { delete jobs[db.dataset.slug]; renderLibrary(); }
         return;

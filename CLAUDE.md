@@ -16,7 +16,7 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   settings), `/api/wishlist` (titles saved without text), `/api/search` (fantasy-worlds JSON + Flibusta/Coollib OPDS, the only
   runtime network calls besides the pipeline downloads), `/api/where/<slug>`, `/api/add`
   (multipart, launches `add_book.py` as a background job), `/api/jobs`, `DELETE /api/books/<slug>`
-  (only a book that never finished loading).
+  (the page confirms first).
 - `books/` — all per-book data and reading state; nothing under it is tracked by git.
 - `tests/` — pytest for the pipeline. `docs/` — design notes and ADRs.
 
