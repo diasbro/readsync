@@ -50,6 +50,9 @@ def sniff(data: bytes, hint: str) -> str:
             names = []
         if "META-INF/container.xml" in names or hint.endswith(".epub"):
             return "epub"
+        if names and not any(n.lower().endswith(".fb2") for n in names):
+            exts = ", ".join(sorted({n.rsplit(".", 1)[-1].lower() for n in names if "." in n}))
+            raise SystemExit(f"в архиве {exts}; поддерживаются fb2, epub, txt, html")
         return "fb2zip"
     if b"<FictionBook" in head or hint.endswith(".fb2"):
         return "fb2"
@@ -235,6 +238,16 @@ def build_audio(sources: list[str], d: Path, lang: str) -> None:
     lst.unlink()
 
 
+FRAGMENT_RE = re.compile(r"конец ознакомительного фрагмента|ознакомительн\w+ фрагмент\w*|купить полную версию", re.I)
+
+
+def fragment_note(book: dict) -> str:
+    """The literal phrase, if the text ends the way sample editions do. Quoted on the card, never judged."""
+    tail = " ".join(b.get("text", "") for b in book.get("blocks", [])[-8:])
+    m = FRAGMENT_RE.search(tail)
+    return m.group(0) if m else ""
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("slug")
@@ -243,6 +256,8 @@ def main() -> None:
     ap.add_argument("--title", default="")
     ap.add_argument("--author", default="")
     ap.add_argument("--narrator", default="")
+    ap.add_argument("--translator", default="")
+    ap.add_argument("--year", default="")
     ap.add_argument("--lang", default="ru")
     ap.add_argument("--no-align", action="store_true", help="skip the slow MMS pass (caption timing only)")
     ap.add_argument("--whisper-model", default="small")
@@ -256,6 +271,13 @@ def main() -> None:
         raise SystemExit("no text: pass --text, or use an existing book slug to attach audio")
     book = json.loads((d / "book.json").read_text(encoding="utf-8"))
 
+    # new text under existing captions (an edition replaced): the word timing is rebuilt from them
+    retime = bool(args.text) and not args.audio and (d / "yt.merged.json3").exists() and (d / "audio16k.wav").exists()
+    if retime:
+        for stale in ("timing.json", "anchors.json", "align.log"):
+            (d / stale).unlink(missing_ok=True)
+        run([PY, str(PIPE / "anchors.py"), str(d)])
+        run([PY, str(PIPE / "timing_from_anchors.py"), str(d)])
     if args.audio:
         for stale in ("timing.json", "anchors.json", "align.log"):
             (d / stale).unlink(missing_ok=True)
@@ -279,16 +301,19 @@ def main() -> None:
     meta["language"] = args.lang
     if args.text:
         meta["text_source"] = " | ".join(args.text)
+        meta["translator"] = args.translator
+        meta["year"] = args.year
+        meta["fragment_note"] = fragment_note(book)
     if args.audio:
         meta["audio_source"] = " | ".join(args.audio)
         meta["narrator"] = args.narrator or meta.get("narrator", "")
-    toml.write_text("".join(f'{k} = "{esc(v)}"\n' for k, v in meta.items()), encoding="utf-8")
+    toml.write_text("".join(f'{k} = "{esc(v)}"\n' for k, v in meta.items() if v != ""), encoding="utf-8")
 
     print(
         f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)"),
         flush=True,
     )
-    if args.audio and not args.no_align:
+    if (args.audio or retime) and not args.no_align:
         print("running precise MMS alignment (about 15 min per hour of audio, low priority)...", flush=True)
         run([PY, str(PIPE / "align.py"), str(d)])
         print("done: precise timing", flush=True)

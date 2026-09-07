@@ -13,9 +13,10 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
 - `reader/` — static UI: `index.html`, `app.js` (vanilla JS, one IIFE), `style.css`, `fonts/`.
 - `serve.py` — stdlib HTTP server with Range support: `/api/books`, `/api/state/<slug>` (per-book
   reading state, last-writer-wins by `<key>At` timestamps), `/api/settings` (global reader
-  settings), `/api/wishlist` (titles saved without text), `/api/search` (fantasy-worlds JSON + Flibusta/Coollib OPDS, the only
-  runtime network calls besides the pipeline downloads), `/api/where/<slug>`, `/api/add`
-  (multipart, launches `add_book.py` as a background job), `/api/jobs`, `DELETE /api/books/<slug>`
+  settings), `/api/wishlist` (titles saved without text), `/api/search` (fantasy-worlds JSON + Flibusta/Coollib OPDS incl. author
+  lookup, the only runtime network calls besides the pipeline downloads), `/api/hits/<slug>` (the search
+  result a book was picked from), `/api/where/<slug>`, `/api/add`
+  (multipart, launches `add_book.py` as a background job; `replace=1` swaps the text of an existing book), `/api/jobs`, `DELETE /api/books/<slug>`
   (the page confirms first).
 - `books/` — all per-book data and reading state; nothing under it is tracked by git.
 - `tests/` — pytest for the pipeline. `docs/` — design notes and ADRs.

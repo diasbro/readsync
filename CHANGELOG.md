@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Library: one add line (title, link or file), titles without text wait in the catalog, multi-library
-  text search with auto-load, shelves, covers, header line, quick find.
+- Library: one line finds and adds (title, link or file); titles without text wait in the catalog;
+  editions from fantasy-worlds, Flibusta and Coollib with translator, year and size, author lookup;
+  replace the text of a book in place; shelves, covers, header line.
 - Import: EPUB, TXT, HTML, multi-volume text, multi-part audio, illustrations.
 - Reader: page mode, server-side state and settings, fonts and themes, focus tools.
 

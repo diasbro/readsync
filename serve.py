@@ -93,6 +93,7 @@ def list_books() -> list[dict]:
         job = JOBS.get(d.name)
         meta["building"] = bool(job and job["proc"].poll() is None)
         meta["added"] = int(toml.stat().st_mtime * 1000)
+        meta["has_hits"] = (d / "hits.json").exists()
         cover = (
             next((f for f in (d / "images").glob("cover.*") if f.is_file()), None) if (d / "images").is_dir() else None
         )
@@ -193,7 +194,8 @@ def save_wishlist(items: list[dict]) -> None:
     os.replace(tmp, WISHLIST_FILE)
 
 
-WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url", "found", "searched")  # found: none|some|error
+WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url", "searched")
+WISH_JSON = ("hits", "author_hits")  # the last search result stays with the title until it is loaded
 
 
 def wishlist_add(data: dict) -> list[dict]:
@@ -220,6 +222,9 @@ def wishlist_update(wid: str, data: dict) -> list[dict]:
                 for k in WISH_FIELDS:
                     if k in data:
                         it[k] = str(data[k] or "").strip()
+                for k in WISH_JSON:
+                    if k in data:
+                        it[k] = data[k]
         save_wishlist(items)
         return items
 
@@ -229,6 +234,16 @@ def wishlist_delete(wid: str) -> list[dict]:
         items = [i for i in load_wishlist() if i["id"] != wid]
         save_wishlist(items)
         return items
+
+
+def save_hits(slug: str, data: dict) -> None:
+    """The search result a book was picked from stays next to it, so another edition is one click away."""
+    if not SLUG_RE.match(slug) or not (BOOKS / slug).is_dir():
+        raise ValueError("unknown book")
+    (BOOKS / slug / "hits.json").write_text(
+        json.dumps({"hits": data.get("hits") or [], "author_hits": data.get("author_hits")}, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def delete_book(slug: str) -> None:
@@ -315,9 +330,10 @@ def search_fw(query: str) -> list[dict]:
                 "id": str(b.get("id")),
                 "title": b.get("title") or "",
                 "author": author,
-                "year": b.get("year") or "",
+                "translator": "",
+                "year": str(b.get("year") or ""),
+                "size_kb": None,
                 "lang": b.get("lang_code") or "",
-                "series": b.get("series_name") or "",
                 "url": FW_READER.format(id=b.get("id")),
                 "kind": "html",
                 "audio_url": f"https://www.youtube.com/watch?v={yt}" if yt else "",
@@ -337,15 +353,12 @@ def search_fw(query: str) -> list[dict]:
         return list(ex.map(readable, hits))
 
 
-def search_opds(name: str, base: str, search_url: str, query: str) -> list[dict]:
-    xml = _get(search_url + urllib.parse.quote(query)).decode("utf-8", "replace")
+def opds_entries(name: str, base: str, xml: str) -> list[dict]:
+    """Book entries of an OPDS feed as hits. Facts only, as the catalog states them: title, authors,
+    translator, year, size, format."""
     hits = []
-    for e in re.findall(r"<entry>(.*?)</entry>", xml, re.S)[:12]:
-        title = (
-            html_unescape(re.search(r"<title>(.*?)</title>", e, re.S).group(1)).strip()
-            if re.search(r"<title>", e)
-            else ""
-        )
+    for e in re.findall(r"<entry>(.*?)</entry>", xml, re.S):
+        title = html_unescape(re.search(r"<title>(.*?)</title>", e, re.S).group(1)).strip() if "<title>" in e else ""
         authors = [html_unescape(x).strip() for x in re.findall(r"<author>\s*<name>(.*?)</name>", e, re.S)]
         lang = re.search(r"<dc:language>(.*?)</dc:language>", e)
         fb2 = re.search(r'href="([^"]+)"[^>]*type="application/fb2\+zip"', e) or re.search(
@@ -355,25 +368,32 @@ def search_opds(name: str, base: str, search_url: str, query: str) -> list[dict]
         link = fb2 or epub
         if link:
             href = link.group(1)
-        else:  # some catalogs (coollib) only link the book page from search results: derive /b/<id>/fb2
+        else:  # coollib links the book page (or only its cover) from lists: derive /b/<id>/fb2
             page = re.search(r'href="(?:https?://[^/"]+)?/b/(\d+)"', e)
+            page = page or re.search(r'href="[^"]*/i/\d+/(\d+)/cover', e)
             if not page:
                 continue
             href = f"/b/{page.group(1)}/fb2"
             fb2 = True
         if href.startswith("/"):
             href = base + href
+        content = re.search(r"<content[^>]*>(.*?)</content>", e, re.S)
+        info = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html_unescape(content.group(1)))) if content else ""
+        translator = re.search(r"Перевод(?:чик)?:\s*(.+?)\s*(?:Год издания|Формат|Язык|Размер|Скачиваний|$)", info)
+        year = re.search(r"Год издания:\s*(\d{4})", info)
+        size = re.search(r"Размер:\s*(\d+)\s*[KК][bБ]", info)
+        fmt = re.search(r"Формат:\s*([a-z0-9]+)", info, re.I)  # what the catalog holds; its "fb2" link may wrap an rtf
         hits.append(
             {
                 "source": name,
-                "id": href,
                 "title": title,
                 "author": ", ".join(authors),
-                "year": "",
+                "translator": translator.group(1).strip(" .,;") if translator else "",
+                "year": year.group(1) if year else "",
+                "size_kb": int(size.group(1)) if size else None,
                 "lang": lang.group(1) if lang else "",
-                "series": "",
                 "url": href,
-                "kind": "fb2" if fb2 else "epub",
+                "kind": fmt.group(1).lower() if fmt else "fb2" if fb2 else "epub",
                 "audio_url": "",
                 "narrator": "",
                 "readable": True,
@@ -382,71 +402,127 @@ def search_opds(name: str, base: str, search_url: str, query: str) -> list[dict]
     return hits
 
 
+def search_opds(name: str, base: str, search_url: str, query: str) -> list[dict]:
+    return opds_entries(name, base, _get(search_url + urllib.parse.quote(query)).decode("utf-8", "replace"))[:12]
+
+
+AUTHOR_PAGES = 3  # 20 books per OPDS page
+
+
+def author_books(name: str, base: str, query: str) -> tuple[str, list[dict]]:
+    """(author name, books) when the catalog has an author whose name is exactly the query."""
+    xml = _get(f"{base}/opds/search?searchType=authors&searchTerm=" + urllib.parse.quote(query)).decode(
+        "utf-8", "replace"
+    )
+    want = norm_title(query)
+    for e in re.findall(r"<entry>(.*?)</entry>", xml, re.S):
+        title = html_unescape(re.search(r"<title>(.*?)</title>", e, re.S).group(1)).strip() if "<title>" in e else ""
+        link = re.search(r'href="([^"]*/opds/author/\d+)"', e)
+        if not link or not want or norm_title(title) != want:
+            continue
+        url = link.group(1)
+        if url.startswith("/"):
+            url = base + url
+        books: list[dict] = []
+        for page_url in (url + "/alphabet", url):  # flibusta lists books under /alphabet, coollib on the author page
+            nxt: str | None = page_url
+            for _ in range(AUTHOR_PAGES):
+                if not nxt:
+                    break
+                page = _get(nxt).decode("utf-8", "replace")
+                books += opds_entries(name, base, page)
+                m = re.search(r'<link[^>]*href="([^"]+)"[^>]*rel="next"', page) or re.search(
+                    r'<link[^>]*rel="next"[^>]*href="([^"]+)"', page
+                )
+                nxt = (base + m.group(1) if m and m.group(1).startswith("/") else m.group(1)) if m else None
+            if books:
+                break
+        return title, books
+    return "", []
+
+
 def html_unescape(s: str) -> str:
     import html as _html
 
     return _html.unescape(s)
 
 
+def editions(hits: list[dict]) -> list[dict]:
+    """One row per edition. Numbered volumes of the same edition (same source, work, author, translator)
+    load together as one book; anything else stays a row of its own. Nothing is judged here."""
+    groups: dict[tuple, list[dict]] = {}
+    for h in hits:
+        key = (h["source"], norm_title(h["title"]), norm_title(h["author"]), norm_title(h.get("translator", "")))
+        groups.setdefault(key, []).append(h)
+    rows = []
+    for parts in groups.values():
+        volumes = sorted((p for p in parts if volume_no(p["title"])), key=lambda p: volume_no(p["title"]))
+        for p in parts:
+            if not volume_no(p["title"]):
+                rows.append(dict(p, parts=[{"title": p["title"], "url": p["url"], "kind": p["kind"]}]))
+        if volumes:
+            seen: set = set()
+            vols = [p for p in volumes if not (volume_no(p["title"]) in seen or seen.add(volume_no(p["title"])))]
+            first = vols[0]
+            base = re.sub(r"[\s.,:;(–—-]+$", "", VOLUME_RE.split(first["title"])[0]).strip() or first["title"]
+            labels = [VOLUME_RE.search(p["title"]).group(0) for p in vols]
+            rows.append(
+                dict(
+                    first,
+                    title=base,
+                    parts=[{"title": p["title"], "url": p["url"], "kind": p["kind"]} for p in vols],
+                    parts_label=", ".join(labels),
+                )
+            )
+    order = {"fantasy-worlds": 0, "flibusta": 1, "coollib": 2}
+    rows.sort(key=lambda r: (order.get(r["source"], 9), -int(r["year"] or 0), r["title"]))
+    for r in rows:
+        r.pop("url", None)
+    return rows
+
+
 def search_text(query: str) -> dict:
-    """Query every source in parallel; group volumes of the same work so they load as one book.
-    Ranking: exact and complete first, then source priority (fantasy-worlds, flibusta, coollib)."""
-    hits, errors = [], []
-    with ThreadPoolExecutor(max_workers=1 + len(OPDS_SOURCES)) as ex:
-        futures = {ex.submit(search_fw, query): "fantasy-worlds"}
-        futures.update({ex.submit(search_opds, n, b, u, query): n for n, b, u in OPDS_SOURCES})
-        for f, n in futures.items():
+    """Every source in parallel: books by title, plus the books of an author named exactly like the
+    query. Rows are editions as the catalogs describe them; the reader picks."""
+    hits, by_author, errors = [], [], []
+    author_name = ""
+    want = norm_title(query)
+    with ThreadPoolExecutor(max_workers=1 + 2 * len(OPDS_SOURCES)) as ex:
+        futures = {ex.submit(search_fw, query): ("fantasy-worlds", "title")}
+        for n, b, u in OPDS_SOURCES:
+            futures[ex.submit(search_opds, n, b, u, query)] = (n, "title")
+            futures[ex.submit(author_books, n, b, query)] = (n, "author")
+        for f, (n, what) in futures.items():
             try:
-                hits += f.result(timeout=45)
+                res = f.result(timeout=60)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{n}: {e}")
-    want = norm_title(query)
-    groups: dict[tuple, dict] = {}
-    for h in hits:
-        key = (h["source"], norm_title(h["title"]), norm_title(h["author"]))
-        g = groups.setdefault(
-            key,
-            {
-                "source": h["source"],
-                "title": h["title"],
-                "author": h["author"],
-                "year": h["year"],
-                "lang": h["lang"],
-                "series": h["series"],
-                "audio_url": h["audio_url"],
-                "narrator": h["narrator"],
-                "readable": h["readable"],
-                "parts": [],
-            },
-        )
-        g["parts"].append({"title": h["title"], "url": h["url"], "kind": h["kind"], "no": volume_no(h["title"])})
-        g["readable"] = g["readable"] or h["readable"]
-    out = []
-    for g in groups.values():
-        singles = [p for p in g["parts"] if not p["no"]]
-        volumes = [p for p in g["parts"] if p["no"]]
-        if singles:  # a complete one-file edition beats volumes; several editions: keep the first
-            g["parts"] = [singles[0]]
-            g["title"] = singles[0]["title"]
-            g["complete"] = True
-        else:
-            seen: set = set()  # several editions of the same volume: keep the first
-            vols = [p for p in sorted(volumes, key=lambda p: p["no"]) if not (p["no"] in seen or seen.add(p["no"]))]
-            g["parts"] = vols
-            g["title"] = re.sub(r"[\s.,:;(–—-]+$", "", VOLUME_RE.split(vols[0]["title"])[0]).strip() or g["title"]
-            g["complete"] = [p["no"] for p in vols] == list(range(1, len(vols) + 1)) and (
-                len(vols) > 1 or vols[0]["no"] == 1
-            )
-        t = norm_title(g["title"])
-        g["exact"] = bool(want) and (
-            t == want or norm_title(f"{g['author']} {g['title']}") == want or t.startswith(want + " ")
-        )
-        out.append(g)
-    order = {"fantasy-worlds": 0, "flibusta": 1, "coollib": 2}
-    out.sort(
-        key=lambda g: (not (g["exact"] and g["complete"] and g["readable"]), not g["exact"], order.get(g["source"], 9))
-    )
-    return {"hits": out[:12], "errors": errors}
+                continue
+            if what == "author":
+                name, books = res
+                author_name = author_name or name
+                by_author += books
+            else:
+                hits += res
+    # fantasy-worlds also matches series names and authors: keep the hits that name the query in the
+    # title, move the ones by an author named like the query to the author block
+    if want:
+        named = [
+            h
+            for h in hits
+            if h["source"] != "fantasy-worlds" or want in norm_title(h["title"]) or norm_title(h["author"]) == want
+        ]
+        hits = named or hits
+    fw_by_author = [h for h in hits if want and norm_title(h["author"]) == want]
+    if fw_by_author:
+        author_name = author_name or fw_by_author[0]["author"]
+        by_author = fw_by_author + by_author
+        hits = [h for h in hits if h not in fw_by_author]
+    return {
+        "hits": editions(hits)[:30],
+        "author": {"name": author_name, "hits": editions(by_author)[:80]} if author_name else None,
+        "errors": errors,
+    }
 
 
 _WHERE_CACHE: dict[str, tuple[float, float, dict, list]] = {}
@@ -599,7 +675,8 @@ def start_job(form: dict) -> tuple[dict | None, str]:
     tf = form.get("text_file")
     has_file = bool(tf and tf.get("filename") and tf["data"])
     attach_audio = (d / "book.json").exists() and not texts and not has_file
-    if (d / "book.json").exists() and not attach_audio:
+    replace = (d / "book.json").exists() and not attach_audio and val("replace") == "1"
+    if (d / "book.json").exists() and not attach_audio and not replace:
         return None, f"книга {slug} уже есть"
     d.mkdir(parents=True, exist_ok=True)
     if has_file:
@@ -637,9 +714,25 @@ def start_job(form: dict) -> tuple[dict | None, str]:
         cmd += ["--audio", a]
     if val("align") != "on":
         cmd.append("--no-align")
-    for k, flag in (("title", "--title"), ("author", "--author"), ("narrator", "--narrator")):
+    flags = (
+        ("title", "--title"),
+        ("author", "--author"),
+        ("narrator", "--narrator"),
+        ("translator", "--translator"),
+        ("year", "--year"),
+    )
+    for k, flag in flags:
         if val(k):
             cmd += [flag, val(k)]
+    if replace:  # new text, new sentence numbering: the page-mode position starts over (audio seconds stay valid)
+        st = load_state(slug)
+        for k in ("sent", "sentAt", "sentPct"):
+            st.pop(k, None)
+        save_state(slug, st)
+    if not (d / "book.toml").exists():  # a stub so the card shows up as "loading" right away; add_book fills it in
+        esc_ = lambda v: str(v).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
+        stub = {"slug": slug, "title": title or slug, "author": val("author")}
+        (d / "book.toml").write_text("".join(f'{k} = "{esc_(v)}"\n' for k, v in stub.items() if v), encoding="utf-8")
     with open(d / "add.log", "w", encoding="utf-8") as log:  # the child inherits the handle; ours closes here
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)
     JOBS[slug] = {"proc": proc, "started": time.time(), "slug": slug}
@@ -655,6 +748,9 @@ def job_status() -> dict:
         except OSError:
             log = ""
         lines = [ln for ln in log.splitlines() if ln.strip() and "warning" not in ln.lower()]
+        # the last plain line, not the traceback frames: that is what the card shows
+        tail = [ln for ln in lines if not ln.startswith(("  ", "Traceback", "+ ")) and "CalledProcessError" not in ln]
+        lines = tail or lines
         out[slug] = {"running": code is None, "exit": code, "log": lines[-6:], "started": j["started"]}
     return out
 
@@ -728,6 +824,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(job_status())
         if self.path.startswith("/api/settings"):
             return self.send_json(load_settings())
+        if self.path.startswith("/api/hits/"):
+            slug = self.path.rsplit("/", 1)[-1]
+            p = BOOKS / slug / "hits.json"
+            if not SLUG_RE.match(slug) or not p.exists():
+                return self.send_json({"hits": [], "author_hits": None})
+            return self.send_json(json.loads(p.read_text(encoding="utf-8")))
         if self.path.startswith("/api/wishlist"):
             return self.send_json(load_wishlist())
         if self.path.startswith("/api/where/"):
@@ -764,6 +866,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(merge_settings(body))
         if self.path.startswith("/api/wishlist/"):
             return self.send_json(wishlist_update(self.path.rsplit("/", 1)[-1], body))
+        if self.path.startswith("/api/hits/"):
+            try:
+                save_hits(self.path.rsplit("/", 1)[-1], body)
+            except (ValueError, OSError) as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True})
         slug, is_session = self.state_slug()
         if slug is None or is_session:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
