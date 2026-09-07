@@ -14,11 +14,7 @@
   <header class="lib-head">
     <div class="lib-title-row">
       <h1><span class="mark" aria-hidden="true"><i></i></span>readsync</h1>
-      <div class="lib-tools">
-        <input id="lib-search" class="lib-search" placeholder="Название или автор" autocomplete="off" hidden>
-        <button class="icon" id="lib-find" title="Найти в библиотеке (/)">⌕</button>
-        <button class="icon" id="lib-settings" title="Настройки">⚙</button>
-      </div>
+      <div class="lib-tools"><button class="icon" id="lib-settings" title="Настройки">⚙</button></div>
       <div id="lib-prefs" class="popup prefs" hidden>
         <div class="popup-title">Тема</div>
         <div class="seg" id="lib-theme">
@@ -31,17 +27,16 @@
           <option value="plex">IBM Plex Sans</option><option value="system">Системный</option>
         </select>
         <div class="muted small" style="margin-top:6px">Шрифт текста и остальное — в настройках внутри книги.</div>
-        <div class="popup-title" style="margin-top:14px">Новые книги</div>
-        <label class="switch"><input type="checkbox" id="pref-autofind"> <span>искать текст по библиотекам сразу</span></label>
-        <div class="muted small" style="margin-top:6px">fantasy-worlds, Flibusta, Coollib. Загружается только точное совпадение, иначе книга ждёт в каталоге без текста.</div>
-        <div class="muted small" style="margin-top:10px">Сохранять с любой страницы: перетащи <a id="bookmarklet" href="#" class="bm">+ readsync</a> на панель закладок или открой <code id="wish-url"></code>.</div>
+        <div class="popup-title" style="margin-top:14px">Сохранять с любой страницы</div>
+        <div class="muted small">Перетащи <a id="bookmarklet" href="#" class="bm">+ readsync</a> на панель закладок или открой <code id="wish-url"></code>.</div>
       </div>
     </div>
     <div class="demo" aria-hidden="true"><span class="demo-line" id="demo-line"></span></div>
-    <form id="add-form" class="add-line" autocomplete="off">
-      <span class="plus" aria-hidden="true">＋</span>
-      <input id="add-title" placeholder="Добавить книгу: название, ссылка или файл">
-    </form>
+    <div class="omni" id="omni">
+      <span class="glyph" aria-hidden="true">⌕</span>
+      <input id="omni-input" placeholder="Найти или добавить книгу" autocomplete="off" spellcheck="false">
+      <span class="kbd" id="omni-kbd">/</span>
+    </div>
   </header>
 
   <section class="lib-section" id="reading-section" hidden>

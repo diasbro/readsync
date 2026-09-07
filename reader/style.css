@@ -60,17 +60,19 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .lib-title-row { position: relative; display: flex; align-items: center; justify-content: space-between; }
 .lib-tools { display: flex; gap: 4px; align-items: center; }
 .lib-title-row .icon { color: var(--muted); }
-.lib-search { width: 220px; margin-right: 6px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); padding: 6px 13px; font-size: 14px; color: var(--fg); outline: none; }
-.lib-search:focus { border-color: var(--accent); }
-.lib-title-row .icon.on { color: var(--accent); }
 .lib-section.empty { display: none; }
 .card.hit-off { display: none; }
-/* the one line that adds a book: a title, a link, or a dropped file */
-.add-line { display: flex; align-items: center; gap: 10px; margin-top: 26px; border-bottom: 1px solid var(--line); transition: border-color .15s; }
-.add-line:focus-within, body.dropping .add-line { border-bottom-color: var(--accent); }
-.add-line .plus { color: var(--accent); font-size: 20px; line-height: 1; opacity: .75; }
-.add-line input { flex: 1; min-width: 0; border: 0; background: none; padding: 10px 0; font-size: 15px; color: var(--fg); outline: none; }
-.add-line input::placeholder { color: var(--muted); opacity: 1; }
+/* the one line: finds in the library as you type; what is not there is saved from the same line */
+.omni { display: flex; align-items: center; gap: 12px; margin-top: 26px; border-bottom: 1px solid var(--line); transition: border-color .15s; }
+.omni:focus-within, body.dropping .omni { border-bottom-color: var(--accent); }
+.omni .glyph { color: var(--muted); font-size: 18px; line-height: 1; width: 20px; text-align: center; }
+.omni input { flex: 1; min-width: 0; border: 0; background: none; padding: 10px 0; font-size: 15px; color: var(--fg); outline: none; }
+.omni input::placeholder { color: var(--muted); opacity: 1; }
+.omni .kbd { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
+.card.add { border-style: dashed; grid-template-columns: 1fr; background: none; cursor: pointer; padding: 14px 18px; }
+.card.add:hover { border-color: var(--accent); transform: none; }
+.card.add .t { font-size: 16px; font-family: var(--ui); }
+.card.add .t b { color: var(--accent); font-weight: 500; margin-right: 8px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .lib-title-row .icon:hover { color: var(--fg); }
 .prefs { position: absolute; right: 0; top: 46px; width: 380px; z-index: 30; }
@@ -146,20 +148,33 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .card .tag.done { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
 .card .status { display: flex; align-items: center; gap: 6px; }
 .card .status.warn::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #d0902e; flex: none; }
-.card .status.ok { color: var(--accent); }
 .card .status .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
 .card.shell .cover.empty { background: none; border: 1px dashed var(--line); }
-.card .cands { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.card .cands { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.card .cands .hd { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
 .card .cand { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font-size: 14px; }
-.card .cand .ct { flex: 1; min-width: 0; }
-.card .cand .cm { color: var(--muted); font-size: 12px; }
-.card details.more { margin-top: 4px; }
+.card .cand .ct, .card .eds summary .ct { flex: 1; min-width: 0; }
+.card .cand .cm, .card .eds summary .cm { color: var(--muted); font-size: 12px; }
+.card .cand .pick { white-space: nowrap; }
+.card details.eds { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 14px; }
+.card details.eds summary { display: flex; align-items: center; gap: 10px; cursor: pointer; list-style: none; }
+.card details.eds summary::-webkit-details-marker { display: none; }
+.card details.eds[open] summary .link-btn { opacity: 0; }
+.card details.eds .cands { margin-top: 8px; }
+.card details.eds .cand { background: color-mix(in srgb, var(--bg) 60%, transparent); }
+.card details.more { margin-top: 2px; }
 .card details.more summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.card .mini { display: flex; gap: 14px; margin-top: 8px; }
+.card .mini .link-btn { opacity: .7; }
+.card .mini .link-btn:hover { opacity: 1; }
 .card .attach-form .file-row { font-size: 12px; color: var(--muted); }
 .card .attach-form .file-row input { font-size: 12px; padding: 0; border: 0; }
 .card .tag { display: inline-block; font-size: 11px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 999px; margin-left: 6px; vertical-align: middle; color: var(--muted); font-family: var(--ui); letter-spacing: .02em; }
 .toast { position: fixed; left: 50%; top: 18px; transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 999px; font-size: 14px; z-index: 60; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
-@media (max-width: 560px) { .lib-search { width: 150px; } .card { grid-template-columns: 52px 1fr; } .card .cover { width: 52px; height: 78px; } }
+@media (max-width: 560px) {
+  .card { grid-template-columns: 52px 1fr; } .card .cover { width: 52px; height: 78px; }
+  .card .side { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: 6px 14px; }
+}
 
 /* ---------- layout ---------- */
 .topbar { position: fixed; top: 0; left: 0; right: 0; height: var(--topbar-h); z-index: 20;
