@@ -32,10 +32,9 @@
       </div>
     </div>
     <div class="demo" aria-hidden="true"><span class="demo-line" id="demo-line"></span></div>
-    <div class="omni" id="omni">
+    <div class="omni">
       <span class="glyph" aria-hidden="true">⌕</span>
-      <input id="omni-input" placeholder="Найти или добавить книгу" autocomplete="off" spellcheck="false">
-      <span class="kbd" id="omni-kbd">/</span>
+      <input id="omni-input" placeholder="Найти или добавить" autocomplete="off" spellcheck="false" title="Поиск по библиотеке; чего нет, сохраняется отсюда же (/)">
     </div>
   </header>
 
@@ -230,6 +229,8 @@
   <div id="scrim" hidden></div>
   <audio id="audio" preload="metadata"></audio>
 </div>
+<script src="common.js"></script>
+<script src="library.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

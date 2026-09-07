@@ -10,14 +10,21 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   (→ `timing.json`), `align.py` (MMS forced alignment, refines `timing.json`), `transcribe.py`
   (faster-whisper fallback), `add_book.py` (orchestrator: several `--text` = volumes, several
   `--audio` = parts, audio-only on an existing slug attaches audio). Each takes a book directory.
-- `reader/` — static UI: `index.html`, `app.js` (vanilla JS, one IIFE), `style.css`, `fonts/`.
-- `serve.py` — stdlib HTTP server with Range support: `/api/books`, `/api/state/<slug>` (per-book
-  reading state, last-writer-wins by `<key>At` timestamps), `/api/settings` (global reader
-  settings), `/api/wishlist` (titles saved without text), `/api/search` (fantasy-worlds JSON + Flibusta/Coollib OPDS incl. author
-  lookup, the only runtime network calls besides the pipeline downloads), `/api/hits/<slug>` (the search
-  result a book was picked from), `/api/where/<slug>`, `/api/add`
-  (multipart, launches `add_book.py` as a background job; `replace=1` swaps the text of an existing book), `/api/jobs`, `DELETE /api/books/<slug>`
-  (the page confirms first).
+- `reader/` — static UI, no build step: `index.html`, `common.js` (helpers + reader settings shared
+  by both pages), `library.js` (library page: one line finds and adds, cards open in place),
+  `app.js` (the reader), `style.css`, `fonts/`.
+- `serve.py` — stdlib HTTP server with Range support; routing only. `library.py` — books on disk,
+  reading state, settings, saved titles, background jobs. `sources/` — one module per text source
+  (`fantasy_worlds.py`, `flibusta.py`, `coollib.py` on top of `opds.py`); `SOURCES` in
+  `sources/__init__.py` is the priority list, a new catalog is a new module plus one entry.
+  API: `/api/books`, `/api/state/<slug>` (per-book reading state, last-writer-wins by `<key>At`
+  timestamps), `/api/settings` (global reader settings), `/api/wishlist` (titles saved without text,
+  with their last search result), `/api/search` (all sources, editions as the catalogs describe
+  them plus an author's books; the only runtime network calls besides the pipeline downloads),
+  `/api/hits/<slug>` (the search result a book was picked from), `/api/where/<slug>`, `/api/add`
+  (multipart, launches `add_book.py` as a background job; `replace=1` swaps the text of an
+  existing book), `/api/align/<slug>`, `/api/jobs`, `DELETE /api/books/<slug>` (the page
+  confirms first).
 - `books/` — all per-book data and reading state; nothing under it is tracked by git.
 - `tests/` — pytest for the pipeline. `docs/` — design notes and ADRs.
 
@@ -29,7 +36,9 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
 
 ## Conventions
 - Python: ruff (line length 120), type hints, `from __future__ import annotations`, stdlib first.
-- JS: no dependencies, no bundler; keep `app.js` a single IIFE. Reading state and settings live
+- JS: no dependencies, no bundler; one file per page, each an IIFE over the globals of
+  `common.js`. Cards, panels and actions in `library.js` are small functions and a `data-act`
+  table: add a section or an action without touching the rest. Reading state and settings live
   on the server (`/api/state`, `/api/settings`); `localStorage` (`rs:*` keys via `store.get/set`)
   is only a cache and must never be the sole copy of anything.
 - Timing model: `timing.json.words[i] = [block, charStart, charEnd, t0, t1]`, monotonic in `t0`.

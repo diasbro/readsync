@@ -2,9 +2,12 @@
 
 ## Unreleased
 
-- Library: one line finds and adds (title, link or file); titles without text wait in the catalog;
-  editions from fantasy-worlds, Flibusta and Coollib with translator, year and size, author lookup;
-  replace the text of a book in place; shelves, covers, header line.
+- Library: one quiet line finds and adds (title, link or file); titles without text wait in the catalog;
+  cards carry three icons (read, text and audio, delete) and open in place with editions from
+  fantasy-worlds, Flibusta and Coollib (translator, year, size, author lookup), own link or file,
+  audio and precise alignment; shelves, covers, header line.
+- Code: `library.py` and a `sources/` package (one module per catalog) behind `serve.py`;
+  `reader/common.js`, `library.js`, `app.js`.
 - Import: EPUB, TXT, HTML, multi-volume text, multi-part audio, illustrations.
 - Reader: page mode, server-side state and settings, fonts and themes, focus tools.
 
