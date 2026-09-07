@@ -26,4 +26,4 @@ jobs:
       - name: Test
         run: pytest
       - name: Reader syntax
-        run: node --check reader/app.js && python -m json.tool .claude/launch.json > /dev/null
+        run: for f in reader/*.js; do node --check "$f" || exit 1; done && python -m json.tool .claude/launch.json > /dev/null

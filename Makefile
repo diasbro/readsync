@@ -13,7 +13,7 @@ test:
 	$(PY) -m pytest
 
 lint:
-	$(PY) -m ruff check . && $(PY) -m ruff format --check . && node --check reader/app.js
+	$(PY) -m ruff check . && $(PY) -m ruff format --check . && for f in reader/*.js; do node --check $$f || exit 1; done
 
 fmt:
 	$(PY) -m ruff check --fix . && $(PY) -m ruff format .
