@@ -44,7 +44,20 @@
       }
     }
   }
-  runDemo("Одна книга. Один голос. Одно внимание.", "", "", "plain");
+  // nothing to quote yet: a single line of "words" with the highlight walking along it, no text
+  function runIdle() {
+    const line = $("#demo-line"), demo = $(".demo");
+    clearInterval(demoTimer);
+    line.innerHTML = [34, 62, 28, 88, 50, 40, 72, 46].map((w) => `<i style="width:${w}px"></i>`).join("");
+    line.classList.remove("link"); line.onclick = null;
+    demo.dataset.look = "idle";
+    const ws = line.querySelectorAll("i");
+    let i = 0; ws[0].classList.add("cur");
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      demoTimer = setInterval(() => { if (document.hidden) return; ws[i].classList.remove("cur"); i = (i + 1) % ws.length; ws[i].classList.add("cur"); }, 520);
+    }
+  }
+  runIdle();
   async function headerLine(reading, all) {
     const byOpened = (a, b) => (b.state.opened || 0) - (a.state.opened || 0);
     const current = reading.slice().sort(byOpened)[0];
@@ -58,6 +71,7 @@
       const w = await fetch(`/api/where/${b.slug}?random=1`).then((r) => r.json()).catch(() => null);
       if (w && w.text) { runDemo(w.text, "из «" + b.title + "»", "?book=" + b.slug, "random"); return; }
     }
+    runIdle();
   }
 
   // ---- data ----

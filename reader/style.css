@@ -100,6 +100,10 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .demo-line .src { font-family: var(--ui); font-size: 12px; color: var(--muted); white-space: nowrap; }
 /* page look: a still line with a thin page edge on the left; random look: a quotation mark */
 .demo[data-look="pages"] .demo-line { padding-left: 14px; border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); color: var(--fg); }
+/* idle: one line of word-shaped bars, the reading highlight walking along them; same height as a text line */
+.demo[data-look="idle"] .demo-line { display: flex; align-items: center; gap: 8px; height: calc(19px * 1.5); }
+.demo[data-look="idle"] .demo-line i { display: block; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--muted) 30%, var(--line)); transition: background-color .3s; }
+.demo[data-look="idle"] .demo-line i.cur { background: color-mix(in srgb, var(--accent) 45%, var(--line)); }
 .demo[data-look="random"] .demo-line { font-style: italic; }
 .demo[data-look="random"] .demo-line::before { content: "«"; color: var(--accent); margin-right: 2px; }
 .demo[data-look="random"] .demo-line .src::before { content: "» "; color: var(--accent); font-style: normal; }
