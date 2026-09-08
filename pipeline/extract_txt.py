@@ -55,7 +55,12 @@ def paragraphs(text: str) -> list[str]:
 
 
 def extract(path: Path) -> dict:
-    paras = paragraphs(read_text(path))
+    return build(paragraphs(read_text(path)), path.stem)
+
+
+def build(paras: list[str], title: str, author: str = "") -> dict:
+    """Paragraphs -> the book.json model: headings become chapters, the rest are sentences.
+    Shared with the PDF extractor, which produces paragraphs of its own."""
     blocks: list[dict] = []
     chapters: list[dict] = [{"id": "s0", "title": "", "level": 1, "first_block": 0}]
     for p in paras:
@@ -89,7 +94,7 @@ def extract(path: Path) -> dict:
         chapters = chapters[1:] or chapters
         for b in blocks:
             b["chapter"] = max(0, b["chapter"] - 1)
-    return {"title": path.stem, "author": "", "chapters": chapters, "blocks": blocks, "notes": {}}
+    return {"title": title, "author": author, "chapters": chapters, "blocks": blocks, "notes": {}}
 
 
 def main() -> None:

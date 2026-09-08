@@ -40,9 +40,11 @@ def is_url(s: str) -> bool:
 
 
 def sniff(data: bytes, hint: str) -> str:
-    """Return one of html, fb2, fb2zip, epub, txt."""
+    """Return one of html, fb2, fb2zip, epub, pdf, txt."""
     head = data[:4096].lstrip()
     hint = hint.lower()
+    if head[:5] == b"%PDF-" or hint.endswith(".pdf"):
+        return "pdf"
     if data[:2] == b"PK":
         try:
             names = zipfile.ZipFile(__import__("io").BytesIO(data)).namelist()
@@ -52,7 +54,7 @@ def sniff(data: bytes, hint: str) -> str:
             return "epub"
         if names and not any(n.lower().endswith(".fb2") for n in names):
             exts = ", ".join(sorted({n.rsplit(".", 1)[-1].lower() for n in names if "." in n}))
-            raise SystemExit(f"в архиве {exts}; поддерживаются fb2, epub, txt, html")
+            raise SystemExit(f"в архиве {exts}; поддерживаются fb2, epub, pdf, txt, html")
         return "fb2zip"
     if b"<FictionBook" in head or hint.endswith(".fb2"):
         return "fb2"
@@ -75,9 +77,14 @@ def fetch_text(src: str, part_dir: Path) -> str:
         data = p.read_bytes()
         kind = sniff(data, p.name)
         final = p.name
-    name = {"html": "book.html", "fb2": "book.fb2", "fb2zip": "book.fb2.zip", "epub": "book.epub", "txt": "book.txt"}[
-        kind
-    ]
+    name = {
+        "html": "book.html",
+        "fb2": "book.fb2",
+        "fb2zip": "book.fb2.zip",
+        "epub": "book.epub",
+        "pdf": "book.pdf",
+        "txt": "book.txt",
+    }[kind]
     (part_dir / name).write_bytes(data)
     if kind == "html" and is_url(src):
         download_site_images(data, src, part_dir)
@@ -105,6 +112,7 @@ EXTRACTORS = {
     "fb2": "extract_fb2.py",
     "fb2zip": "extract_fb2.py",
     "epub": "extract_epub.py",
+    "pdf": "extract_pdf.py",
     "txt": "extract_txt.py",
 }
 
