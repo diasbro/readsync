@@ -122,3 +122,19 @@ def test_merge_parts():
     assert [b["chapter"] for b in m["blocks"]] == [0, 1, 2, 3]
     assert m["blocks"][1]["notes"] == [{"pos": 0, "id": "p1_n1"}] and m["notes"] == {"p1_n1": "сноска"}
     assert m["blocks"][3]["images"] == [{"src": "images/i.png"}]
+
+
+def test_a_stub_page_is_not_taken_for_a_book():
+    """Catalogs answer a blocked book with a notice; loading one must stop, not make a five-page book."""
+    import pytest
+    from add_book import check_real_book
+
+    def book(*paragraphs):
+        return {"blocks": [{"text": p} for p in paragraphs]}
+
+    blocked = book("Книга заблокирована.", "Книга заблокирована по одной из причин: жалоба правообладателя.")
+    with pytest.raises(SystemExit):
+        check_real_book(blocked, 1)
+    with pytest.raises(SystemExit):  # no notice, just nothing to read
+        check_real_book(book("Одна короткая страница."), 1)
+    check_real_book(book(" ".join(["слово"] * 600)), 1)  # a real book passes

@@ -110,6 +110,27 @@ def download_site_images(data: bytes, src: str, d: Path) -> None:
             print("image not downloaded:", n, flush=True)
 
 
+# what a catalog serves instead of a book when the rights holder complained or the file is gone
+STUB_RE = re.compile(
+    r"книга (заблокирована|удалена|не найдена)|удалена по требованию|доступ к книге ограничен"
+    r"|страница не найдена|book (is )?blocked|not found",
+    re.I,
+)
+MIN_WORDS = 500  # below this it is a notice, not a book: the shortest classics still run into thousands
+
+
+def check_real_book(book: dict, parts: int) -> None:
+    """A downloaded file that turned out to be a stub page stops the load, so no such book is made.
+    The reader is told what happened and can take another edition."""
+    words = sum(len(b["text"].split()) for b in book["blocks"])
+    head = " ".join(b["text"] for b in book["blocks"][:8])
+    if STUB_RE.search(head) and words < 3000:
+        first = (book["blocks"][0]["text"] if book["blocks"] else "").strip()[:80]
+        raise SystemExit(f"на сайте вместо книги заглушка: «{first}». Возьми другое издание")
+    if parts == 1 and words < MIN_WORDS:
+        raise SystemExit(f"в файле всего {words} слов, это не книга. Возьми другое издание")
+
+
 EXTRACTORS = {
     "html": "extract_text.py",
     "fb2": "extract_fb2.py",
@@ -128,6 +149,7 @@ def build_text(sources: list[str], d: Path, title: str, author: str) -> None:
         part = parts_dir / f"{i:02d}"
         kind = fetch_text(src, part)
         run([PY, str(PIPE / EXTRACTORS[kind]), str(part)])
+        check_real_book(json.loads((part / "book.json").read_text(encoding="utf-8")), len(sources))
     # merge parts (a single part is copied through), then gather images into the book's images/
     cmd = [PY, str(PIPE / "merge_books.py"), str(d), "--title", title, "--author", author]
     run(cmd)
