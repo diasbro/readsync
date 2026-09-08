@@ -5,7 +5,9 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
 
 ## Layout
 - `pipeline/` — one script per stage: `extract_text.py` (fantasy-worlds and generic HTML),
-  `extract_fb2.py`, `extract_epub.py`, `extract_txt.py` (text → `book.json`), `merge_books.py`
+  `extract_fb2.py`, `extract_epub.py`, `extract_txt.py`, `extract_pdf.py` (text → `book.json`;
+  the PDF one drops running heads and page numbers, joins hyphenated words and reuses the
+  plain-text block builder), `merge_books.py`
   (volumes → one book), `anchors.py` (captions → word anchors), `timing_from_anchors.py`
   (→ `timing.json`), `align.py` (MMS forced alignment, refines `timing.json`), `transcribe.py`
   (faster-whisper fallback), `add_book.py` (orchestrator: several `--text` = volumes, several
@@ -21,9 +23,11 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   timestamps), `/api/settings` (global reader settings), `/api/wishlist` (titles saved without text,
   with their last search result), `/api/search` (all sources, editions as the catalogs describe
   them plus the books of an author the query names; the catalogs match a phrase inside a title, so
-  a query no title contains is retried by its own words and rows are ranked by how many of them
-  they name; the only runtime network calls besides the pipeline downloads),
-  `/api/hits/<slug>` (the search result a book was picked from), `/api/where/<slug>`, `/api/add`
+  a query no title contains is retried without its first or last word and by its longest words,
+  rows are ranked by how much of the query their title carries, mirrored copies and formats the
+  pipeline cannot open are dropped, and a query is answered from a 15-minute cache; the only
+  runtime network calls besides the pipeline downloads),
+  `/api/hits/<slug>` (the search result a book was picked from, with the query it came from), `/api/where/<slug>`, `/api/add`
   (multipart, launches `add_book.py` as a background job; `replace=1` swaps the text of an
   existing book), `/api/align/<slug>`, `/api/jobs`, `PUT /api/books/<slug>` (rename: only the
   title line of `book.toml` changes), `DELETE /api/books/<slug>` (the page

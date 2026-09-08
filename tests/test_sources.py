@@ -49,7 +49,9 @@ def test_query_words_and_shorter_searches():
     assert base.terms(q) == ["технология", "принятия", "перемен", "решений", "книга"]
     # a title starts with the name of the work, so the first two words are tried before single ones
     assert base.fallbacks(q) == ["книга перемен", "технология", "принятия"]
-    assert base.fallbacks("Дао дэ цзин") == ["дао дэ", "цзин", "дао"]  # short names count, "дэ" does not
+    # the author can lead or trail: dropping the first word, then the last, keeps the title whole
+    assert base.fallbacks("Толстой Война и мир") == ["толстой война", "война и мир", "толстой война и"]
+    assert base.fallbacks("технология принятия решений виногродский")[2] == "технология принятия решений"
 
 
 def test_matched_counts_the_words_a_row_names():
@@ -126,3 +128,20 @@ def test_two_word_query_needs_both_words(monkeypatch):
     monkeypatch.setattr("sources.SOURCES", [Catalog()])
     res = sources.search_text("властелин колец")
     assert [r["title"] for r in res["hits"]] == ["Властелин колец"]
+
+
+def test_word_matching_is_not_substring_matching():
+    """«мир» must not be found inside «Владимир», but «войны» is still «война»."""
+    words = base.terms("Толстой Война и мир")
+    wrong = {"title": "1920. Война с белополяками", "author": "Меликов Владимир Арсеньевич", "translator": ""}
+    right = {"title": "Война и мир", "author": "Толстой Лев Николаевич", "translator": ""}
+    assert base.matched(words, wrong) == 1
+    assert base.matched(words, right) == 3
+    assert base.same_word("война", "войны") and not base.same_word("мир", "владимир")
+
+
+def test_a_title_the_query_covers_outranks_a_book_about_it():
+    words = base.terms("Толстой Война и мир")
+    novel = {"title": "Война и мир", "author": "Толстой Лев Николаевич", "translator": ""}
+    about = {"title": "Альбом акварелей к роману графа Л.Н. Толстого «Война и мир»", "author": "", "translator": ""}
+    assert base.title_score("Толстой Война и мир", words, novel) > base.title_score("Толстой Война и мир", words, about)

@@ -8,6 +8,7 @@ import re
 import urllib.request
 
 VOLUME_RE = re.compile(r"\b(?:т|том|кн|книга|ч|часть|vol|volume|part)\.?\s*(\d+|[IVXLC]+)\b", re.I)
+OPENS = frozenset(("html", "fb2", "epub", "pdf", "txt"))  # what the pipeline can turn into a book
 SOURCE_ORDER = ("fantasy-worlds", "flibusta", "coollib")  # priority when rows are sorted
 
 
@@ -45,23 +46,58 @@ def terms(query: str) -> list[str]:
 
 
 def fallbacks(query: str, limit: int = 3) -> list[str]:
-    """Shorter searches for a query the catalogs cannot match as a phrase. The first two words come
-    first: a title usually begins with the name of the work («Книга перемен как технология…»);
-    then the longest single words, which carry the most signal."""
-    ws = [w for w in norm_title(query).split() if w not in STOP]
+    """Shorter searches for a query the catalogs cannot match as a phrase. A reader names the author
+    before the title («Толстой Война и мир») or after it («…решений Виногродский»), so the query
+    without its first word and without its last one are tried whole, as long as what is left could
+    be a title. Then the first two words, and the longest single ones."""
+    raw = norm_title(query).split()
+    kept = [w for w in raw if w not in STOP]
     out: list[str] = []
-    if len(ws) > 1:
-        out.append(" ".join(ws[:2]))
+    if len(kept) > 1:
+        out.append(" ".join(kept[:2]))
+    for side in (raw[1:], raw[:-1]):  # the author dropped from the front, then from the back
+        if 1 < len(side) <= 4:
+            out.append(" ".join(side))
     for w in terms(query):
-        if w not in out:
-            out.append(w)
-    return out[:limit]
+        out.append(w)
+    seen: list[str] = []
+    for t in out:
+        if t and t not in seen:
+            seen.append(t)
+    return seen[:limit]
 
 
 def matched(words: list[str], row: dict) -> int:
-    """How many of the query's words a row names, in its title, author or translator."""
-    text = norm_title(" ".join((row.get("title", ""), row.get("author", ""), row.get("translator", ""))))
-    return sum(w in text for w in words)
+    """How many of the query's words a row names, in its title, author or translator. Whole words
+    only, allowing a different ending («войны» names «война», «Владимир» does not name «мир»)."""
+    said = norm_title(" ".join((row.get("title", ""), row.get("author", ""), row.get("translator", "")))).split()
+    return sum(any(same_word(w, x) for x in said) for w in words)
+
+
+def same_word(a: str, b: str) -> bool:
+    """The same word up to its ending: Russian declines, and a catalog title declines with it.
+    «войны» names «война» and «мире» names «мир», «Владимир» names neither."""
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    if len(short) < 3 or len(long_) - len(short) > (2 if len(short) == 3 else 3):
+        return False
+    stem = max(3, len(short) - 2)
+    return short[:stem] == long_[:stem]
+
+
+def title_score(query: str, words: list[str], row: dict) -> int:
+    """How close a row is to what was typed. The title carries the most weight: a reader who types
+    «Война и мир» wants that book, not a newer one that merely mentions the words."""
+    want, title = norm_title(query), norm_title(row.get("title", ""))
+    said = title.split()
+    in_title = sum(any(same_word(w, x) for x in said) for w in words)
+    exact = 6 if title == want else 4 if title.startswith(want) else 2 if want and want in title else 0
+    # the title says nothing the query did not: «Война и мир» for "Толстой Война и мир", not an album about it
+    asked = [w for w in want.split() if w not in STOP]
+    named = [w for w in said if w not in STOP]
+    covered = 5 if named and all(any(same_word(t, w) for w in asked) for t in named) else 0
+    return exact + covered + 2 * in_title + matched(words, row)
 
 
 def roman_to_int(s: str) -> int:
