@@ -1,7 +1,7 @@
 PYTHON ?= $(shell command -v python3.12 || command -v python3)
 PY := .venv/bin/python
 
-.PHONY: setup serve test lint fmt add-book align
+.PHONY: setup serve test lint fmt add-book align app dmg
 
 setup:
 	$(PYTHON) -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -e ".[dev]"
@@ -24,6 +24,13 @@ fonts:
 # make add-book slug=my-book text="https://..." audio="https://..." [narrator="..."]
 add-book:
 	$(PY) pipeline/add_book.py $(slug) --text "$(text)" --audio "$(audio)" $(if $(narrator),--narrator "$(narrator)",)
+
+# the Mac app: a menu bar launcher that serves the reader; dmg is what you install it from
+app:
+	app/build.sh
+
+dmg:
+	app/build.sh --dmg
 
 # make align slug=my-book   (re-run the precise MMS pass)
 align:

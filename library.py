@@ -18,11 +18,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 READER = ROOT / "reader"
-BOOKS = ROOT / "books"
+# books live next to the code when run from a checkout, and outside it when the Mac app runs:
+# the app updates its code in place, so nothing of the reader's may sit inside it
+BOOKS = Path(os.environ.get("READSYNC_BOOKS") or ROOT / "books").expanduser()
 STATE_LOCK = threading.Lock()
 SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 JOBS: dict[str, dict] = {}
-PIPELINE_PY = ROOT / ".venv" / "bin" / "python"
+PIPELINE_PY = Path(os.environ.get("READSYNC_PYTHON") or ROOT / ".venv" / "bin" / "python").expanduser()
 TRANSLIT = dict(
     zip(
         "абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
