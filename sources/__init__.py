@@ -4,35 +4,45 @@ Adding a catalog: a new module and one entry in SOURCES."""
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 
-from .base import editions, fallbacks, matched, norm_title, terms
+from .base import OPENS, SOURCE_ORDER, editions, fallbacks, matched, norm_title, terms, title_score
 from .coollib import Coollib
 from .fantasy_worlds import FantasyWorlds
 from .flibusta import Flibusta
 
 SOURCES = [FantasyWorlds(), Flibusta(), Coollib()]
-LABELS = {"fantasy-worlds": "fantasy-worlds", "flibusta": "Flibusta", "coollib": "Coollib"}
 SHORTER_TRIES = 3  # how many shorter searches follow a phrase that found nothing
+ROUND_SECONDS = 45  # one deadline for a whole round of requests, not one per request
+PER_SOURCE = 2  # at most this many requests to one catalog at a time: more and the mirrors answer 502
+CACHE_SECONDS = 900  # the same query asked again within this comes back without touching the network
 
 
-def ask(queries: list[str], authors: bool = True) -> tuple[list[dict], list[dict], str, list[str]]:
-    """Every term against every source, all at once: title hits, an author's books, that author's
-    name, errors. Shorter retries of a query ask for titles only: a word of a title is not a name."""
+def ask(queries: list[str], author_query: str = "") -> tuple[list[dict], list[dict], str, list[str]]:
+    """Every term against every source, all at once: title hits, plus the books of an author named by
+    `author_query` (the whole query at first, its most distinctive word when that found nothing)."""
     hits: list[dict] = []
     by_author: list[dict] = []
     errors: list[str] = []
     author_name = ""
-    with ThreadPoolExecutor(max_workers=len(SOURCES) * (len(queries) + bool(authors))) as ex:
+    with ThreadPoolExecutor(max_workers=len(SOURCES) * PER_SOURCE) as ex:
         futures = {}
         for s in SOURCES:
             for query in queries:
                 futures[ex.submit(s.search, query)] = (s.name, "title")
-            if authors:
-                futures[ex.submit(s.author_books, queries[0])] = (s.name, "author")
-        for f, (n, what) in futures.items():
+            if author_query:
+                futures[ex.submit(s.author_books, author_query)] = (s.name, "author")
+        done, late = wait(futures, timeout=ROUND_SECONDS)
+        for f in late:
+            f.cancel()
+            errors.append(f"{futures[f][0]}: не ответил за {ROUND_SECONDS} с")
+        for f in futures:  # in the order they were submitted, so the same search returns the same list
+            if f not in done:
+                continue
+            n, what = futures[f]
             try:
-                res = f.result(timeout=60)
+                res = f.result()
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{n}: {e}")
                 continue
@@ -46,15 +56,33 @@ def ask(queries: list[str], authors: bool = True) -> tuple[list[dict], list[dict
 
 
 def unique(hits: list[dict]) -> list[dict]:
-    """The same book can come back from several terms; one row per catalog link."""
-    seen: set[tuple[str, str]] = set()
+    """One row per book: the same link comes back from several terms, and Coollib largely mirrors
+    Flibusta, so a file that matches down to its size is the same file. Only formats the pipeline
+    can open stay: a row nothing can be done with is noise in the list."""
+    links: set[tuple[str, str]] = set()
+    files: set[tuple] = set()
     out = []
-    for h in hits:
-        key = (h.get("source", ""), h.get("url", ""))
-        if key not in seen:
-            seen.add(key)
-            out.append(h)
+    order = {n: i for i, n in enumerate(SOURCE_ORDER)}
+    for h in sorted(hits, key=lambda h: order.get(h.get("source", ""), 9)):  # the mirror kept is the preferred one
+        if h.get("kind") not in OPENS:
+            continue
+        link = (h.get("source", ""), h.get("url", ""))
+        same = (
+            norm_title(h.get("title", "")),
+            norm_title(h.get("author", "")),
+            norm_title(h.get("translator", "")),
+            h.get("size_kb"),
+            h.get("kind"),
+        )
+        if link in links or (h.get("size_kb") and same in files):
+            continue
+        links.add(link)
+        files.add(same)
+        out.append(h)
     return out
+
+
+CACHE: dict[str, tuple[float, dict]] = {}
 
 
 def search_text(query: str) -> dict:
@@ -63,12 +91,19 @@ def search_text(query: str) -> dict:
     nothing; then shorter searches follow (the first two words, then the longest ones) and rows that
     name at least two words of the query are kept, closest first. Rows are editions as the catalogs
     describe them; the reader picks."""
-    hits, by_author, author_name, errors = ask([query])
+    key = norm_title(query)
+    cached = CACHE.get(key)
+    if cached and time.time() - cached[0] < CACHE_SECONDS:
+        return cached[1]  # trying another wording is the usual loop: do not ask the mirrors again for the same one
+    hits, by_author, author_name, errors = ask([query], author_query=query)
     words = terms(query)
     note = ""
     if not hits and words and len(norm_title(query).split()) > 1:
         note = "по названию целиком ничего; ниже то, что нашлось по словам"
-        hits, _, _, errs = ask(fallbacks(query, SHORTER_TRIES), authors=False)
+        # a query like "технология принятия решений виногродский" names a book and its author at once
+        hits, more_by_author, name, errs = ask(fallbacks(query, SHORTER_TRIES), author_query=words[0])
+        by_author += more_by_author
+        author_name = author_name or name
         errors += errs
         need = min(2, len(words))  # a single shared word is a coincidence, two are a match
         hits = [h for h in hits if matched(words, h) >= need]
@@ -80,10 +115,13 @@ def search_text(query: str) -> dict:
         by_author = by_query_author + by_author
         hits = [h for h in hits if h not in by_query_author]
     rows = editions(unique(hits))
-    rows.sort(key=lambda r: -matched(words, r))  # closest to what was typed first, order within a score kept
-    return {
+    rows.sort(key=lambda r: -title_score(query, words, r))  # closest to what was typed first, year decides ties
+    out = {
         "note": note if rows else "",
         "hits": rows[:30],
         "author": {"name": author_name, "hits": editions(unique(by_author))[:80]} if author_name else None,
         "errors": errors,
     }
+    if not errors:  # a failed round is worth retrying, a good one is not
+        CACHE[key] = (time.time(), out)
+    return out
