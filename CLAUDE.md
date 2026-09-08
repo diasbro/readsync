@@ -29,7 +29,8 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   runtime network calls besides the pipeline downloads),
   `/api/hits/<slug>` (the search result a book was picked from, with the query it came from), `/api/where/<slug>`, `/api/add`
   (multipart, launches `add_book.py` as a background job; `replace=1` swaps the text of an
-  existing book), `/api/align/<slug>`, `/api/jobs`, `PUT /api/books/<slug>` (rename: only the
+  existing book), `/api/align/<slug>`, `/api/jobs`, `DELETE /api/jobs/<slug>` (call a running
+  pipeline off: the process is stopped and the half-downloaded parts thrown away), `PUT /api/books/<slug>` (rename: only the
   title line of `book.toml` changes), `DELETE /api/books/<slug>` (the page
   confirms first).
 - `app/` — the Mac app: `Readsync.swift` (paths, log, running commands), `Payload.swift` (the code

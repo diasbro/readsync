@@ -38,6 +38,7 @@ from library import (
     save_hits,
     start_align,
     start_job,
+    stop_job,
     where_now,
     wishlist_add,
     wishlist_delete,
@@ -228,6 +229,13 @@ class Handler(SimpleHTTPRequestHandler):
         return self.send_json(add_session(slug, delta))
 
     def do_DELETE(self):
+        if self.path.startswith("/api/jobs/"):
+            try:
+                with STATE_LOCK:
+                    stop_job(self.path.rsplit("/", 1)[-1])
+            except (ValueError, OSError) as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True})
         if self.path.startswith("/api/wishlist/"):
             return self.send_json(wishlist_delete(self.path.rsplit("/", 1)[-1]))
         if self.path.startswith("/api/books/"):

@@ -154,14 +154,19 @@ final class Menu: NSObject, NSApplicationDelegate {
         build()
     }
 
+    /// A window only when something went wrong: an update that worked shows itself in the menu.
     @objc private func update() {
-        let done = Payload.update()
         behind = 0
-        if done.hasPrefix("обновлено"), let python {
-            server.start(python: python)
+        switch Payload.update() {
+        case .updated(let what):
+            log("updated: \(what)")
+            if let python { server.start(python: python) }
+        case .upToDate:
+            log("already up to date")
+        case .failed(let why):
+            alert("Обновиться не вышло", why)
         }
         build()
-        alert("readsync", done)
     }
 
     @objc private func showBooks() { NSWorkspace.shared.open(booksDir) }
