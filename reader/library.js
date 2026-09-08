@@ -23,7 +23,6 @@
   $("#lib-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); persistSettings(); syncPrefsUI(); });
   $("#lib-ui").addEventListener("input", (e) => { settings.ui = e.target.value; applySettings(); persistSettings(); syncPrefsUI(); });
   $("#bookmarklet").href = "javascript:(function(){window.open('" + location.origin + "/?wish='+encodeURIComponent(document.title),'_blank')})()";
-  $("#wish-url").textContent = location.origin + "/?wish=Название";
 
   // ---- header line: the sentence you stopped at in the current book, the word highlight walking along it ----
   // looks: "audio" walks the highlight; "pages" is a still line with a page marker; "random" quotes a finished book
@@ -130,12 +129,14 @@
   const icon = (act, glyph, title) => `<button class="ic" data-act="${act}" title="${title}">${glyph}</button>`;
   function actsHtml(x) {
     if (confirmDel === idOf(x)) return `<div class="acts confirm">${isShell(x) ? "убрать" : "удалить"}${x.has_audio ? " с аудио" : ""}? <button data-act="delYes">да</button> <button data-act="delNo">нет</button></div>`;
+    // while the pipeline runs the only thing to offer is calling it off: the ring turns into a cross
+    if (x.building) return `<div class="acts"><button class="ic loading" data-act="stopJob" title="Идёт загрузка, нажми чтобы отменить"><span class="spin"></span><span class="x">✕</span></button></div>`;
     const first = isShell(x) ? icon("find", "⌕", "Найти текст") : !x.ready ? "" : shelfOf(x) === "reading" ? icon("pause", "⏸", "Отложить") : icon("read", "▶", "Читать");
-    return `<div class="acts">${first}${x.building ? "" : icon("gear", "⚙", "Текст и аудио")}${x.building ? "" : icon("del", "✕", isShell(x) ? "Убрать" : "Удалить")}</div>`;
+    return `<div class="acts">${first}${icon("gear", "⚙", "Текст и аудио")}${icon("del", "✕", isShell(x) ? "Убрать" : "Удалить")}</div>`;
   }
   function statusHtml(x) {
     const s = searching.get(idOf(x)) || {};
-    if (s.busy) return `<div class="m status"><span class="spin"></span>ищу в ${SOURCES_LABEL}… <span class="secs">${Math.round((Date.now() - s.t0) / 1000)}</span> с</div>`;
+    if (s.busy) return `<div class="m status"><span class="spin"></span>ищу в ${SOURCES_LABEL}… <span class="secs">${Math.round((Date.now() - s.t0) / 1000)}</span> с<button class="link-btn" data-act="stop">отменить</button></div>`;
     if (s.status) return `<div class="m status warn">${s.status}</div>`;
     if (s.note) return `<div class="m">${s.note}</div>`;  // found, but not by the name as typed
     const found = isShell(x) ? x : hitsCache[x.slug];
@@ -299,29 +300,39 @@
     document.querySelector(`.card[data-key="${w?.id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
   async function addByLink(url) {
-    if (await startAdd({ text_url: url })) { clearOmni(); toast("Загружаю по ссылке, название возьму из книги"); renderLibrary(); }
+    if (await startAdd({ text_url: url })) { clearOmni(); renderLibrary(); }  // the card shows up loading, that is the message
   }
   async function addByFile(file) {
-    if (await startAdd({ title: file.name.replace(/\.(fb2\.zip|zip|fb2|epub|txt|html?)$/i, ""), text_file: file })) { toast("Загружаю файл: " + file.name); renderLibrary(); }
+    if (await startAdd({ title: file.name.replace(/\.(fb2\.zip|zip|fb2|epub|txt|html?)$/i, ""), text_file: file })) renderLibrary();
   }
   ["dragenter", "dragover"].forEach((ev) => addEventListener(ev, (e) => { if (e.dataTransfer?.types.includes("Files")) { e.preventDefault(); document.body.classList.add("dropping"); } }));
   ["dragleave", "drop"].forEach((ev) => addEventListener(ev, (e) => { if (ev === "drop" || e.relatedTarget == null) document.body.classList.remove("dropping"); }));
   addEventListener("drop", (e) => { if (!e.dataTransfer?.files?.length || e.target.closest(".card.open")) return; e.preventDefault(); [...e.dataTransfer.files].forEach(addByFile); });
 
   // ---- library search for a card: the result stays with it (wishlist item or hits.json) ----
+  function stopSearch(x) {
+    const s = searching.get(idOf(x));
+    if (!s?.busy) return;
+    s.stopped = true;
+    s.ctrl.abort();
+    searching.delete(idOf(x));
+    paint();
+  }
   async function searchFor(x, query) {
     const id = idOf(x);
     query = (query || queryOf(x)).trim();
     if (searching.get(id)?.busy || !query) return;
     const t0 = Date.now();
-    searching.set(id, { busy: true, t0 }); paint();
+    const ctrl = new AbortController();
+    const state0 = { busy: true, t0, ctrl };
+    searching.set(id, state0); paint();
     const ticker = setInterval(() => { const el = document.querySelector(`.card[data-key="${CSS.escape(id)}"] .secs`); if (el) el.textContent = Math.round((Date.now() - t0) / 1000); }, 1000);
-    const ctrl = new AbortController(); const killer = setTimeout(() => ctrl.abort(), 90000);
+    const killer = setTimeout(() => ctrl.abort(), 90000);
     let res = null, state = null;
     try { res = await fetch("/api/search?q=" + q(query), { signal: ctrl.signal }).then((r) => r.json()); if (res.error) throw new Error(res.error); }
-    catch (e) { res = null; state = { status: e.name === "AbortError" ? "библиотеки не ответили за полторы минуты, попробуй позже" : "поиск не удался: " + esc(e.message) }; }
+    catch (e) { res = null; state = state0.stopped ? null : { status: e.name === "AbortError" ? "библиотеки не ответили за полторы минуты, попробуй позже" : "поиск не удался: " + esc(e.message) }; }
     finally { clearInterval(ticker); clearTimeout(killer); }
-    if (res) {
+    if (res && !state0.stopped) {
       const failed = (res.errors || []).map((e) => SOURCE[e.split(":")[0]] || e.split(":")[0]).filter((v, i, a) => a.indexOf(v) === i);
       const failedNote = failed.length ? `${failed.join(", ")} не ответил${failed.length > 1 ? "и" : ""}` : "";
       const any = res.hits.length || res.author?.hits?.length;
@@ -334,11 +345,13 @@
       if (isShell(x)) wishes = await api("PUT", "/api/wishlist/" + x.id, { ...found, searched: today() }).catch(() => wishes);
       else await saveHits(x.slug, found);
     }
+    if (state0.stopped) return;  // called off: the card is already back to how it was
+    if (finding === id) finding = null;  // the answer is here, the query goes back to being the title
     if (state) searching.set(id, state); else searching.delete(id);
     paint();
   }
   // load a picked edition or an own link/file: a shell becomes the book, a ready book gets its text replaced
-  async function loadText(x, fields, label) {
+  async function loadText(x, fields) {
     // the catalog names the book: a picked edition brings its own title, an own file keeps the card's
     if (isShell(x)) Object.assign(fields, { title: fields.title || x.title, author: fields.author || x.author });
     else Object.assign(fields, { slug: x.slug, replace: "1" });
@@ -346,7 +359,6 @@
     if (!s) return;
     open = null;
     if (isShell(x)) { await saveHits(s, { hits: x.hits, author_hits: x.author_hits, query: queryOf(x) }); searching.delete(x.id); await api("DELETE", "/api/wishlist/" + x.id).catch(() => {}); }
-    toast((isShell(x) ? "Загружаю: " : "Заменяю текст: ") + label);
     renderLibrary();
   }
   const entryOf = (card) => books.find((b) => b.slug === card.dataset.key) || wishes.find((w) => w.id === card.dataset.key);
@@ -390,29 +402,41 @@
       const r = await api("DELETE", "/api/books/" + x.slug).catch((err) => ({ error: String(err) }));
       if (r.error) toast("Ошибка: " + r.error); else { delete jobs[x.slug]; renderLibrary(); }
     },
+    // one click both asks and shows what is being asked: the field opens with the query in it and
+    // the search is already running, so a wrong word is one Esc and a retype away
     find: async (x) => {
       if (open !== idOf(x)) { await ACTIONS.gear(x); }  // a card searched from the shelf opens with its sections
       renaming = null; finding = idOf(x); paint();
       const el = document.querySelector(".card.open .find-input"); el?.focus(); el?.select();
+      searchFor(x);
     },
-    findNo: () => { finding = null; paint(); },
+    findNo: () => { finding = null; paint(); },  // Esc leaves the field; stopping the search is «отменить»
     findGo: (x, btn) => {
       const query = btn.closest(".head").querySelector(".find-input").value.trim();
-      finding = null; paint();
       if (query) searchFor(x, query);
     },
-    pick: (x, btn) => { const h = JSON.parse(btn.dataset.hit); loadText(x, { title: h.title, author: h.author, translator: h.translator, year: h.year, narrator: h.narrator, text_url: h.urls.join("\n"), audio_url: isShell(x) ? h.audio || "" : "" }, h.title); },
+    stop: (x) => { stopSearch(x); },
+    stopJob: async (x) => {
+      const r = await api("DELETE", "/api/jobs/" + x.slug).catch((err) => ({ error: String(err) }));
+      if (r.error) toast("Не вышло отменить: " + r.error);
+      else delete jobs[x.slug];
+      renderLibrary();
+    },
+    pick: (x, btn) => {
+      const h = JSON.parse(btn.dataset.hit);
+      loadText(x, { title: h.title, author: h.author, translator: h.translator, year: h.year, narrator: h.narrator, text_url: h.urls.join("\n"), audio_url: isShell(x) ? h.audio || "" : "" });
+    },
     own: (x, btn) => {
       const row = btn.closest(".own"), url = row.querySelector("[name=text_url]").value.trim(), file = row.querySelector("[name=text_file]").files[0];
       if (!url && !file) { toast("Нужна ссылка на текст или файл"); return; }
       if (url && !isUrl(url)) { toast("Ссылка должна начинаться с http(s)"); return; }
-      loadText(x, { text_url: url, text_file: file }, file ? file.name : x.title);
+      loadText(x, { text_url: url, text_file: file });
     },
     audioGo: async (x, btn) => {
       const row = btn.closest(".own"), urls = row.querySelector("[name=audio_url]").value.trim().split(/\s+/).filter(Boolean).join("\n"), file = row.querySelector("[name=audio_file]").files[0];
       if (!urls && !file) { toast("Нужна ссылка на аудио или файл"); return; }
       const ok = await startAdd({ slug: x.slug, audio_url: urls, audio_file: file, narrator: row.querySelector("[name=narrator]").value.trim() });
-      if (ok) { open = null; toast("Аудио загружается, книга появится с плеером"); renderLibrary(); }
+      if (ok) { open = null; renderLibrary(); }
     },
     align: async (x) => {
       const r = await api("POST", "/api/align/" + x.slug).catch((err) => ({ error: String(err) }));

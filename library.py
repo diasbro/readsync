@@ -491,6 +491,24 @@ def start_job(form: dict) -> tuple[dict | None, str]:
     return {"slug": slug}, ""
 
 
+def stop_job(slug: str) -> None:
+    """Called off by the reader: the pipeline is stopped and what it half-downloaded is thrown away.
+    A book that was already there keeps its text; a new one keeps its card, with no text yet."""
+    job = JOBS.get(slug)
+    if not SLUG_RE.match(slug) or not job or job["proc"].poll() is not None:
+        raise ValueError("нечего останавливать")
+    job["proc"].terminate()
+    try:
+        job["proc"].wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        job["proc"].kill()
+    JOBS.pop(slug, None)  # called off on purpose: the card must not report it as a failure
+    d = BOOKS / slug
+    shutil.rmtree(d / "parts", ignore_errors=True)
+    for leftover in d.glob("upload_*"):
+        leftover.unlink(missing_ok=True)
+
+
 def start_align(slug: str) -> tuple[dict | None, str]:
     """Precise MMS word alignment for a book that already has audio; long, low priority, in the background."""
     d = BOOKS / slug

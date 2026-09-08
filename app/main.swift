@@ -5,7 +5,11 @@ import ServiceManagement
 let args = CommandLine.arguments
 if args.contains("--update") {
     Payload.install()
-    print(Payload.update())
+    switch Payload.update() {
+    case .updated(let what): print("обновлено: \(what)")
+    case .upToDate: print("обновлений нет")
+    case .failed(let why): print("не вышло: \(why)"); exit(1)
+    }
     exit(0)
 }
 if let i = args.firstIndex(of: "--login"), i + 1 < args.count {
