@@ -13,6 +13,8 @@
 - Code: `library.py` and a `sources/` package (one module per catalog) behind `serve.py`;
   `reader/common.js`, `library.js`, `app.js`.
 - Import: EPUB, PDF, TXT, HTML, multi-volume text, multi-part audio, illustrations.
+- Mac app: a menu bar launcher (`make dmg`), optional start at login, and updates by git pull
+  instead of a new disk image.
 - Reader: page mode, server-side state and settings, fonts and themes, focus tools.
 
 ## 0.1.0 — 2026-09-05

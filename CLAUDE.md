@@ -32,6 +32,13 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   existing book), `/api/align/<slug>`, `/api/jobs`, `PUT /api/books/<slug>` (rename: only the
   title line of `book.toml` changes), `DELETE /api/books/<slug>` (the page
   confirms first).
+- `app/` — the Mac app: `Readsync.swift` (paths, log, running commands), `Payload.swift` (the code
+  it serves and the git update), `Server.swift` (the server as a child process), `Menu.swift` (the
+  menu bar item), `main.swift`, `build.sh` (`make app`, `make dmg`). A launcher, not a copy of the
+  project: it keeps the code in `~/Library/Application Support/readsync/src` and updates it with
+  git, so a new disk image is only needed when the launcher itself changes. Books live beside that
+  code (or in an existing checkout's `books/`), never inside it; `READSYNC_BOOKS` and
+  `READSYNC_PYTHON` are how the server is told where they are.
 - `books/` — all per-book data and reading state; nothing under it is tracked by git.
 - `tests/` — pytest for the pipeline. `docs/` — design notes and ADRs.
 
