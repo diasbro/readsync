@@ -129,6 +129,7 @@
     const s = searching.get(idOf(x)) || {};
     if (s.busy) return `<div class="m status"><span class="spin"></span>ищу в ${SOURCES_LABEL}… <span class="sec">${Math.round((Date.now() - s.t0) / 1000)}</span> с</div>`;
     if (s.status) return `<div class="m status warn">${s.status}</div>`;
+    if (s.note) return `<div class="m">${s.note}</div>`;  // found, but not by the name as typed
     const found = isShell(x) ? x : hitsCache[x.slug];
     if (isShell(x) && x.searched && !found?.hits?.length && !found?.author_hits?.hits?.length) return `<div class="m status warn">не нашлось в ${SOURCES_LABEL}</div>`;
     return "";
@@ -310,7 +311,8 @@
       const failed = (res.errors || []).map((e) => SOURCE[e.split(":")[0]] || e.split(":")[0]).filter((v, i, a) => a.indexOf(v) === i);
       const failedNote = failed.length ? `${failed.join(", ")} не ответил${failed.length > 1 ? "и" : ""}` : "";
       const any = res.hits.length || res.author?.hits?.length;
-      state = any ? (failed.length ? { status: esc(failedNote) } : null) : { status: esc(`не нашлось в ${SOURCES_LABEL}` + (failedNote ? " · " + failedNote : "")) };
+      const good = failed.length ? { status: esc(failedNote) } : res.note ? { note: esc(res.note) } : null;
+      state = any ? good : { status: esc(`не нашлось в ${SOURCES_LABEL}` + (failedNote ? " · " + failedNote : "")) };
       const found = { hits: res.hits, author_hits: res.author };
       if (isShell(x)) wishes = await api("PUT", "/api/wishlist/" + x.id, { ...found, searched: today() }).catch(() => wishes);
       else await saveHits(x.slug, found);

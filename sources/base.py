@@ -29,6 +29,41 @@ def norm_title(s: str) -> str:
     return re.sub(r"[^\w]+", " ", s).strip()
 
 
+# words that carry no signal in a title search
+STOP_WORDS = "и в во на с со по за как для о об от до из не ни то что это его их при над под без the a an of and or"
+STOP = frozenset(STOP_WORDS.split())
+
+
+def terms(query: str) -> list[str]:
+    """Meaningful words of a query, longest first. The catalogs match a phrase inside a title, so a
+    query that names more than the title finds nothing; these words are what to ask them instead."""
+    seen: list[str] = []
+    for w in sorted(norm_title(query).split(), key=len, reverse=True):
+        if len(w) > 2 and w not in STOP and w not in seen:  # «Дао», «Цзы» are names, not noise
+            seen.append(w)
+    return seen
+
+
+def fallbacks(query: str, limit: int = 3) -> list[str]:
+    """Shorter searches for a query the catalogs cannot match as a phrase. The first two words come
+    first: a title usually begins with the name of the work («Книга перемен как технология…»);
+    then the longest single words, which carry the most signal."""
+    ws = [w for w in norm_title(query).split() if w not in STOP]
+    out: list[str] = []
+    if len(ws) > 1:
+        out.append(" ".join(ws[:2]))
+    for w in terms(query):
+        if w not in out:
+            out.append(w)
+    return out[:limit]
+
+
+def matched(words: list[str], row: dict) -> int:
+    """How many of the query's words a row names, in its title, author or translator."""
+    text = norm_title(" ".join((row.get("title", ""), row.get("author", ""), row.get("translator", ""))))
+    return sum(w in text for w in words)
+
+
 def roman_to_int(s: str) -> int:
     vals = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
     total, prev = 0, 0
