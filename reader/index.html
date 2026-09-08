@@ -32,10 +32,6 @@
       </div>
     </div>
     <div class="demo" aria-hidden="true"><span class="demo-line" id="demo-line"></span></div>
-    <div class="omni">
-      <span class="glyph" aria-hidden="true">⌕</span>
-      <input id="omni-input" placeholder="Найти или добавить" autocomplete="off" spellcheck="false" title="Поиск по библиотеке; чего нет, сохраняется отсюда же (/)">
-    </div>
   </header>
 
   <section class="lib-section" id="reading-section" hidden>
@@ -44,7 +40,15 @@
   </section>
 
   <section class="lib-section">
-    <h2 id="lib-title">Библиотека</h2>
+    <div class="sec-head">
+      <h2 id="lib-title">Библиотека</h2>
+      <button class="glyph" id="omni-open" title="Найти или добавить (/)" aria-label="Найти или добавить">⌕</button>
+    </div>
+    <div class="omni" id="omni" hidden>
+      <span class="glyph" aria-hidden="true">⌕</span>
+      <input id="omni-input" placeholder="Найти или добавить" autocomplete="off" spellcheck="false">
+      <kbd>esc</kbd>
+    </div>
     <div id="library-list" class="lib-grid"></div>
   </section>
 </div>

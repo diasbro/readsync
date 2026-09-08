@@ -1,6 +1,6 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "readsync", "runtimeExecutable": ".venv/bin/python", "runtimeArgs": ["serve.py"], "port": 8765 }
+    { "name": "readsync", "runtimeExecutable": ".venv/bin/python", "runtimeArgs": ["serve.py"], "port": 8765, "autoPort": true }
   ]
 }

@@ -174,9 +174,16 @@
       <div class="body"><div class="t">${esc(w.title)}<span class="tag">без текста</span></div>${w.author ? `<div class="m">${esc(w.author)}</div>` : ""}${statusHtml(w)}</div>${actsHtml(w)}</div>`;
   }
 
-  // ---- the one line: filters the library as you type; what is not there can be saved from the same line ----
-  const omni = $("#omni-input");
+  // ---- finding and adding: the sign by the heading opens one line above the cards it filters ----
+  const omni = $("#omni-input"), omniRow = $("#omni"), omniOpen = $("#omni-open");
   let query = "";
+  function showOmni(on, focus = true) {
+    omniRow.hidden = !on;
+    omniOpen.hidden = on;
+    if (on) { if (focus) omni.focus(); }
+    else { omni.blur(); omni.value = ""; query = ""; paint(); }  // focus must leave with the line, or "/" lands in it
+  }
+  omniOpen.onclick = () => showOmni(true);
   const matches = (x) => !query || norm(x.title + " " + (x.author || "") + " " + (x.translator || "")).includes(norm(query));
   function addRowHtml(any) {
     if (isUrl(query)) return `<div class="card add" data-act="link"><div class="body"><div class="t"><b>＋</b>Загрузить по ссылке</div><div class="m">↵ · название возьму из книги</div></div></div>`;
@@ -186,11 +193,13 @@
   function paint() {
     const byActivity = (a, b) => (b.at || 0) - (a.at || 0) || (a.title || "").localeCompare(b.title || "", "ru");
     const entry = (b) => ({ at: b.state.opened || b.added || 0, title: b.title, html: cardHtml(b) });
-    const reading = books.filter((b) => shelfOf(b) === "reading" && matches(b)).map(entry).sort(byActivity);
-    const rest = [...books.filter((b) => shelfOf(b) !== "reading" && matches(b)).map(entry),
+    // while a query is typed everything matching sits in one list under the line, so nothing hides above it
+    const hits = books.filter(matches);
+    const reading = query ? [] : hits.filter((b) => shelfOf(b) === "reading").map(entry).sort(byActivity);
+    const rest = [...(query ? hits : hits.filter((b) => shelfOf(b) !== "reading")).map(entry),
       ...wishes.filter(matches).map((w) => ({ at: +w.id.slice(1) || 0, title: w.title, html: shellHtml(w) }))].sort(byActivity);
     const any = reading.length + rest.length > 0;
-    $("#lib-title").textContent = query ? (any ? `Найдено ${reading.length + rest.length}` : "В библиотеке нет") : reading.length ? "Остальные" : "Библиотека";
+    $("#lib-title").textContent = query && !any ? "В библиотеке нет" : reading.length ? "Остальные" : "Библиотека";
     $("#reading-section").hidden = !reading.length;
     $("#reading-list").innerHTML = reading.map((x) => x.html).join("");
     $("#library-list").innerHTML = rest.map((x) => x.html).join("") + (query ? addRowHtml(any) : !any ? '<p class="muted small">Пока пусто. Напиши название книги в строке выше, вставь ссылку или перетащи файл.</p>' : "");
@@ -198,11 +207,13 @@
   async function renderLibrary() {
     [books, wishes] = await Promise.all([fetch("/api/books").then((r) => r.json()), api("GET", "/api/wishlist").catch(() => wishes)]);
     paint();
+    // nothing to find yet: the line is the only move, but it must not grab the keyboard on its own
+    if (!books.length && !wishes.length && omniRow.hidden) showOmni(true, false);
     headerLine(books.filter((b) => shelfOf(b) === "reading"), books);
   }
   omni.addEventListener("input", () => { query = omni.value.trim(); paint(); });
   omni.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { omni.value = ""; query = ""; paint(); omni.blur(); return; }
+    if (e.key === "Escape") { showOmni(false); return; }
     if (e.key !== "Enter" || !query) return;
     e.preventDefault();
     const any = books.some(matches) || wishes.some(matches);
@@ -211,8 +222,9 @@
   });
   addEventListener("keydown", (e) => {
     if (e.key === "Escape") { prefs.hidden = true; if (open) { open = null; paint(); } }
-    if (e.key === "/" && !(e.target instanceof Element && e.target.matches("input, textarea, select"))) { e.preventDefault(); omni.focus(); }
+    if (e.key === "/" && !(e.target instanceof Element && e.target.matches("input, textarea, select"))) { e.preventDefault(); showOmni(true); }
   });
+  omni.addEventListener("blur", () => { if (!query) showOmni(false); });  // opened by accident: it closes itself
   const clearOmni = () => { omni.value = ""; query = ""; };
 
   // ---- jobs: background pipeline runs; a card shows "loading" while its job runs and the error if it fails ----

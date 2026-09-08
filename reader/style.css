@@ -60,16 +60,21 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .lib-title-row { position: relative; display: flex; align-items: center; justify-content: space-between; }
 .lib-tools { display: flex; gap: 4px; align-items: center; }
 .lib-title-row .icon { color: var(--muted); }
-.lib-section.empty { display: none; }
-.card.hit-off { display: none; }
-/* the one line: finds in the library as you type; what is not there is saved from the same line.
-   Quiet until used: no rule under it, the line appears on hover and focus. */
-.omni { display: flex; align-items: center; gap: 10px; margin-top: 18px; border-bottom: 1px solid transparent; transition: border-color .15s; }
-.omni:hover { border-bottom-color: var(--line); }
-.omni:focus-within, body.dropping .omni { border-bottom-color: var(--accent); }
-.omni .glyph { color: var(--muted); font-size: 14px; line-height: 1; width: 16px; text-align: center; opacity: .8; }
-.omni input { flex: 1; min-width: 0; border: 0; background: none; padding: 6px 0; font-size: 13px; color: var(--fg); outline: none; }
+/* finding and adding: at rest only a sign next to the section heading; the line opens as the first row
+   of the list, right above the cards it filters. */
+.sec-head { display: flex; align-items: baseline; gap: 9px; margin: 0 0 14px; }
+.sec-head h2 { margin: 0; }
+.sec-head .glyph { background: none; border: 0; padding: 0; font-size: 13px; line-height: 1; color: var(--muted); opacity: .6; transition: opacity .15s, color .15s; }
+.sec-head:hover .glyph { opacity: 1; }
+.sec-head .glyph:hover { color: var(--accent); }
+.sec-head:has(+ .omni:not([hidden])) { margin-bottom: 8px; }  /* the open line belongs to the heading, not to the cards */
+.omni { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; padding: 10px 17px; border: 1px dashed var(--line); border-radius: 14px; transition: border-color .15s; }
+.omni:focus-within, body.dropping .omni { border-color: var(--accent); }
+.omni .glyph { color: var(--muted); font-size: 15px; line-height: 1; opacity: .8; transition: color .15s; }
+.omni:focus-within .glyph { color: var(--accent); opacity: 1; }
+.omni input { flex: 1; min-width: 0; border: 0; background: none; padding: 0; font-size: 14px; color: var(--fg); outline: none; }
 .omni input::placeholder { color: var(--muted); opacity: .9; }
+.omni kbd { font-family: var(--ui); font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
 .card.add { border-style: dashed; grid-template-columns: 1fr; background: none; cursor: pointer; padding: 14px 18px; }
 .card.add:hover { border-color: var(--accent); transform: none; }
 .card.add .t { font-size: 16px; font-family: var(--ui); }
