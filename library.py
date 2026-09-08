@@ -209,7 +209,10 @@ def wishlist_update(wid: str, data: dict) -> list[dict]:
             if it["id"] == wid:
                 for k in WISH_FIELDS:
                     if k in data:
-                        it[k] = str(data[k] or "").strip()
+                        v = str(data[k] or "").strip()
+                        if k == "title" and not v:  # a title is the only thing a shell card has
+                            continue
+                        it[k] = v
                 for k in WISH_JSON:
                     if k in data:
                         it[k] = data[k]
@@ -232,6 +235,26 @@ def save_hits(slug: str, data: dict) -> None:
         json.dumps({"hits": data.get("hits") or [], "author_hits": data.get("author_hits")}, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def rename_book(slug: str, title: str) -> dict:
+    """Rename a book in place. Only the title line of book.toml is rewritten: the slug, the files,
+    the reading state and every other field stay as they are."""
+    d = BOOKS / slug
+    title = " ".join(str(title or "").split())
+    if not SLUG_RE.match(slug) or not (d / "book.toml").is_file():
+        raise ValueError("unknown book")
+    if not title:
+        raise ValueError("нужно название")
+    text = (d / "book.toml").read_text(encoding="utf-8")
+    line = 'title = "{}"'.format(title.replace("\\", "\\\\").replace('"', '\\"'))
+    new_text, hits = re.subn(r"(?m)^title\s*=.*$", lambda _: line, text, count=1)
+    if not hits:
+        new_text = line + "\n" + text
+    tmp = d / "book.toml.tmp"
+    tmp.write_text(new_text, encoding="utf-8")
+    os.replace(tmp, d / "book.toml")
+    return {"slug": slug, "title": title}
 
 
 def delete_book(slug: str) -> None:

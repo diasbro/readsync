@@ -23,7 +23,8 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   them plus an author's books; the only runtime network calls besides the pipeline downloads),
   `/api/hits/<slug>` (the search result a book was picked from), `/api/where/<slug>`, `/api/add`
   (multipart, launches `add_book.py` as a background job; `replace=1` swaps the text of an
-  existing book), `/api/align/<slug>`, `/api/jobs`, `DELETE /api/books/<slug>` (the page
+  existing book), `/api/align/<slug>`, `/api/jobs`, `PUT /api/books/<slug>` (rename: only the
+  title line of `book.toml` changes), `DELETE /api/books/<slug>` (the page
   confirms first).
 - `books/` — all per-book data and reading state; nothing under it is tracked by git.
 - `tests/` — pytest for the pipeline. `docs/` — design notes and ADRs.

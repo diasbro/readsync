@@ -153,8 +153,16 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 /* a card opened in place: facts, then Text and Audio sections */
 .card.open { grid-template-columns: 1fr; background: var(--panel); cursor: default; }
 .card.open:hover { transform: none; border-color: var(--line); }
-.card.open .head { display: flex; align-items: center; gap: 12px; }
+.card.open .head { display: flex; align-items: center; gap: 10px; min-height: 30px; }  /* the row keeps its height while the name is edited */
 .card.open .head .t { flex: 1; }
+/* the pencil leads the name and stays in place while the name is edited, so the row never jumps */
+.card.open .head .pen { flex: none; width: 20px; height: 20px; font-size: 13px; color: var(--muted); opacity: .45;
+  display: flex; align-items: center; justify-content: center; }
+.card.open .head:hover .pen, .card.open .head.naming .pen { opacity: 1; }
+.card.open .head.naming .pen { color: var(--accent); }
+.card.open .head .rename-input { flex: 1; min-width: 0; font-family: var(--ui); font-size: 15px; line-height: 1.4;
+  border: 0; border-bottom: 1px solid var(--accent); background: none; color: var(--fg); padding: 3px 0; outline: none; }
+.card.open .head.naming .ic { width: 26px; height: 26px; font-size: 14px; }
 .card.open .sec { margin-top: 16px; }
 .card.open .sec h5 { margin: 0 0 8px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
 .card.open .sec h5 .now { font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 12px; }
@@ -186,7 +194,10 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .card details.eds .cand { background: color-mix(in srgb, var(--bg) 60%, transparent); }
 .card details.more { margin-top: 2px; }
 .card details.more summary { font-size: 12px; color: var(--muted); cursor: pointer; }
-.card .tag { display: inline-block; font-size: 11px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 999px; margin-left: 6px; vertical-align: middle; color: var(--muted); font-family: var(--ui); letter-spacing: .02em; }
+.card .tag { display: inline-block; white-space: nowrap; font-size: 11px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 999px; margin-left: 6px; vertical-align: middle; color: var(--muted); font-family: var(--ui); letter-spacing: .02em; }
+/* controls and labels are never part of the text: selecting a name must not drag them along.
+   Deliberately global, the reader's own buttons are controls too. */
+.card .tag, .ic, .icon, .sec-head .glyph, .omni kbd, .card.add .t b { user-select: none; -webkit-user-select: none; }
 .toast { position: fixed; left: 50%; top: 18px; transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 999px; font-size: 14px; z-index: 60; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
 @media (max-width: 560px) {
   .card { grid-template-columns: 52px 1fr; } .card .cover { width: 52px; height: 78px; }
