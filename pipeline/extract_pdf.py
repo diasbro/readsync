@@ -91,7 +91,7 @@ def join_lines(pages: list[list[str]]) -> str:
 def extract(path: Path) -> dict:
     reader = open_pdf(path)
     text = join_lines(strip_furniture(page_texts(reader)))
-    if len(text.split()) < 50:
+    if len(text.split()) < 10:  # a scan yields nothing at all; a short book is still a book
         raise SystemExit("в PDF нет текстового слоя (скан?): распознай его, например в Preview или ABBYY")
     meta = reader.metadata or {}
     title = (meta.get("/Title") or "").strip() or path.stem

@@ -107,16 +107,17 @@ enum Payload {
         return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
-    /// The small packages the importers need: html, epub and pdf. Everything else is optional.
+    /// The importers need beautifulsoup4, lxml and pypdf. The app carries them; this only matters
+    /// on a Mac whose own Python is standing in, or after an update that asked for something new.
     static func ensureTools(python: String, done: @escaping (Bool) -> Void) {
-        let pip = venvDir.appendingPathComponent("bin/pip3").path
-        if FileManager.default.isExecutableFile(atPath: pip) { done(true); return }
+        let check = ["-c", "import bs4, lxml.etree, pypdf"]
+        if run(python, check, timeout: 30).0 == 0 { done(true); return }
         DispatchQueue.global(qos: .utility).async {
-            log("installing the import tools")
-            _ = run(python, ["-m", "venv", venvDir.path], timeout: 300)
+            log("installing the import tools next to the books")
             let (code, out) = run(
-                venvDir.appendingPathComponent("bin/pip3").path,
-                ["install", "--quiet", "beautifulsoup4", "lxml", "pypdf"], timeout: 900)
+                python,
+                ["-m", "pip", "install", "--quiet", "--target", libsDir.path,
+                 "beautifulsoup4", "lxml", "pypdf"], timeout: 900)
             log(code == 0 ? "import tools ready" : "import tools failed: \(out)")
             DispatchQueue.main.async { done(code == 0) }
         }

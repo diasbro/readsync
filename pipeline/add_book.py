@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -25,6 +26,8 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# the same root the server uses: the Mac app keeps the books outside the code it updates
+BOOKS = Path(os.environ.get("READSYNC_BOOKS") or ROOT / "books").expanduser()
 PY = sys.executable
 PIPE = ROOT / "pipeline"
 UA = {"User-Agent": "Mozilla/5.0"}
@@ -271,7 +274,7 @@ def main() -> None:
     ap.add_argument("--whisper-model", default="small")
     args = ap.parse_args()
 
-    d = ROOT / "books" / args.slug
+    d = BOOKS / args.slug
     d.mkdir(parents=True, exist_ok=True)
     if args.text:
         build_text(args.text, d, args.title, args.author)

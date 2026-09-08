@@ -27,7 +27,7 @@ dev = ["pytest", "ruff==0.16.6", "fonttools", "brotli"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-extend-exclude = [".venv", "books"]
+extend-exclude = [".venv", "books", "build", "dist"]  # the Mac app carries a Python of its own
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]

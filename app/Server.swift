@@ -19,7 +19,8 @@ final class Server {
         task.currentDirectoryURL = srcDir
         var env = ProcessInfo.processInfo.environment
         env["READSYNC_BOOKS"] = booksDir.path  // the books stay outside the code, updates never touch them
-        env["READSYNC_PYTHON"] = venvDir.appendingPathComponent("bin/python3").path
+        env["READSYNC_PYTHON"] = python  // the pipeline runs on the same interpreter as the server
+        if FileManager.default.fileExists(atPath: libsDir.path) { env["PYTHONPATH"] = libsDir.path }
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         env["PYTHONUNBUFFERED"] = "1"
         task.environment = env

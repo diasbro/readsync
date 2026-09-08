@@ -9,7 +9,7 @@ let support = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/readsync")
 let srcDir = support.appendingPathComponent("src")
 let booksDir = support.appendingPathComponent("books")
-let venvDir = support.appendingPathComponent("venv")
+let libsDir = support.appendingPathComponent("pylibs")  // only for a package the app does not carry
 let logFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Logs/readsync.log")
 
@@ -55,13 +55,24 @@ func run(_ tool: String, _ args: [String], cwd: URL? = nil, timeout: TimeInterva
     return (task.terminationStatus, String(data: data, encoding: .utf8) ?? "")
 }
 
-/// The newest Python that can run the server (tomllib needs 3.11).
+/// The Python inside the app, for this processor. Nothing is installed on the Mac it runs on.
+var bundledPython: String? {
+    #if arch(arm64)
+        let arch = "arm64"
+    #else
+        let arch = "x86_64"
+    #endif
+    let path = Bundle.main.resourceURL?.appendingPathComponent("python/\(arch)/bin/python3").path
+    return path.flatMap { FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil }
+}
+
+/// The Python that runs the server: the app's own, or the machine's if the bundle lost it.
 func findPython() -> String? {
     let candidates = [
-        venvDir.appendingPathComponent("bin/python3").path,
+        bundledPython,
         "/opt/homebrew/bin/python3.13", "/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3",
         "/usr/local/bin/python3", "/usr/bin/python3",
-    ]
+    ].compactMap { $0 }
     for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
         let (code, out) = run(path, ["-c", "import sys; print(sys.version_info >= (3, 11))"], timeout: 10)
         if code == 0 && out.contains("True") { return path }
