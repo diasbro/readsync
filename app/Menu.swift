@@ -1,4 +1,5 @@
-// The menu bar item: the mark, what it offers, and what each item does.
+// The menu bar item: the mark, what it offers, and what each item does. What a reader does daily is
+// at the top and needs one click; everything that is set once and forgotten sits under «Настройки».
 
 import AppKit
 import ServiceManagement
@@ -8,16 +9,16 @@ final class Menu: NSObject, NSApplicationDelegate {
     private let server = Server()
     private let menu = NSMenu()
     private var python: String?
-    private var toolsReady = false
+    private var toolsBusy = false
     private var behind = 0
+    private var reading: (title: String, slug: String)?
     private var checkTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item.button?.image = Menu.mark()
-        item.button?.toolTip = "readsync"
         item.menu = menu
-        log("menu bar item ready, visible=\(item.isVisible), icon=\(item.button?.image?.size ?? .zero)")
         menu.delegate = self
+        log("menu bar item ready, visible=\(item.isVisible), icon=\(item.button?.image?.size ?? .zero)")
         Payload.install()
         python = findPython()
         guard let python else {
@@ -27,23 +28,15 @@ final class Menu: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
-        Payload.ensureTools(python: python) { [weak self] ok in self?.toolsReady = ok }
+        toolsBusy = true
+        Payload.ensureTools(python: python) { [weak self] _ in self?.toolsBusy = false }
         server.start(python: python)
         build()
+        // asked once the server is up, so the first opening of the menu already knows the book
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.lookForReading() }
         lookForUpdates()
         checkTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
             self?.lookForUpdates()
-        }
-    }
-
-    /// Asked in the background and answered in the menu: no window ever opens for this.
-    private func lookForUpdates() {
-        DispatchQueue.global(qos: .background).async {
-            let count = Payload.behindBy()
-            DispatchQueue.main.async {
-                self.behind = count
-                if count > 0 { log("\(count) new commits upstream") }
-            }
         }
     }
 
@@ -65,39 +58,67 @@ final class Menu: NSObject, NSApplicationDelegate {
         return image
     }
 
+    // ---- the menu ----
+
     private func build() {
+        item.button?.appearsDisabled = !server.isRunning  // the mark fades when nothing is serving
+        item.button?.toolTip = server.isRunning ? "readsync · порт \(server.port)" : "readsync · сервер не запущен"
         menu.removeAllItems()
         add("Открыть библиотеку", "o", #selector(open))
-        menu.addItem(.separator())
-        let state = server.isRunning ? "Работает на порту \(server.port)" : "Сервер не запущен"
-        menu.addItem(withTitle: state, action: nil, keyEquivalent: "").isEnabled = false
-        add(server.isRunning ? "Перезапустить сервер" : "Запустить сервер", "", #selector(restart))
-        if !toolsReady {
-            menu.addItem(withTitle: "Ставлю инструменты импорта…", action: nil, keyEquivalent: "")
-                .isEnabled = false
+        if let reading {
+            add("Продолжить «\(reading.title)»", "", #selector(openReading))
         }
         menu.addItem(.separator())
-        let login = add("Запускать при входе", "", #selector(toggleLogin))
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        if !server.isRunning {
+            add("Сервер не запущен, запустить", "", #selector(restart))
+        }
         add(behind > 0 ? "Обновить: есть новое (\(behind))" : "Проверить обновления…", "", #selector(update))
-        let version = Payload.installedVersion.isEmpty ? Payload.bundledVersion : Payload.installedVersion
-        menu.addItem(withTitle: "Версия \(version)", action: nil, keyEquivalent: "").isEnabled = false
-        menu.addItem(.separator())
-        add("Показать книги в Finder", "", #selector(showBooks))
-        add("Открыть журнал", "", #selector(showLog))
+        let settings = NSMenuItem(title: "Настройки", action: nil, keyEquivalent: "")
+        settings.submenu = settingsMenu()
+        menu.addItem(settings)
         menu.addItem(.separator())
         add("Выйти", "q", #selector(quit))
     }
 
+    private func settingsMenu() -> NSMenu {
+        let sub = NSMenu()
+        let version = Payload.installedVersion.isEmpty ? Payload.bundledVersion : Payload.installedVersion
+        let state = server.isRunning ? "порт \(server.port)" : "сервер не запущен"
+        sub.addItem(withTitle: "readsync \(version) · \(state)", action: nil, keyEquivalent: "").isEnabled = false
+        if toolsBusy {
+            sub.addItem(withTitle: "Ставлю инструменты импорта…", action: nil, keyEquivalent: "").isEnabled = false
+        }
+        sub.addItem(.separator())
+        let login = add("Запускать при входе", "", #selector(toggleLogin), to: sub)
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        if Browser.canReuseTab {
+            let reuse = add("Открывать в той же вкладке", "", #selector(toggleReuse), to: sub)
+            reuse.state = Browser.reusesTab ? .on : .off
+        }
+        sub.addItem(.separator())
+        add("Показать книги в Finder", "", #selector(showBooks), to: sub)
+        add("Открыть журнал", "", #selector(showLog), to: sub)
+        add("Перезапустить сервер", "", #selector(restart), to: sub)
+        return sub
+    }
+
     @discardableResult
-    private func add(_ title: String, _ key: String, _ action: Selector) -> NSMenuItem {
+    private func add(_ title: String, _ key: String, _ action: Selector, to target: NSMenu? = nil) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: action, keyEquivalent: key)
         entry.target = self
-        menu.addItem(entry)
+        (target ?? menu).addItem(entry)
         return entry
     }
 
-    @objc private func open() { NSWorkspace.shared.open(server.url) }
+    // ---- what the items do ----
+
+    @objc private func open() { Browser.open(server.url) }
+
+    @objc private func openReading() {
+        guard let slug = reading?.slug else { return }
+        guard let url = URL(string: "\(server.url.absoluteString)?book=\(slug)") else { return }
+        Browser.open(url)
+    }
 
     @objc private func restart() {
         if let python { server.start(python: python) }
@@ -117,6 +138,22 @@ final class Menu: NSObject, NSApplicationDelegate {
         build()
     }
 
+    /// Off by default and never asked for on its own: the permission dialog appears only here,
+    /// the moment the reader turns this on.
+    @objc private func toggleReuse() {
+        if Browser.reusesTab {
+            Browser.reusesTab = false
+        } else if Browser.mayAutomate(ask: true) {
+            Browser.reusesTab = true
+        } else {
+            alert(
+                "Нужен доступ к браузеру",
+                "Разреши readsync управлять браузером в «Настройки → Конфиденциальность и безопасность → "
+                    + "Автоматизация», тогда библиотека будет открываться в той же вкладке.")
+        }
+        build()
+    }
+
     @objc private func update() {
         let done = Payload.update()
         behind = 0
@@ -124,7 +161,7 @@ final class Menu: NSObject, NSApplicationDelegate {
             server.start(python: python)
         }
         build()
-        notify(done)
+        alert("readsync", done)
     }
 
     @objc private func showBooks() { NSWorkspace.shared.open(booksDir) }
@@ -135,17 +172,50 @@ final class Menu: NSObject, NSApplicationDelegate {
         let sheet = NSAlert()
         sheet.messageText = title
         sheet.informativeText = text
+        NSApp.activate(ignoringOtherApps: true)
         sheet.runModal()
     }
 
-    private func notify(_ text: String) {
-        let sheet = NSAlert()
-        sheet.messageText = "readsync"
-        sheet.informativeText = text
-        sheet.runModal()
+    // ---- what the menu knows, asked in the background so opening it never waits ----
+
+    private func lookForUpdates() {
+        DispatchQueue.global(qos: .background).async {
+            let count = Payload.behindBy()
+            DispatchQueue.main.async {
+                self.behind = count
+                if count > 0 { log("\(count) new commits upstream") }
+            }
+        }
+    }
+
+    /// The book on the shelf «читаю сейчас», so it is one click away from the menu bar.
+    private func lookForReading() {
+        guard server.isRunning else { return }
+        let url = server.url.appendingPathComponent("api/books")
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard let data,
+                let books = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+            else { return }
+            let now = books.filter { book in
+                let state = book["state"] as? [String: Any]
+                return (state?["shelf"] as? String) == "reading" && (book["ready"] as? Bool) == true
+            }
+            let newest = now.max { a, b in
+                let opened = { (x: [String: Any]) in ((x["state"] as? [String: Any])?["opened"] as? Double) ?? 0 }
+                return opened(a) < opened(b)
+            }
+            let title = newest?["title"] as? String
+            let slug = newest?["slug"] as? String
+            DispatchQueue.main.async {
+                self.reading = (title != nil && slug != nil) ? (title!, slug!) : nil
+            }
+        }.resume()
     }
 }
 
 extension Menu: NSMenuDelegate {
-    func menuWillOpen(_ menu: NSMenu) { build() }
+    func menuWillOpen(_ menu: NSMenu) {
+        lookForReading()  // answers by the next opening; the menu itself never waits on the network
+        build()
+    }
 }

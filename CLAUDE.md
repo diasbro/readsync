@@ -33,7 +33,8 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   title line of `book.toml` changes), `DELETE /api/books/<slug>` (the page
   confirms first).
 - `app/` — the Mac app: `Readsync.swift` (paths, log, running commands), `Payload.swift` (the code
-  it serves and the git update), `Server.swift` (the server as a child process), `Menu.swift` (the
+  it serves and the git update), `Server.swift` (the server as a child process), `Browser.swift`
+  (opening the library, reusing a tab only where permission was already given), `Menu.swift` (the
   menu bar item), `main.swift`, `build.sh` (`make app`, `make dmg`). A launcher, not a copy of the
   project: it keeps the code in `~/Library/Application Support/readsync/src` and updates it with
   git, so a new disk image is only needed when the launcher itself changes. The bundle carries both
