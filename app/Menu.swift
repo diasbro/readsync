@@ -11,13 +11,16 @@ final class Menu: NSObject, NSApplicationDelegate {
     private var python: String?
     private var toolsBusy = false
     private var behind = 0
+    private var busy: String?  // what git is doing right now, while it is doing it
     private var reading: (title: String, slug: String)?
     private var checkTimer: Timer?
+    private let gitQueue = DispatchQueue(label: "readsync.git")  // one at a time, never on the main thread
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item.button?.image = Menu.mark()
         item.menu = menu
         menu.delegate = self
+        menu.autoenablesItems = false  // the update item says «занято» by being disabled, so AppKit must not decide
         log("menu bar item ready, visible=\(item.isVisible), icon=\(item.button?.image?.size ?? .zero)")
         Payload.install()
         python = findPython()
@@ -72,7 +75,9 @@ final class Menu: NSObject, NSApplicationDelegate {
         if !server.isRunning {
             add("Сервер не запущен, запустить", "", #selector(restart))
         }
-        add(behind > 0 ? "Обновить: есть новое (\(behind))" : "Проверить обновления…", "", #selector(update))
+        let updateItem = add(
+            busy ?? (behind > 0 ? "Обновить: есть новое (\(behind))" : "Проверить обновления…"), "", #selector(update))
+        updateItem.isEnabled = busy == nil
         let settings = NSMenuItem(title: "Настройки", action: nil, keyEquivalent: "")
         settings.submenu = settingsMenu()
         menu.addItem(settings)
@@ -154,19 +159,29 @@ final class Menu: NSObject, NSApplicationDelegate {
         build()
     }
 
-    /// A window only when something went wrong: an update that worked shows itself in the menu.
+    /// Git takes as long as the network takes, so it runs off the main thread: the menu keeps opening
+    /// and says «Обновление…» meanwhile. A window appears only when something went wrong.
     @objc private func update() {
+        guard busy == nil else { return }
+        busy = "Обновление…"
         behind = 0
-        switch Payload.update() {
-        case .updated(let what):
-            log("updated: \(what)")
-            if let python { server.start(python: python) }
-        case .upToDate:
-            log("already up to date")
-        case .failed(let why):
-            alert("Обновиться не вышло", why)
-        }
         build()
+        gitQueue.async {
+            let result = Payload.update()
+            DispatchQueue.main.async {
+                self.busy = nil
+                switch result {
+                case .updated(let what):
+                    log("updated: \(what)")
+                    if let python = self.python { self.server.start(python: python) }
+                case .upToDate:
+                    log("already up to date")
+                case .failed(let why):
+                    self.alert("Обновиться не вышло", why)
+                }
+                self.build()
+            }
+        }
     }
 
     @objc private func showBooks() { NSWorkspace.shared.open(booksDir) }
@@ -184,11 +199,16 @@ final class Menu: NSObject, NSApplicationDelegate {
     // ---- what the menu knows, asked in the background so opening it never waits ----
 
     private func lookForUpdates() {
-        DispatchQueue.global(qos: .background).async {
+        guard busy == nil else { return }
+        busy = "Проверка обновлений…"
+        build()
+        gitQueue.async {
             let count = Payload.behindBy()
             DispatchQueue.main.async {
+                self.busy = nil
                 self.behind = count
                 if count > 0 { log("\(count) new commits upstream") }
+                self.build()
             }
         }
     }
