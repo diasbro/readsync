@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Library: one quiet line finds and adds (title, link or file); titles without text wait in the catalog;
+- Library: the sign by the «Библиотека» heading (or `/`) opens one line that finds and adds
+  (title, link or file); titles without text wait in the catalog;
   cards carry three icons (read, text and audio, delete) and open in place with editions from
   fantasy-worlds, Flibusta and Coollib (translator, year, size, author lookup), own link or file,
   audio and precise alignment; shelves, covers, header line.
