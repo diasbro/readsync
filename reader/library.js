@@ -118,6 +118,7 @@
   }
 
   // ---- the card: collapsed, or opened in place with its sections ----
+  let renaming = null;  // id of the card whose title is being edited
   const icon = (act, glyph, title) => `<button class="ic" data-act="${act}" title="${title}">${glyph}</button>`;
   function actsHtml(x) {
     if (confirmDel === idOf(x)) return `<div class="acts confirm">${isShell(x) ? "убрать" : "удалить"}${x.has_audio ? " с аудио" : ""}? <button data-act="delYes">да</button> <button data-act="delNo">нет</button></div>`;
@@ -146,9 +147,19 @@
       <div class="own"><input name="audio_url" placeholder="${b.has_audio ? "Заменить: " : ""}ссылка на YouTube, части по одной через пробел"><label class="file">или файл<input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3" hidden></label><input name="narrator" class="narr" placeholder="Чтец"><button class="btn sm" data-act="audioGo">Загрузить</button></div>
       ${b.has_audio ? "" : `<div class="m">Голос выбери сам: <a target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${q((b.title || "") + " аудиокнига")}">YouTube</a></div>`}</div>`;
   }
+  function headHtml(x) {
+    if (renaming !== idOf(x)) {
+      return `<div class="head"><button class="ic pen" data-act="rename" title="Переименовать">✎</button>
+        <div class="t">${esc(x.title || x.slug)}${isShell(x) ? '<span class="tag">без текста</span>' : ""}</div>
+        <button class="ic" data-act="close" title="Свернуть (Esc)">✕</button></div>`;
+    }
+    return `<div class="head naming"><span class="pen" aria-hidden="true">✎</span>
+      <input class="rename-input" value="${esc(x.title || x.slug)}" spellcheck="false" aria-label="Название">
+      ${icon("renameYes", "✓", "Сохранить (↵)")}${icon("renameNo", "✕", "Отмена (Esc)")}</div>`;
+  }
   function openHtml(x) {
     return `<div class="card open${isShell(x) ? " shell" : ""}" data-key="${esc(idOf(x))}"><div class="body">
-      <div class="head"><div class="t">${esc(x.title || x.slug)}${isShell(x) ? '<span class="tag">без текста</span>' : ""}</div><button class="ic" data-act="close" title="Свернуть (Esc)">✕</button></div>
+      ${headHtml(x)}
       ${facts(x) ? `<div class="m">${esc(facts(x))}</div>` : ""}
       ${textSection(x)}${isShell(x) ? "" : audioSection(x)}</div></div>`;
   }
@@ -191,6 +202,7 @@
   }
   // paint() lays out what is already loaded; renderLibrary() fetches first
   function paint() {
+    const draft = keepDraft();
     const byActivity = (a, b) => (b.at || 0) - (a.at || 0) || (a.title || "").localeCompare(b.title || "", "ru");
     const entry = (b) => ({ at: b.state.opened || b.added || 0, title: b.title, html: cardHtml(b) });
     // while a query is typed everything matching sits in one list under the line, so nothing hides above it
@@ -203,6 +215,18 @@
     $("#reading-section").hidden = !reading.length;
     $("#reading-list").innerHTML = reading.map((x) => x.html).join("");
     $("#library-list").innerHTML = rest.map((x) => x.html).join("") + (query ? addRowHtml(any) : !any ? '<p class="muted small">Пока пусто. Напиши название книги в строке выше, вставь ссылку или перетащи файл.</p>' : "");
+    restoreDraft(draft);
+  }
+  // a repaint (a finished job, a search coming back) must not wipe a name that is being typed
+  function keepDraft() {
+    const el = document.querySelector(".rename-input");
+    return el && { value: el.value, from: el.selectionStart, to: el.selectionEnd, focused: document.activeElement === el };
+  }
+  function restoreDraft(d) {
+    const el = d && document.querySelector(".rename-input");
+    if (!el) return;
+    el.value = d.value;
+    if (d.focused) { el.focus(); el.setSelectionRange(d.from, d.to); }
   }
   async function renderLibrary() {
     [books, wishes] = await Promise.all([fetch("/api/books").then((r) => r.json()), api("GET", "/api/wishlist").catch(() => wishes)]);
@@ -221,7 +245,7 @@
     else if (!any || e.metaKey || e.ctrlKey) addTitle(query);
   });
   addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { prefs.hidden = true; if (open) { open = null; paint(); } }
+    if (e.key === "Escape") { prefs.hidden = true; if (renaming) { renaming = null; paint(); } else if (open) { open = null; paint(); } }
     if (e.key === "/" && !(e.target instanceof Element && e.target.matches("input, textarea, select"))) { e.preventDefault(); showOmni(true); }
   });
   omni.addEventListener("blur", () => { if (!query) showOmni(false); });  // opened by accident: it closes itself
@@ -318,11 +342,29 @@
       if (open && !isShell(x) && !hitsCache[x.slug]) hitsCache[x.slug] = await fetch("/api/hits/" + x.slug).then((r) => r.json()).catch(() => ({}));
       paint();
     },
-    close: () => { open = null; paint(); },
+    close: () => { open = null; renaming = null; paint(); },
+    rename: (x) => { renaming = idOf(x); paint(); const el = document.querySelector(".card.open .rename-input"); el?.focus(); el?.select(); },
+    renameNo: () => { renaming = null; paint(); },
+    renameYes: async (x, btn) => {
+      const title = btn.closest(".head").querySelector(".rename-input").value.trim();
+      const taken = [...books, ...wishes].some((y) => idOf(y) !== idOf(x) && norm(y.title) === norm(title));
+      if (taken) { toast(`«${title}» уже в библиотеке`); return; }  // stay in the field, the name is free to fix
+      renaming = null;
+      if (!title || title === x.title) { paint(); return; }
+      // the old search result belongs to the old name: it goes, so the card asks to search again
+      const r = isShell(x)
+        ? await api("PUT", "/api/wishlist/" + x.id, { title, searched: "", hits: [], author_hits: null }).catch((err) => ({ error: String(err) }))
+        : await api("PUT", "/api/books/" + x.slug, { title }).catch((err) => ({ error: String(err) }));
+      if (r.error) { toast("Ошибка: " + r.error); paint(); return; }
+      if (isShell(x)) wishes = r;
+      searching.delete(idOf(x));
+      renderLibrary();
+    },
     del: (x) => { confirmDel = idOf(x); paint(); },
     delNo: () => { confirmDel = null; paint(); },
     delYes: async (x) => {
       confirmDel = null;
+      renaming = null;
       if (isShell(x)) { searching.delete(x.id); wishes = await api("DELETE", "/api/wishlist/" + x.id); paint(); return; }
       const r = await api("DELETE", "/api/books/" + x.slug).catch((err) => ({ error: String(err) }));
       if (r.error) toast("Ошибка: " + r.error); else { delete jobs[x.slug]; renderLibrary(); }
@@ -352,6 +394,11 @@
     const card = btn.closest(".card");
     const x = card && !card.classList.contains("add") ? entryOf(card) : null;
     if (x || card?.classList.contains("add")) ACTIONS[btn.dataset.act]?.(x, btn);
+  });
+  $("#library").addEventListener("keydown", (e) => {
+    if (!(e.target instanceof Element) || !e.target.classList.contains("rename-input")) return;
+    if (e.key === "Enter") { e.preventDefault(); e.target.closest(".head")?.querySelector('[data-act="renameYes"]')?.click(); }
+    if (e.key === "Escape") { e.stopPropagation(); ACTIONS.renameNo(); }
   });
   // "или файл": the label shows the chosen name
   $("#library").addEventListener("change", (e) => { if (e.target.type === "file") { const l = e.target.closest("label"); if (l) l.firstChild.textContent = e.target.files[0] ? e.target.files[0].name : "или файл"; } });

@@ -34,6 +34,7 @@ from library import (
     merge_settings,
     merge_state,
     random_sentence,
+    rename_book,
     save_hits,
     start_align,
     start_job,
@@ -181,6 +182,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(merge_settings(body))
         if self.path.startswith("/api/wishlist/"):
             return self.send_json(wishlist_update(self.path.rsplit("/", 1)[-1], body))
+        if self.path.startswith("/api/books/"):
+            try:
+                return self.send_json(rename_book(self.path.rsplit("/", 1)[-1], body.get("title", "")))
+            except (ValueError, OSError) as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
         if self.path.startswith("/api/hits/"):
             try:
                 save_hits(self.path.rsplit("/", 1)[-1], body)
