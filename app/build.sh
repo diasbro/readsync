@@ -33,7 +33,7 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/$NAME.icns"
 
 # the launcher, for both processors in one binary
-SOURCES=(app/Readsync.swift app/Payload.swift app/Server.swift app/Menu.swift app/main.swift)
+SOURCES=(app/Readsync.swift app/Payload.swift app/Server.swift app/Browser.swift app/Menu.swift app/main.swift)
 for target in arm64 x86_64; do
   swiftc -O -target "$target-apple-macos$MACOS_MIN" -o "$BUILD/bin/$NAME-$target" "${SOURCES[@]}"
 done
@@ -87,6 +87,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>RSRepository</key><string>$REPO</string>
   <key>RSPayloadVersion</key><string>$PAYLOAD_VERSION</string>
   <key>RSPython</key><string>$PY_SHORT</string>
+  <key>NSAppleEventsUsageDescription</key><string>Чтобы открывать библиотеку в уже открытой вкладке, а не в новой.</string>
 </dict>
 </plist>
 PLIST

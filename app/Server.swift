@@ -32,6 +32,7 @@ final class Server {
         do {
             try task.run()
             self.task = task
+            try? "\(port)".write(to: portFile, atomically: true, encoding: .utf8)  // so --open knows where to look
             log("server started on \(port)")
         } catch {
             log("server did not start: \(error)")

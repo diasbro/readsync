@@ -23,6 +23,11 @@ if let i = args.firstIndex(of: "--login"), i + 1 < args.count {
     }
 }
 
+if args.contains("--open") {
+    Browser.open(libraryURL)
+    exit(0)
+}
+
 let app = NSApplication.shared
 let delegate = Menu()
 app.delegate = delegate

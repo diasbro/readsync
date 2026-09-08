@@ -10,6 +10,14 @@ let support = FileManager.default.homeDirectoryForCurrentUser
 let srcDir = support.appendingPathComponent("src")
 let booksDir = support.appendingPathComponent("books")
 let libsDir = support.appendingPathComponent("pylibs")  // only for a package the app does not carry
+let portFile = support.appendingPathComponent("port")
+
+/// Where the library is right now: the running server writes its port down.
+var libraryURL: URL {
+    let port = (try? String(contentsOf: portFile, encoding: .utf8))
+        .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 8765
+    return URL(string: "http://127.0.0.1:\(port)/")!
+}
 let logFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Logs/readsync.log")
 
