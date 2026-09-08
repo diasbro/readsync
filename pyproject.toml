@@ -13,6 +13,7 @@ dependencies = [
   "onnxruntime",
   "unidecode",
   "faster-whisper",
+  "pypdf",
 ]
 
 # the repository is scripts plus a static reader, not an importable package: install only the dependencies
