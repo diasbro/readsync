@@ -36,9 +36,11 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   it serves and the git update), `Server.swift` (the server as a child process), `Menu.swift` (the
   menu bar item), `main.swift`, `build.sh` (`make app`, `make dmg`). A launcher, not a copy of the
   project: it keeps the code in `~/Library/Application Support/readsync/src` and updates it with
-  git, so a new disk image is only needed when the launcher itself changes. Books live beside that
-  code (or in an existing checkout's `books/`), never inside it; `READSYNC_BOOKS` and
-  `READSYNC_PYTHON` are how the server is told where they are.
+  git, so a new disk image is only needed when the launcher itself changes. The bundle carries both
+  architectures and a Python of its own (python-build-standalone, with beautifulsoup4, lxml and
+  pypdf), so nothing is installed on the Mac it lands on. Books live beside that code (or in an
+  existing checkout's `books/`), never inside it; `READSYNC_BOOKS` and `READSYNC_PYTHON` are how the
+  server and the pipeline are told where they are, and both honour them.
 - `books/` — all per-book data and reading state; nothing under it is tracked by git.
 - `tests/` — pytest for the pipeline. `docs/` — design notes and ADRs.
 
