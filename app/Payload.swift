@@ -66,13 +66,17 @@ enum Payload {
 
     /// An update is a pull, so only what changed comes down the wire. A copied payload is turned
     /// into a checkout on the first update, which is why no disk image is needed for the next one.
+    static var gitPath: String? {
+        for path in ["/opt/homebrew/bin/git", "/usr/bin/git"]
+        where FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        return nil
+    }
+
     static func update() -> String {
         guard !repoURL.isEmpty else { return "не знаю, откуда обновляться" }
-        guard FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/git")
-            || FileManager.default.isExecutableFile(atPath: "/usr/bin/git")
-        else { return "нужен git" }
-        let git = FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/git")
-            ? "/opt/homebrew/bin/git" : "/usr/bin/git"
+        guard let git = gitPath else { return "нужен git" }
         if !isCheckout {
             log("turning the copied code into a checkout")
             for args in [["init", "-q"], ["remote", "add", "origin", repoURL]] {
@@ -92,6 +96,15 @@ enum Payload {
         let subject = run(git, ["log", "-1", "--pretty=%s"], cwd: srcDir).1
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return "обновлено: \(subject)"
+    }
+
+    /// Is there anything new upstream? Asked quietly in the background, so the menu can say so
+    /// without the reader ever going to look.
+    static func behindBy() -> Int {
+        guard isCheckout, let git = gitPath else { return 0 }
+        if run(git, ["fetch", "--quiet", "origin", "main"], cwd: srcDir, timeout: 120).0 != 0 { return 0 }
+        let out = run(git, ["rev-list", "--count", "HEAD..origin/main"], cwd: srcDir).1
+        return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
     /// The small packages the importers need: html, epub and pdf. Everything else is optional.

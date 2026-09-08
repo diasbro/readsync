@@ -9,6 +9,8 @@ final class Menu: NSObject, NSApplicationDelegate {
     private let menu = NSMenu()
     private var python: String?
     private var toolsReady = false
+    private var behind = 0
+    private var checkTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item.button?.image = Menu.mark()
@@ -28,6 +30,21 @@ final class Menu: NSObject, NSApplicationDelegate {
         Payload.ensureTools(python: python) { [weak self] ok in self?.toolsReady = ok }
         server.start(python: python)
         build()
+        lookForUpdates()
+        checkTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            self?.lookForUpdates()
+        }
+    }
+
+    /// Asked in the background and answered in the menu: no window ever opens for this.
+    private func lookForUpdates() {
+        DispatchQueue.global(qos: .background).async {
+            let count = Payload.behindBy()
+            DispatchQueue.main.async {
+                self.behind = count
+                if count > 0 { log("\(count) new commits upstream") }
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) { server.stop() }
@@ -62,7 +79,7 @@ final class Menu: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         let login = add("Запускать при входе", "", #selector(toggleLogin))
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        add("Проверить обновления…", "", #selector(update))
+        add(behind > 0 ? "Обновить: есть новое (\(behind))" : "Проверить обновления…", "", #selector(update))
         let version = Payload.installedVersion.isEmpty ? Payload.bundledVersion : Payload.installedVersion
         menu.addItem(withTitle: "Версия \(version)", action: nil, keyEquivalent: "").isEnabled = false
         menu.addItem(.separator())
@@ -102,6 +119,7 @@ final class Menu: NSObject, NSApplicationDelegate {
 
     @objc private func update() {
         let done = Payload.update()
+        behind = 0
         if done.hasPrefix("обновлено"), let python {
             server.start(python: python)
         }
