@@ -144,7 +144,7 @@ class Handler(SimpleHTTPRequestHandler):
             slug = self.path.rsplit("/", 1)[-1]
             p = BOOKS / slug / "hits.json"
             if not SLUG_RE.match(slug) or not p.exists():
-                return self.send_json({"hits": [], "author_hits": None})
+                return self.send_json({"hits": [], "author_hits": None, "query": ""})
             return self.send_json(json.loads(p.read_text(encoding="utf-8")))
         if self.path.startswith("/api/wishlist"):
             return self.send_json(load_wishlist())

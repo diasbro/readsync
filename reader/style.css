@@ -158,20 +158,27 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 /* the pencil leads the name and stays in place while the name is edited, so the row never jumps */
 .card.open .head .pen { flex: none; width: 20px; height: 20px; font-size: 13px; color: var(--muted); opacity: .45;
   display: flex; align-items: center; justify-content: center; }
-.card.open .head:hover .pen, .card.open .head.naming .pen { opacity: 1; }
-.card.open .head.naming .pen { color: var(--accent); }
-.card.open .head .rename-input { flex: 1; min-width: 0; font-family: var(--ui); font-size: 15px; line-height: 1.4;
-  border: 0; border-bottom: 1px solid var(--accent); background: none; color: var(--fg); padding: 3px 0; outline: none; }
-.card.open .head.naming .ic { width: 26px; height: 26px; font-size: 14px; }
+.card.open .head:hover .pen, .card.open .head.editing .pen { opacity: 1; }
+.card.open .head.editing .pen { color: var(--accent); }
+.card.open .head .rename-input, .card.open .head .find-input { flex: 1; min-width: 0; font-family: var(--ui); font-size: 15px;
+  line-height: 1.4; border: 0; border-bottom: 1px solid var(--accent); background: none; color: var(--fg); padding: 3px 0; outline: none; }
+.card.open .head .find-input::placeholder { color: var(--muted); opacity: .8; }
+.card.open .head.editing .ic { width: 26px; height: 26px; font-size: 14px; }
+.card .cand .ic.again { width: 26px; height: 26px; font-size: 14px; color: var(--accent); }
+.card .cand .ic.again:hover { background: var(--line); }
 .card.open .sec { margin-top: 16px; }
 .card.open .sec h5 { margin: 0 0 8px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
 .card.open .sec h5 .now { font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 12px; }
 .card.open .sec h5 .link-btn { font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: auto; }
-.card.open .own { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
-.card.open .own input:not([type=file]) { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 7px 10px; font-size: 13px; }
-.card.open .own input.narr { flex: 0 0 120px; }
-.card.open .own .file { font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
-.card.open .own .file:hover { color: var(--fg); }
+.card.open .own { display: flex; gap: 10px; margin-top: 10px; align-items: center; }
+.card.open .own input:not([type=file]) { flex: 1 1 auto; min-width: 0; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 7px 10px; font-size: 13px; }
+.card.open .own input.narr { flex: 0 0 110px; }
+/* "или файл": only the word is the control, and it looks like one */
+.card.open .own .file { font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; flex: none; }
+.card.open .own .file u { text-decoration: none; border-bottom: 1px dashed var(--muted); color: var(--fg);
+  display: inline-block; max-width: 130px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.card.open .own .file:hover u { color: var(--accent); border-bottom-color: var(--accent); }
+.card.open .own .file.chosen u { color: var(--accent); border-bottom-style: solid; }
 .card.open .own .btn { white-space: nowrap; }
 .card .cand.cur { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .card .cand .now { font-size: 11px; color: var(--accent); white-space: nowrap; }
@@ -180,6 +187,7 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .card .status.warn::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #d0902e; flex: none; }
 .card .status .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
 .card.shell .cover.empty { background: none; border: 1px dashed var(--line); }
+.card.shell .body, .card.shell .cover { cursor: pointer; }  /* nothing to read yet: the card opens its panel */
 .card .cands { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .card .cands .hd { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
 .card .cand { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font-size: 14px; }
