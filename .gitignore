@@ -9,7 +9,8 @@ books/*
 *.egg-info/
 .ruff_cache/
 .claude/settings.local.json
-# the built app and its disk image
+# the built app, its disk image and the downloads the build caches
 dist/
+build/
 
 
