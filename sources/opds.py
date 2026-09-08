@@ -65,25 +65,32 @@ class OpdsSource:
         return self.entries(get(self.search_url + urllib.parse.quote(query)).decode("utf-8", "replace"))[:12]
 
     def author_books(self, query: str) -> tuple[str, list[dict]]:
-        """(author name, books) when the catalog has an author whose name is exactly the query."""
+        """(author name, books) when the catalog has an author the query names. A surname is enough:
+        every word of the query has to be part of the name, so «виногродский» finds
+        «Виногродский Бронислав Брониславович», and the shortest such name wins."""
         xml = get(f"{self.base}/opds/search?searchType=authors&searchTerm=" + urllib.parse.quote(query)).decode(
             "utf-8", "replace"
         )
-        want = norm_title(query)
+        want = set(norm_title(query).split())
+        best: tuple[str, str] | None = None
         for e in re.findall(r"<entry>(.*?)</entry>", xml, re.S):
             title = unescape(re.search(r"<title>(.*?)</title>", e, re.S).group(1)).strip() if "<title>" in e else ""
             link = re.search(r'href="([^"]*/opds/author/\d+)"', e)
-            if not link or not want or norm_title(title) != want:
+            name = set(norm_title(title).split())
+            if not link or not want or not want <= name:
                 continue
-            url = link.group(1)
-            if url.startswith("/"):
-                url = self.base + url
-            for page_url in (url + "/alphabet", url):  # flibusta lists books under /alphabet, coollib on the page
-                books = self.pages(page_url)
-                if books:
-                    return title, books
-            return title, []
-        return "", []
+            if best is None or len(name) < len(set(norm_title(best[0]).split())):
+                best = (title, link.group(1))
+        if not best:
+            return "", []
+        title, url = best
+        if url.startswith("/"):
+            url = self.base + url
+        for page_url in (url + "/alphabet", url):  # flibusta lists books under /alphabet, coollib on the page
+            books = self.pages(page_url)
+            if books:
+                return title, books
+        return title, []
 
     def pages(self, url: str | None) -> list[dict]:
         books: list[dict] = []

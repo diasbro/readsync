@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sources
 from sources import base
 from sources.flibusta import Flibusta
 
@@ -35,3 +36,93 @@ def test_editions_group_volumes_but_not_translations():
     vols = next(r for r in rows if r["title"] == "Троецарствие")
     assert [p["url"] for p in vols["parts"]] == ["https://flibusta.is/b/1/fb2", "https://flibusta.is/b/2/fb2"]
     assert vols["parts_label"] == "Том 1, Том 2"
+
+
+AUTHORS_FEED = """<feed>
+<entry><title>Виногродская Анна</title><link href="/opds/author/1"/></entry>
+<entry><title>Виногродский Бронислав Брониславович</title><link href="/opds/author/2"/></entry>
+</feed>"""
+
+
+def test_query_words_and_shorter_searches():
+    q = "Книга перемен как технология принятия решений"
+    assert base.terms(q) == ["технология", "принятия", "перемен", "решений", "книга"]
+    # a title starts with the name of the work, so the first two words are tried before single ones
+    assert base.fallbacks(q) == ["книга перемен", "технология", "принятия"]
+    assert base.fallbacks("Дао дэ цзин") == ["дао дэ", "цзин", "дао"]  # short names count, "дэ" does not
+
+
+def test_matched_counts_the_words_a_row_names():
+    words = base.terms("Книга перемен как технология принятия решений")
+    close = {"title": "Ицзин. Книга Перемен", "author": "", "translator": ""}
+    far = {"title": "Технология оздоровительной физической культуры", "author": "", "translator": ""}
+    assert base.matched(words, close) == 2
+    assert base.matched(words, far) == 1
+
+
+def test_author_found_by_surname(monkeypatch):
+    """A surname is enough, and the shortest name that carries every word of the query wins."""
+    seen = {}
+
+    def fake_get(url, timeout=40):
+        if "searchType=authors" in url:
+            return AUTHORS_FEED.encode()
+        seen["books"] = url
+        return ENTRY.encode() if url.endswith("/alphabet") else b"<feed></feed>"
+
+    monkeypatch.setattr("sources.opds.get", fake_get)
+    name, books = Flibusta().author_books("виногродский")
+    assert name == "Виногродский Бронислав Брониславович"
+    assert seen["books"] == "https://flibusta.is/opds/author/2/alphabet"
+    assert len(books) == 4
+
+
+def test_search_falls_back_to_shorter_terms(monkeypatch):
+    """The catalogs match a phrase inside a title: when the whole query names more than any title,
+    shorter searches follow and rows that share too little with the query stay out."""
+    asked = []
+
+    class Catalog:
+        name = "flibusta"
+
+        def search(self, query):
+            asked.append(query)
+            rows = {
+                "книга перемен": [base.hit(self.name, "Ицзин. Книга Перемен", "/b/1/fb2", "fb2")],
+                "технология": [base.hit(self.name, "Технология сварки", "/b/2/fb2", "fb2")],
+            }
+            return rows.get(query, [])
+
+        def author_books(self, query):
+            return "", []
+
+    monkeypatch.setattr("sources.SOURCES", [Catalog()])
+    res = sources.search_text("Книга перемен как технология принятия решений")
+    assert asked[0] == "Книга перемен как технология принятия решений"  # the phrase is tried first
+    assert "книга перемен" in asked
+    assert [r["title"] for r in res["hits"]] == ["Ицзин. Книга Перемен"]  # one shared word is not a match
+    assert res["note"]
+
+
+def test_two_word_query_needs_both_words(monkeypatch):
+    """Two words are all a short query has: a row that names one of them is a coincidence."""
+
+    class Catalog:
+        name = "flibusta"
+
+        def search(self, query):
+            return (
+                []
+                if " " in query
+                else [
+                    base.hit(self.name, "Властелин колец", "/b/1/fb2", "fb2"),
+                    base.hit(self.name, "Кольцо и роза", "/b/2/fb2", "fb2"),
+                ]
+            )
+
+        def author_books(self, query):
+            return "", []
+
+    monkeypatch.setattr("sources.SOURCES", [Catalog()])
+    res = sources.search_text("властелин колец")
+    assert [r["title"] for r in res["hits"]] == ["Властелин колец"]

@@ -20,7 +20,9 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   API: `/api/books`, `/api/state/<slug>` (per-book reading state, last-writer-wins by `<key>At`
   timestamps), `/api/settings` (global reader settings), `/api/wishlist` (titles saved without text,
   with their last search result), `/api/search` (all sources, editions as the catalogs describe
-  them plus an author's books; the only runtime network calls besides the pipeline downloads),
+  them plus the books of an author the query names; the catalogs match a phrase inside a title, so
+  a query no title contains is retried by its own words and rows are ranked by how many of them
+  they name; the only runtime network calls besides the pipeline downloads),
   `/api/hits/<slug>` (the search result a book was picked from), `/api/where/<slug>`, `/api/add`
   (multipart, launches `add_book.py` as a background job; `replace=1` swaps the text of an
   existing book), `/api/align/<slug>`, `/api/jobs`, `PUT /api/books/<slug>` (rename: only the

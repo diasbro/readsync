@@ -4,8 +4,8 @@
 
 - Library: the sign by the «Библиотека» heading (or `/`) opens one line that finds and adds
   (title, link or file); titles without text wait in the catalog;
-  a card is renamed by the pencil next to its name, so a title the catalogs miss can be fixed and
-  searched again; cards carry three icons (read, text and audio, delete) and open in place with editions from
+  a card is renamed by the pencil next to its name; a search that no title matches as a phrase is
+  retried by the words of the query and ranked by them, and an author's surname lists their books; cards carry three icons (read, text and audio, delete) and open in place with editions from
   fantasy-worlds, Flibusta and Coollib (translator, year, size, author lookup), own link or file,
   audio and precise alignment; shelves, covers, header line.
 - Code: `library.py` and a `sources/` package (one module per catalog) behind `serve.py`;
