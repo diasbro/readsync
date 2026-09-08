@@ -11,7 +11,9 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   (volumes → one book), `anchors.py` (captions → word anchors), `timing_from_anchors.py`
   (→ `timing.json`), `align.py` (MMS forced alignment, refines `timing.json`), `transcribe.py`
   (faster-whisper fallback), `add_book.py` (orchestrator: several `--text` = volumes, several
-  `--audio` = parts, audio-only on an existing slug attaches audio). Each takes a book directory.
+  `--audio` = parts, audio-only on an existing slug attaches audio; a download that turns out to be
+  a catalog's «книга заблокирована» notice, or anything under 500 words, stops the job before the
+  merge, so an existing book keeps its text). Each takes a book directory.
 - `reader/` — static UI, no build step: `index.html`, `common.js` (helpers + reader settings shared
   by both pages), `library.js` (library page: one line finds and adds, cards open in place),
   `app.js` (the reader), `style.css`, `fonts/`.

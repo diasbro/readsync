@@ -13,7 +13,8 @@
   audio and precise alignment; shelves, covers, header line.
 - Code: `library.py` and a `sources/` package (one module per catalog) behind `serve.py`;
   `reader/common.js`, `library.js`, `app.js`.
-- Import: EPUB, PDF, TXT, HTML, multi-volume text, multi-part audio, illustrations.
+- Import: EPUB, PDF, TXT, HTML, multi-volume text, multi-part audio, illustrations. A catalog that
+  answers with a notice instead of the book stops the load and says so.
 - Mac app: a menu bar launcher (`make dmg`) that carries both architectures and its own Python,
   optional start at login, and updates by git pull instead of a new disk image.
 - Reader: page mode, server-side state and settings, fonts and themes, focus tools.
