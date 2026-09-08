@@ -3,7 +3,8 @@
 "use strict";
 const $ = (s) => document.querySelector(s);
 const slug = new URLSearchParams(location.search).get("book");
-const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// also the apostrophe: catalog titles carry them and some attributes here are single-quoted
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (t) => {
   t = Math.max(0, Math.round(t || 0));
   const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;

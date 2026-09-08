@@ -82,7 +82,7 @@
   const READING_SEC = 600;
   const SOURCE = { "fantasy-worlds": "fantasy-worlds", flibusta: "Flibusta", coollib: "Coollib" };
   const SOURCES_LABEL = Object.values(SOURCE).join(", ");
-  const LOADABLE = new Set(["fb2", "epub", "txt", "html"]);
+  const LOADABLE = new Set(["fb2", "epub", "pdf", "txt", "html"]);
   const searching = new Map();  // card id -> {busy, t0} | {status}: this session's search state
   const hitsCache = {};  // slug -> {hits, author_hits} from /api/hits, loaded when a book card opens
   const idOf = (x) => x.slug || x.id;
@@ -93,12 +93,16 @@
   const facts = (b) => [b.author, b.translator ? "пер. " + b.translator : null, b.year, b.has_audio && b.narrator ? "читает " + b.narrator : null].filter(Boolean).join(" · ");
 
   // ---- search result rows: one row per edition, exactly as the catalog describes it ----
-  const hitMeta = (h) => [h.author, h.translator ? "пер. " + h.translator : "", h.year, h.parts_label, h.parts[0].kind === "html" ? "страница" : h.parts[0].kind, kb(h.size_kb), SOURCE[h.source] || h.source, h.lang && h.lang !== "ru" ? h.lang : ""].filter(Boolean).join(" · ");
+  const kindOf = (h) => h.parts?.[0]?.kind || "";  // a row saved by an older version may have no parts
+  const hitMeta = (h) => [h.author, h.translator ? "пер. " + h.translator : "", h.year, h.parts_label, kindOf(h) === "html" ? "страница" : kindOf(h), kb(h.size_kb), SOURCE[h.source] || h.source, h.lang && h.lang !== "ru" ? h.lang : ""].filter(Boolean).join(" · ");
   const hitData = (h) => esc(JSON.stringify({ title: h.title, author: h.author, translator: h.translator, year: h.year, narrator: h.narrator, urls: h.parts.map((p) => p.url), audio: h.audio_url }));
   const SHOW = 5;
+  const openable = (h) => LOADABLE.has(kindOf(h));  // a row nothing can be done with is not a choice
   function rowHtml(h, current) {
     const now = current === h.parts.map((p) => p.url).join(" | ");
-    const right = now ? '<span class="now">сейчас в книге</span>' : LOADABLE.has(h.parts[0].kind) ? `<button class="btn sm" data-act="pick" data-hit='${hitData(h)}'>Загрузить</button>` : `<span class="cm">${esc(h.parts[0].kind)}, не открою</span>`;
+    const right = now
+      ? `<button class="ic again" data-act="pick" data-hit='${hitData(h)}' title="Загрузить заново отсюда: текст и название придут с сайта">↻</button>`
+      : `<button class="btn sm" data-act="pick" data-hit='${hitData(h)}'>Загрузить</button>`;
     return `<div class="cand${now ? " cur" : ""}"><div class="ct">${esc(h.title)}<div class="cm">${esc(hitMeta(h))}</div></div>${right}</div>`;
   }
   function rowsHtml(rows, current) {
@@ -112,13 +116,17 @@
     return head + (rest.length ? `<details class="more"><summary>ещё ${rest.length}</summary><div class="cands">${rest.map(one).join("")}</div></details>` : "");
   }
   function resultsHtml(found, current) {
-    const hits = found?.hits, author = found?.author_hits;
-    if (!hits?.length && !author?.hits?.length) return "";
-    return `<div class="cands">${hits?.length ? rowsHtml(hits, current) : ""}${author?.hits?.length ? `<div class="hd">у автора ${esc(author.name)}</div>${rowsHtml(author.hits, current)}` : ""}</div>`;
+    // rows saved before the reader knew a format stay in hits.json: they are filtered out here too
+    const hits = (found?.hits || []).filter(openable), author = found?.author_hits;
+    const byAuthor = (author?.hits || []).filter(openable);
+    if (!hits.length && !byAuthor.length) return "";
+    return `<div class="cands">${hits.length ? rowsHtml(hits, current) : ""}${byAuthor.length ? `<div class="hd">у автора ${esc(author.name)}</div>${rowsHtml(byAuthor, current)}` : ""}</div>`;
   }
 
   // ---- the card: collapsed, or opened in place with its sections ----
   let renaming = null;  // id of the card whose title is being edited
+  let finding = null;  // id of the card whose search query is being typed
+  const queryOf = (x) => (isShell(x) ? x.query : hitsCache[x.slug]?.query) || x.title || "";
   const icon = (act, glyph, title) => `<button class="ic" data-act="${act}" title="${title}">${glyph}</button>`;
   function actsHtml(x) {
     if (confirmDel === idOf(x)) return `<div class="acts confirm">${isShell(x) ? "убрать" : "удалить"}${x.has_audio ? " с аудио" : ""}? <button data-act="delYes">да</button> <button data-act="delNo">нет</button></div>`;
@@ -127,7 +135,7 @@
   }
   function statusHtml(x) {
     const s = searching.get(idOf(x)) || {};
-    if (s.busy) return `<div class="m status"><span class="spin"></span>ищу в ${SOURCES_LABEL}… <span class="sec">${Math.round((Date.now() - s.t0) / 1000)}</span> с</div>`;
+    if (s.busy) return `<div class="m status"><span class="spin"></span>ищу в ${SOURCES_LABEL}… <span class="secs">${Math.round((Date.now() - s.t0) / 1000)}</span> с</div>`;
     if (s.status) return `<div class="m status warn">${s.status}</div>`;
     if (s.note) return `<div class="m">${s.note}</div>`;  // found, but not by the name as typed
     const found = isShell(x) ? x : hitsCache[x.slug];
@@ -136,27 +144,32 @@
   }
   function textSection(x) {
     const found = isShell(x) ? x : hitsCache[x.slug] || {};
-    const any = !!(found.hits?.length || found.author_hits?.hits?.length);
-    return `<div class="sec"><h5>Текст${x.text_source ? `<span class="now">· ${esc(sourceOf(x.text_source))}</span>` : ""}<button class="link-btn" data-act="find">${any || x.searched ? "искать издания снова" : "искать издания"}</button></h5>
+    return `<div class="sec"><h5>Текст${x.text_source ? `<span class="now">· ${esc(sourceOf(x.text_source))}</span>` : ""}<button class="link-btn" data-act="find">искать издания</button></h5>
       ${statusHtml(x)}${resultsHtml(found, x.text_source)}
-      <div class="own"><input name="text_url" placeholder="Своя ссылка на текст: страница книги, fb2, epub, txt"><label class="file">или файл<input type="file" name="text_file" accept=".fb2,.zip,.epub,.txt,.html,.htm" hidden></label><button class="btn sm" data-act="own">Загрузить</button></div></div>`;
+      <div class="own"><input name="text_url" placeholder="Ссылка на текст: страница книги, fb2, epub, pdf, txt"><label class="file">или <u>файл</u><input type="file" name="text_file" accept=".fb2,.zip,.epub,.pdf,.txt,.html,.htm" hidden></label><button class="btn sm" data-act="own">Загрузить</button></div></div>`;
   }
   function audioSection(b) {
     const now = b.has_audio ? [b.narrator ? "читает " + b.narrator : "", sourceOf(b.audio_source), b.timing_source === "mms" ? "точное выравнивание" : "разметка по субтитрам"].filter(Boolean).join(" · ") : "нет";
     const align = b.has_audio && b.timing_source !== "mms" ? `<button class="link-btn" data-act="align">выровнять точно (долго)</button>` : "";
     return `<div class="sec"><h5>Аудио<span class="now">· ${esc(now)}</span>${align}</h5>
-      <div class="own"><input name="audio_url" placeholder="${b.has_audio ? "Заменить: " : ""}ссылка на YouTube, части по одной через пробел"><label class="file">или файл<input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3" hidden></label><input name="narrator" class="narr" placeholder="Чтец"><button class="btn sm" data-act="audioGo">Загрузить</button></div>
+      <div class="own"><input name="audio_url" placeholder="${b.has_audio ? "Заменить: " : ""}ссылка на YouTube, части по одной через пробел"><label class="file">или <u>файл</u><input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3" hidden></label><input name="narrator" class="narr" placeholder="Чтец"><button class="btn sm" data-act="audioGo">Загрузить</button></div>
       ${b.has_audio ? "" : `<div class="m">Голос выбери сам: <a target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${q((b.title || "") + " аудиокнига")}">YouTube</a></div>`}</div>`;
   }
   function headHtml(x) {
+    if (finding === idOf(x)) {
+      return `<div class="head editing"><span class="pen" aria-hidden="true">⌕</span>
+        <input class="find-input" value="${esc(queryOf(x))}" spellcheck="false" aria-label="Что искать в ${SOURCES_LABEL}"
+          placeholder="Название, автор, что угодно">
+        ${icon("findGo", "→", "Искать (↵)")}${icon("close", "✕", "Закрыть (Esc отменяет ввод)")}</div>`;
+    }
     if (renaming !== idOf(x)) {
       return `<div class="head"><button class="ic pen" data-act="rename" title="Переименовать">✎</button>
         <div class="t">${esc(x.title || x.slug)}${isShell(x) ? '<span class="tag">без текста</span>' : ""}</div>
         <button class="ic" data-act="close" title="Свернуть (Esc)">✕</button></div>`;
     }
-    return `<div class="head naming"><span class="pen" aria-hidden="true">✎</span>
+    return `<div class="head editing"><span class="pen" aria-hidden="true">✎</span>
       <input class="rename-input" value="${esc(x.title || x.slug)}" spellcheck="false" aria-label="Название">
-      ${icon("renameYes", "✓", "Сохранить (↵)")}${icon("renameNo", "✕", "Отмена (Esc)")}</div>`;
+      ${icon("renameYes", "✓", "Сохранить (↵)")}${icon("close", "✕", "Закрыть (Esc отменяет ввод)")}</div>`;
   }
   function openHtml(x) {
     return `<div class="card open${isShell(x) ? " shell" : ""}" data-key="${esc(idOf(x))}"><div class="body">
@@ -182,8 +195,8 @@
   }
   function shellHtml(w) {
     if (open === w.id) return openHtml(w);
-    return `<div class="card shell" data-key="${esc(w.id)}"><div class="cover empty">${esc(w.title.slice(0, 1))}</div>
-      <div class="body"><div class="t">${esc(w.title)}<span class="tag">без текста</span></div>${w.author ? `<div class="m">${esc(w.author)}</div>` : ""}${statusHtml(w)}</div>${actsHtml(w)}</div>`;
+    return `<div class="card shell" data-key="${esc(w.id)}"><div class="cover empty" data-act="gear">${esc(w.title.slice(0, 1))}</div>
+      <div class="body" data-act="gear" title="Текст и аудио"><div class="t">${esc(w.title)}<span class="tag">без текста</span></div>${w.author ? `<div class="m">${esc(w.author)}</div>` : ""}${statusHtml(w)}</div>${actsHtml(w)}</div>`;
   }
 
   // ---- finding and adding: the sign by the heading opens one line above the cards it filters ----
@@ -220,11 +233,11 @@
   }
   // a repaint (a finished job, a search coming back) must not wipe a name that is being typed
   function keepDraft() {
-    const el = document.querySelector(".rename-input");
+    const el = document.querySelector(".rename-input, .find-input");
     return el && { value: el.value, from: el.selectionStart, to: el.selectionEnd, focused: document.activeElement === el };
   }
   function restoreDraft(d) {
-    const el = d && document.querySelector(".rename-input");
+    const el = d && document.querySelector(".rename-input, .find-input");
     if (!el) return;
     el.value = d.value;
     if (d.focused) { el.focus(); el.setSelectionRange(d.from, d.to); }
@@ -246,7 +259,7 @@
     else if (!any || e.metaKey || e.ctrlKey) addTitle(query);
   });
   addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { prefs.hidden = true; if (renaming) { renaming = null; paint(); } else if (open) { open = null; paint(); } }
+    if (e.key === "Escape") { prefs.hidden = true; if (renaming || finding) { renaming = finding = null; paint(); } else if (open) { open = null; paint(); } }
     if (e.key === "/" && !(e.target instanceof Element && e.target.matches("input, textarea, select"))) { e.preventDefault(); showOmni(true); }
   });
   omni.addEventListener("blur", () => { if (!query) showOmni(false); });  // opened by accident: it closes itself
@@ -273,7 +286,7 @@
       await pollJobs(); return r.slug;
     } finally { adding = false; }
   }
-  const saveHits = (slug, found) => { hitsCache[slug] = found; return api("PUT", `/api/hits/${slug}`, { hits: found.hits || [], author_hits: found.author_hits || null }).catch(() => {}); };
+  const saveHits = (slug, found) => { hitsCache[slug] = found; return api("PUT", `/api/hits/${slug}`, { hits: found.hits || [], author_hits: found.author_hits || null, query: found.query || "" }).catch(() => {}); };
 
   // ---- adding: a title becomes a shell card; a link or a dropped file loads right away ----
   async function addTitle(title) {
@@ -296,24 +309,28 @@
   addEventListener("drop", (e) => { if (!e.dataTransfer?.files?.length || e.target.closest(".card.open")) return; e.preventDefault(); [...e.dataTransfer.files].forEach(addByFile); });
 
   // ---- library search for a card: the result stays with it (wishlist item or hits.json) ----
-  async function searchFor(x) {
+  async function searchFor(x, query) {
     const id = idOf(x);
-    if (searching.get(id)?.busy) return;
+    query = (query || queryOf(x)).trim();
+    if (searching.get(id)?.busy || !query) return;
     const t0 = Date.now();
     searching.set(id, { busy: true, t0 }); paint();
-    const ticker = setInterval(() => { const el = document.querySelector(`.card[data-key="${id}"] .sec .sec, .card[data-key="${id}"] span.sec`); if (el) el.textContent = Math.round((Date.now() - t0) / 1000); }, 1000);
+    const ticker = setInterval(() => { const el = document.querySelector(`.card[data-key="${CSS.escape(id)}"] .secs`); if (el) el.textContent = Math.round((Date.now() - t0) / 1000); }, 1000);
     const ctrl = new AbortController(); const killer = setTimeout(() => ctrl.abort(), 90000);
     let res = null, state = null;
-    try { res = await fetch("/api/search?q=" + q(x.title), { signal: ctrl.signal }).then((r) => r.json()); if (res.error) throw new Error(res.error); }
+    try { res = await fetch("/api/search?q=" + q(query), { signal: ctrl.signal }).then((r) => r.json()); if (res.error) throw new Error(res.error); }
     catch (e) { res = null; state = { status: e.name === "AbortError" ? "библиотеки не ответили за полторы минуты, попробуй позже" : "поиск не удался: " + esc(e.message) }; }
     finally { clearInterval(ticker); clearTimeout(killer); }
     if (res) {
       const failed = (res.errors || []).map((e) => SOURCE[e.split(":")[0]] || e.split(":")[0]).filter((v, i, a) => a.indexOf(v) === i);
       const failedNote = failed.length ? `${failed.join(", ")} не ответил${failed.length > 1 ? "и" : ""}` : "";
       const any = res.hits.length || res.author?.hits?.length;
-      const good = failed.length ? { status: esc(failedNote) } : res.note ? { note: esc(res.note) } : null;
-      state = any ? good : { status: esc(`не нашлось в ${SOURCES_LABEL}` + (failedNote ? " · " + failedNote : "")) };
-      const found = { hits: res.hits, author_hits: res.author };
+      const said = [res.note, failedNote].filter(Boolean).join(" · ");
+      // nothing found while a library was down is not "no such book": say what happened instead
+      state = any
+        ? (said ? (failedNote ? { status: esc(said) } : { note: esc(said) }) : null)
+        : { status: esc(failedNote ? `${failedNote}, попробуй ещё раз` : `не нашлось в ${SOURCES_LABEL}`) };
+      const found = { hits: res.hits, author_hits: res.author, query };  // the query stays with the card, to search again from
       if (isShell(x)) wishes = await api("PUT", "/api/wishlist/" + x.id, { ...found, searched: today() }).catch(() => wishes);
       else await saveHits(x.slug, found);
     }
@@ -322,12 +339,13 @@
   }
   // load a picked edition or an own link/file: a shell becomes the book, a ready book gets its text replaced
   async function loadText(x, fields, label) {
-    if (isShell(x)) Object.assign(fields, { title: x.title, author: fields.author || x.author });
+    // the catalog names the book: a picked edition brings its own title, an own file keeps the card's
+    if (isShell(x)) Object.assign(fields, { title: fields.title || x.title, author: fields.author || x.author });
     else Object.assign(fields, { slug: x.slug, replace: "1" });
     const s = await startAdd(fields);
     if (!s) return;
     open = null;
-    if (isShell(x)) { await saveHits(s, { hits: x.hits, author_hits: x.author_hits }); searching.delete(x.id); await api("DELETE", "/api/wishlist/" + x.id).catch(() => {}); }
+    if (isShell(x)) { await saveHits(s, { hits: x.hits, author_hits: x.author_hits, query: queryOf(x) }); searching.delete(x.id); await api("DELETE", "/api/wishlist/" + x.id).catch(() => {}); }
     toast((isShell(x) ? "Загружаю: " : "Заменяю текст: ") + label);
     renderLibrary();
   }
@@ -344,7 +362,7 @@
       if (open && !isShell(x) && !hitsCache[x.slug]) hitsCache[x.slug] = await fetch("/api/hits/" + x.slug).then((r) => r.json()).catch(() => ({}));
       paint();
     },
-    close: () => { open = null; renaming = null; paint(); },
+    close: () => { open = null; renaming = null; finding = null; paint(); },
     rename: (x) => { renaming = idOf(x); paint(); const el = document.querySelector(".card.open .rename-input"); el?.focus(); el?.select(); },
     renameNo: () => { renaming = null; paint(); },
     renameYes: async (x, btn) => {
@@ -367,12 +385,23 @@
     delYes: async (x) => {
       confirmDel = null;
       renaming = null;
+      finding = null;
       if (isShell(x)) { searching.delete(x.id); wishes = await api("DELETE", "/api/wishlist/" + x.id); paint(); return; }
       const r = await api("DELETE", "/api/books/" + x.slug).catch((err) => ({ error: String(err) }));
       if (r.error) toast("Ошибка: " + r.error); else { delete jobs[x.slug]; renderLibrary(); }
     },
-    find: (x) => { if (open !== idOf(x)) { open = idOf(x); paint(); } searchFor(x); },
-    pick: (x, btn) => { const h = JSON.parse(btn.dataset.hit); loadText(x, { author: h.author, translator: h.translator, year: h.year, narrator: h.narrator, text_url: h.urls.join("\n"), audio_url: isShell(x) ? h.audio || "" : "" }, h.title); },
+    find: async (x) => {
+      if (open !== idOf(x)) { await ACTIONS.gear(x); }  // a card searched from the shelf opens with its sections
+      renaming = null; finding = idOf(x); paint();
+      const el = document.querySelector(".card.open .find-input"); el?.focus(); el?.select();
+    },
+    findNo: () => { finding = null; paint(); },
+    findGo: (x, btn) => {
+      const query = btn.closest(".head").querySelector(".find-input").value.trim();
+      finding = null; paint();
+      if (query) searchFor(x, query);
+    },
+    pick: (x, btn) => { const h = JSON.parse(btn.dataset.hit); loadText(x, { title: h.title, author: h.author, translator: h.translator, year: h.year, narrator: h.narrator, text_url: h.urls.join("\n"), audio_url: isShell(x) ? h.audio || "" : "" }, h.title); },
     own: (x, btn) => {
       const row = btn.closest(".own"), url = row.querySelector("[name=text_url]").value.trim(), file = row.querySelector("[name=text_file]").files[0];
       if (!url && !file) { toast("Нужна ссылка на текст или файл"); return; }
@@ -398,12 +427,20 @@
     if (x || card?.classList.contains("add")) ACTIONS[btn.dataset.act]?.(x, btn);
   });
   $("#library").addEventListener("keydown", (e) => {
-    if (!(e.target instanceof Element) || !e.target.classList.contains("rename-input")) return;
-    if (e.key === "Enter") { e.preventDefault(); e.target.closest(".head")?.querySelector('[data-act="renameYes"]')?.click(); }
-    if (e.key === "Escape") { e.stopPropagation(); ACTIONS.renameNo(); }
+    if (!(e.target instanceof Element)) return;
+    const rename = e.target.classList.contains("rename-input"), find = e.target.classList.contains("find-input");
+    if (!rename && !find) return;
+    const act = rename ? "renameYes" : "findGo";
+    if (e.key === "Enter") { e.preventDefault(); e.target.closest(".head")?.querySelector(`[data-act="${act}"]`)?.click(); }
+    if (e.key === "Escape") { e.stopPropagation(); if (rename) ACTIONS.renameNo(); else ACTIONS.findNo(); }
   });
   // "или файл": the label shows the chosen name
-  $("#library").addEventListener("change", (e) => { if (e.target.type === "file") { const l = e.target.closest("label"); if (l) l.firstChild.textContent = e.target.files[0] ? e.target.files[0].name : "или файл"; } });
+  $("#library").addEventListener("change", (e) => {
+    if (e.target.type !== "file") return;
+    const l = e.target.closest("label"), name = e.target.files[0]?.name;
+    if (l) l.querySelector("u").textContent = name || "файл";
+    l?.classList.toggle("chosen", !!name);
+  });
 
   pollJobs().then(renderLibrary).then(() => {
     const wishParam = new URLSearchParams(location.search).get("wish");

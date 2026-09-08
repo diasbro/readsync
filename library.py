@@ -182,7 +182,7 @@ def save_wishlist(items: list[dict]) -> None:
     os.replace(tmp, WISHLIST_FILE)
 
 
-WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url", "searched")
+WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url", "searched", "query")
 WISH_JSON = ("hits", "author_hits")  # the last search result stays with the title until it is loaded
 
 
@@ -232,7 +232,14 @@ def save_hits(slug: str, data: dict) -> None:
     if not SLUG_RE.match(slug) or not (BOOKS / slug).is_dir():
         raise ValueError("unknown book")
     (BOOKS / slug / "hits.json").write_text(
-        json.dumps({"hits": data.get("hits") or [], "author_hits": data.get("author_hits")}, ensure_ascii=False),
+        json.dumps(
+            {
+                "hits": data.get("hits") or [],
+                "author_hits": data.get("author_hits"),
+                "query": str(data.get("query") or ""),  # what was asked for, to search again from
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
