@@ -165,9 +165,8 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
   line-height: 1.4; border: 0; border-bottom: 1px solid var(--accent); background: none; color: var(--fg); padding: 3px 0; outline: none; }
 .card.open .head .find-input::placeholder { color: var(--muted); opacity: .8; }
 .card.open .head.editing .ic { width: 26px; height: 26px; font-size: 14px; }
-/* the loaded edition offers to load itself again: the glyph sits as close to the edge as the text does */
-.card .cand .ic.again { width: 26px; height: 26px; margin-right: -4px; font-size: 14px; color: var(--accent); }
-.card .cand .ic.again:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+/* every row ends with a button of the same width, so the column reads as one edge */
+.card .cand .btn.sm { min-width: 104px; text-align: center; }
 .card.open .sec { margin-top: 16px; }
 .card.open .sec h5 { margin: 0 0 8px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
 .card.open .sec h5 .now { font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 12px; }
