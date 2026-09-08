@@ -99,9 +99,7 @@
   const openable = (h) => LOADABLE.has(kindOf(h));  // a row nothing can be done with is not a choice
   function rowHtml(h, current) {
     const now = current === h.parts.map((p) => p.url).join(" | ");
-    const right = now
-      ? `<button class="ic again" data-act="pick" data-hit='${hitData(h)}' title="Загрузить заново отсюда: текст и название придут с сайта">↻</button>`
-      : `<button class="btn sm" data-act="pick" data-hit='${hitData(h)}'>Загрузить</button>`;
+    const right = `<button class="btn sm" data-act="pick" data-hit='${hitData(h)}'${now ? ' title="Взять текст и название с сайта заново"' : ""}>${now ? "Обновить" : "Загрузить"}</button>`;
     return `<div class="cand${now ? " cur" : ""}"><div class="ct">${esc(h.title)}<div class="cm">${esc(hitMeta(h))}</div></div>${right}</div>`;
   }
   function rowsHtml(rows, current) {
@@ -418,7 +416,8 @@
     stop: (x) => { stopSearch(x); },
     stopJob: async (x) => {
       const r = await api("DELETE", "/api/jobs/" + x.slug).catch((err) => ({ error: String(err) }));
-      if (r.error) toast("Не вышло отменить: " + r.error);
+      if (r.error === "not found") toast("Этот сервер ещё не умеет отменять загрузку, перезапусти его");
+      else if (r.error) toast("Не вышло отменить: " + r.error);
       else delete jobs[x.slug];
       renderLibrary();
     },
