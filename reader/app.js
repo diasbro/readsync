@@ -356,7 +356,11 @@
       const st = sentStart(curSent);
       if (st != null && audio.currentTime - st > 1.5) { audio.currentTime = st; update(true); }
     }
-    return audio.play();
+    // a refused play() is silent otherwise: the button looks dead and nothing says why
+    return audio.play().catch((e) => {
+      $("#loading").hidden = false;
+      $("#loading").textContent = "Не запускается: " + e.message + ". Обнови страницу.";
+    });
   }
   function seek(t) { settling = false; audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); posDirty = true; userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
   // coming back to a paused tab: adopt a newer position/settings written by another browser

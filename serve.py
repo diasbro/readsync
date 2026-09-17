@@ -80,6 +80,12 @@ class Handler(SimpleHTTPRequestHandler):
             return
         sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
 
+    def handle_error(self, *args):
+        """A browser that walks away mid-download is not an error: seeking in an audiobook closes
+        connections all the time, and a traceback per seek buries the log."""
+        if not isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            super().handle_error(*args)
+
     def translate_path(self, path: str) -> str:
         path = path.split("?", 1)[0].split("#", 1)[0]
         if path.startswith("/books/"):
