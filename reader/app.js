@@ -7,7 +7,15 @@
   // `pages.on` means the columns are built and a page can be turned; `hasAudio` means there is a
   // narrator to play. Both are false while the book loads, and every control asks one of them, so
   // nothing answers a key or a click before there is something to answer it with.
-  onApplied = () => scheduleRelayout();
+  // Only a change to the text's metrics moves the columns. A theme or a highlight toggle does not, and
+  // laying out a long book again costs seconds, so those skip it.
+  let metricsKey = "";
+  onApplied = () => {
+    const key = [settings.font, settings.lh, settings.width, settings.family, settings.weight].join("|");
+    if (key === metricsKey) return;
+    metricsKey = key;
+    scheduleRelayout();
+  };
   // ---------------- book state ----------------
   const app = $("#app"); app.hidden = false;
   const audio = $("#audio"), textEl = $("#text");
