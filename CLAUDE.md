@@ -1,90 +1,40 @@
-# readsync — instructions for AI coding agents
+# readsync
 
-Local immersion-reading tool: a browser page plays an audiobook and highlights the sentence and
-word being spoken. Personal, single-user app; macOS first; Python 3.11+; no build step, no framework.
+Local reading tool: a browser page plays an audiobook and highlights the sentence and word being
+spoken; books without audio are read as pages. Personal, single-user; macOS; Python 3.12+; no build
+step, no framework.
 
 ## Layout
-- `pipeline/` — one script per stage: `extract_text.py` (fantasy-worlds and generic HTML),
-  `extract_fb2.py`, `extract_epub.py`, `extract_txt.py`, `extract_pdf.py` (text → `book.json`;
-  the PDF one drops running heads and page numbers, joins hyphenated words and reuses the
-  plain-text block builder), `merge_books.py`
-  (volumes → one book), `anchors.py` (captions → word anchors), `timing_from_anchors.py`
-  (→ `timing.json`), `align.py` (MMS forced alignment, refines `timing.json`), `transcribe.py`
-  (faster-whisper fallback), `add_book.py` (orchestrator: several `--text` = volumes, several
-  `--audio` = parts, audio-only on an existing slug attaches audio; a download that turns out to be
-  a catalog's «книга заблокирована» notice, or anything under 500 words, stops the job before the
-  merge, so an existing book keeps its text). Each takes a book directory.
-- `reader/` — static UI, no build step: `index.html`, `common.js` (helpers + reader settings shared
-  by both pages), `library.js` (library page: one line finds and adds, cards open in place),
-  `app.js` (the reader), `style.css`, `fonts/`.
-- `serve.py` — stdlib HTTP server with Range support; routing only. `library.py` — books on disk,
-  reading state, settings, saved titles, background jobs. `sources/` — one module per text source
-  (`fantasy_worlds.py`, `flibusta.py`, `coollib.py` on top of `opds.py`); `SOURCES` in
-  `sources/__init__.py` is the priority list, a new catalog is a new module plus one entry.
-  API: `/api/books`, `/api/state/<slug>` (per-book reading state, last-writer-wins by `<key>At`
-  timestamps), `/api/settings` (global reader settings), `/api/wishlist` (titles saved without text,
-  with their last search result), `/api/search` (all sources, editions as the catalogs describe
-  them plus the books of an author the query names; the catalogs match a phrase inside a title, so
-  a query no title contains is retried without its first or last word and by its longest words,
-  rows are ranked by how much of the query their title carries and by whether it names their author,
-  the author's own books are ranked the same way, mirrored copies and formats the
-  pipeline cannot open are dropped (their count comes back as `unopenable`, so a card can say the
-  book exists in a file it cannot read), and a query is answered from a 15-minute cache; the only
-  runtime network calls besides the pipeline downloads),
-  `/api/hits/<slug>` (the search result a book was picked from, with the query it came from), `/api/where/<slug>`, `/api/add`
-  (multipart, launches `add_book.py` as a background job; `replace=1` swaps the text of an
-  existing book), `/api/align/<slug>`, `/api/jobs`, `DELETE /api/jobs/<slug>` (call a running
-  pipeline off: the process is stopped and the half-downloaded parts thrown away), `PUT /api/books/<slug>` (rename: only the
-  title line of `book.toml` changes, and the saved query in `hits.json` is forgotten so the search
-  field offers the new name), `DELETE /api/books/<slug>` (the page
-  confirms first).
-- `app/` — the Mac app: `Readsync.swift` (paths, log, running commands), `Payload.swift` (the code
-  it serves and the git update), `Server.swift` (the server as a child process), `Browser.swift`
-  (opening the library, reusing a tab only where permission was already given), `Menu.swift` (the
-  menu bar item), `main.swift`, `build.sh` (`make app`, `make dmg`). A launcher, not a copy of the
-  project: it keeps the code in `~/Library/Application Support/readsync/src` and updates it with
-  git, so a new disk image is only needed when the launcher itself changes. The bundle carries both
-  architectures and a Python of its own (python-build-standalone, with beautifulsoup4, lxml and
-  pypdf), so nothing is installed on the Mac it lands on. Books live beside that code (or in an
-  existing checkout's `books/`), never inside it; `READSYNC_BOOKS` and `READSYNC_PYTHON` are how the
-  server and the pipeline are told where they are, and both honour them.
-- `books/` — all per-book data and reading state; nothing under it is tracked by git.
-- `tests/` — pytest for the pipeline. `docs/` — design notes and ADRs.
+- `pipeline/` — one script per stage, `add_book.py` runs them; each takes a book directory. Timing
+  comes from caption anchors first and is optionally refined by MMS alignment in short windows (a
+  whole book does not fit in one alignment pass).
+- `serve.py` routing only; `library.py` books, state, jobs; `sources/` one module per catalog, the
+  priority list in `sources/__init__.py`.
+- `reader/` — static UI: `common.js` shared, `library.js` library page, `app.js` reader.
+- `app/` — Mac menu-bar launcher. It keeps the code in `~/Library/Application Support/readsync/src`
+  and updates it with git; `READSYNC_BOOKS` and `READSYNC_PYTHON` tell the server and the pipeline
+  where books and Python are.
+- `books/` — per-book data and reading state, never tracked.
 
 ## Commands
-- Setup: `make setup` (venv + `pip install -e ".[dev]"`; `pyproject.toml` is the only dependency list)
-- Run: `make serve` (`.venv/bin/python serve.py`) → http://127.0.0.1:8765
-- Test/lint: `make test`, `make lint` (ruff + pytest + `node --check reader/app.js`)
-- Add a book: `make add-book slug=... text=... audio=...`
+`make setup`, `make serve` (http://127.0.0.1:8765), `make test`, `make lint`, `make dmg`.
 
 ## Conventions
 - Python: ruff (line length 120), type hints, `from __future__ import annotations`, stdlib first.
-- JS: no dependencies, no bundler; one file per page, each an IIFE over the globals of
-  `common.js`. Cards, panels and actions in `library.js` are small functions and a `data-act`
-  table: add a section or an action without touching the rest. Reading state and settings live
-  on the server (`/api/state`, `/api/settings`); `localStorage` (`rs:*` keys via `store.get/set`)
-  is only a cache and must never be the sole copy of anything.
-- Timing model: `timing.json.words[i] = [block, charStart, charEnd, t0, t1]`, monotonic in `t0`.
-  Everything in the reader is derived from it; do not add a second time source.
-- Position model: audio books keep `pos` (seconds); page mode and text-only books keep `sent`
-  (global sentence index). Switching modes converts through the sentence, never through pixels.
-  In page mode the sentence is the anchor and page numbers are derived from it, never the other way
-  round: a window resize, a font change or a webfont arriving re-derives the page and leaves `sent`
-  alone. Spread positions are measured in fractional pixels (`clientWidth` rounds, and over hundreds
-  of spreads the rounding walks the text out of the column).
-- Mode-specific behaviour (dimming, highlights, autoscroll, hide-UI, pause-on-leave) belongs to
-  audio mode only; page mode and text-only books must never inherit it.
-- Page mode is CSS multi-column with `column-fill: auto` and horizontal `scrollLeft` steps; keep
-  it that way (no per-page DOM splitting).
-- Data files are large: never `cat` `book.json`/`timing.json`/`*.json3`; inspect with Python.
-- The reader must stay light at runtime (10 Hz sync loop, no per-frame DOM work).
-- Heavy CPU work belongs in the pipeline, runs once per book, and defaults to low priority.
-- Branch names use dashes, never slashes. Commit messages follow Conventional Commits
-  (`feat:`, `fix:`, `docs:`, `chore:`, optional scope), subject only unless the why is not obvious.
+- JS: no dependencies; each page is an IIFE over the globals of `common.js`; library actions go
+  through the `data-act` table.
+- Reading state and settings live on the server; `localStorage` is only a cache.
+- `timing.json` is the only time source: `words[i] = [block, charStart, charEnd, t0, t1]`,
+  monotonic in `t0`.
+- Position: audio keeps `pos` (seconds), page mode keeps `sent` (sentence index). Page numbers are
+  derived from the sentence, never the reverse, and spreads are measured in fractional pixels.
+- Page mode is CSS multi-column with `scrollLeft` steps, no per-page DOM. Audio-mode behaviour
+  (dimming, highlights, autoscroll, hide-UI) never applies to it.
+- The reader stays light at runtime; heavy work belongs in the pipeline.
+- `book.json` and `timing.json` are large: inspect them with Python, never print them whole.
+- Branch names use dashes; commits follow Conventional Commits.
 
 ## Boundaries
-- Never commit book text, audio or reading state; sources are recorded in each `book.toml`.
-- No analytics, no accounts, no network calls at runtime beyond the book search and the
-  pipeline downloads the user asked for. Everything else is local.
-- Do not add features "because readers usually have them": only what helps reading and focus,
-  each behind a toggle.
+- Never commit book text, audio or reading state.
+- No network at runtime beyond the book search and the downloads the user asked for.
+- Only features that help reading and focus, each behind a toggle.
