@@ -15,6 +15,8 @@ CACHE="$BUILD/cache"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
 PAYLOAD_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
 REPO=$(git remote get-url origin 2>/dev/null || echo "")
+# the app updates itself from this address on Macs that have no GitHub key: always https, never ssh
+REPO=$(echo "$REPO" | sed -E 's#^git@github\.com:#https://github.com/#')
 PY_TAG=20260901          # python-build-standalone release
 PY_VERSION=3.13.15
 PY_SHORT=3.13
