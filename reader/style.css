@@ -183,7 +183,6 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .card.open .own .btn { white-space: nowrap; }
 .card .cand.cur { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .card .cand .now { font-size: 11px; color: var(--accent); white-space: nowrap; }
-.card .tag.done { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
 .card .status { display: flex; align-items: center; gap: 6px; }
 .card .status.warn::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #d0902e; flex: none; }
 .card .status .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }

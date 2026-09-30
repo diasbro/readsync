@@ -89,7 +89,7 @@
   const shelfOf = (b) => (b.state.shelf ? b.state.shelf : b.state.finished ? "library" : b.state.seconds > READING_SEC ? "reading" : "library");
   const sourceOf = (url) => { const h = (url || "").split("|")[0].trim(); for (const k in SOURCE) if (h.includes(k.replace("-", "-"))) return SOURCE[k]; return h && !isUrl(h) ? "файл" : h ? new URL(h).hostname.replace(/^www\./, "") : ""; };
   const kb = (n) => (n == null ? "" : n >= 1000 ? (n / 1024).toFixed(1).replace(".", ",") + " МБ" : n + " КБ");
-  const facts = (b) => [b.author, b.translator ? "пер. " + b.translator : null, b.year, b.has_audio && b.narrator ? "читает " + b.narrator : null].filter(Boolean).join(" · ");
+  const facts = (b) => [b.author, b.translator ? "пер. " + b.translator : null, b.year, b.has_audio ? (b.narrator ? "читает " + b.narrator : "с аудио") : null].filter(Boolean).join(" · ");
 
   // ---- search result rows: one row per edition, exactly as the catalog describes it ----
   const kindOf = (h) => h.parts?.[0]?.kind || "";  // a row saved by an older version may have no parts
@@ -189,12 +189,11 @@
     const meta = [facts(b), !b.ready ? (b.building ? "загружается…" : failed ? null : "не загрузилась до конца") : b.building ? "заменяю…" : null].filter(Boolean).join(" · ");
     const fail = failed ? `<div class="m status warn">не загрузилось: ${esc(job.log[job.log.length - 1] || "код " + job.exit)}</div>` : "";
     const frag = b.fragment_note ? `<div class="m status warn">в конце текста «${esc(b.fragment_note)}»</div>` : "";
-    const tags = b.ready ? '<span class="tag">текст</span>' + (b.has_audio ? '<span class="tag">аудио</span>' : "") + (st.finished ? '<span class="tag done">прочитано</span>' : "") : "";
     const where = !b.ready ? "" : st.finished ? "прочитано целиком" : b.has_audio ? (pct ? `прочитано ${pct}% · ${fmt(pos)}` : "не начато") : (st.sent ? `прочитано ${pct}%` : "не начато");
     const cover = b.cover ? `<img class="cover" src="/books/${esc(b.slug)}/${esc(b.cover)}" alt="">` : `<div class="cover empty">${esc((b.title || b.slug).slice(0, 1))}</div>`;
     const href = b.ready ? "?book=" + esc(b.slug) : "#";
     return `<div class="card" data-key="${esc(b.slug)}"><a class="cover-link" href="${href}">${cover}</a>
-      <div class="body"><a href="${href}" class="tlink"><div class="t">${esc(b.title || b.slug)}${tags}</div></a><div class="m${meta ? "" : " empty"}">${esc(meta)}</div>${fail}${frag}
+      <div class="body"><a href="${href}" class="tlink"><div class="t">${esc(b.title || b.slug)}</div></a><div class="m${meta ? "" : " empty"}">${esc(meta)}</div>${fail}${frag}
       <div class="bar${pct ? "" : " empty"}"><i style="width:${pct}%"></i></div><div class="m${pct ? "" : " empty"}">${where}</div></div>${actsHtml(b)}</div>`;
   }
   function shellHtml(w) {
