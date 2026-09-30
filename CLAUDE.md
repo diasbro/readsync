@@ -26,14 +26,17 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   with their last search result), `/api/search` (all sources, editions as the catalogs describe
   them plus the books of an author the query names; the catalogs match a phrase inside a title, so
   a query no title contains is retried without its first or last word and by its longest words,
-  rows are ranked by how much of the query their title carries, mirrored copies and formats the
-  pipeline cannot open are dropped, and a query is answered from a 15-minute cache; the only
+  rows are ranked by how much of the query their title carries and by whether it names their author,
+  the author's own books are ranked the same way, mirrored copies and formats the
+  pipeline cannot open are dropped (their count comes back as `unopenable`, so a card can say the
+  book exists in a file it cannot read), and a query is answered from a 15-minute cache; the only
   runtime network calls besides the pipeline downloads),
   `/api/hits/<slug>` (the search result a book was picked from, with the query it came from), `/api/where/<slug>`, `/api/add`
   (multipart, launches `add_book.py` as a background job; `replace=1` swaps the text of an
   existing book), `/api/align/<slug>`, `/api/jobs`, `DELETE /api/jobs/<slug>` (call a running
   pipeline off: the process is stopped and the half-downloaded parts thrown away), `PUT /api/books/<slug>` (rename: only the
-  title line of `book.toml` changes), `DELETE /api/books/<slug>` (the page
+  title line of `book.toml` changes, and the saved query in `hits.json` is forgotten so the search
+  field offers the new name), `DELETE /api/books/<slug>` (the page
   confirms first).
 - `app/` — the Mac app: `Readsync.swift` (paths, log, running commands), `Payload.swift` (the code
   it serves and the git update), `Server.swift` (the server as a child process), `Browser.swift`
@@ -65,6 +68,10 @@ word being spoken. Personal, single-user app; macOS first; Python 3.11+; no buil
   Everything in the reader is derived from it; do not add a second time source.
 - Position model: audio books keep `pos` (seconds); page mode and text-only books keep `sent`
   (global sentence index). Switching modes converts through the sentence, never through pixels.
+  In page mode the sentence is the anchor and page numbers are derived from it, never the other way
+  round: a window resize, a font change or a webfont arriving re-derives the page and leaves `sent`
+  alone. Spread positions are measured in fractional pixels (`clientWidth` rounds, and over hundreds
+  of spreads the rounding walks the text out of the column).
 - Mode-specific behaviour (dimming, highlights, autoscroll, hide-UI, pause-on-leave) belongs to
   audio mode only; page mode and text-only books must never inherit it.
 - Page mode is CSS multi-column with `column-fill: auto` and horizontal `scrollLeft` steps; keep
