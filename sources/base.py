@@ -97,7 +97,15 @@ def title_score(query: str, words: list[str], row: dict) -> int:
     asked = [w for w in want.split() if w not in STOP]
     named = [w for w in said if w not in STOP]
     covered = 5 if named and all(any(same_word(t, w) for w in asked) for t in named) else 0
-    return exact + covered + 2 * in_title + matched(words, row)
+    # nothing the query said is left unaccounted for, title or author alike: «Виногродский книга
+    # перемен» is his book, not another author's book of that name
+    answered = 6 if answers_whole_query(words, row) else 0
+    return exact + covered + answered + 2 * in_title + matched(words, row)
+
+
+def answers_whole_query(words: list[str], row: dict) -> bool:
+    """Whether the row names every meaningful word of the query, in its title, author or translator."""
+    return bool(words) and matched(words, row) == len(words)
 
 
 def roman_to_int(s: str) -> int:
