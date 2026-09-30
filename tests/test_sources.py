@@ -208,3 +208,24 @@ def test_a_book_only_in_a_format_we_cannot_open_is_counted(monkeypatch):
     monkeypatch.setattr("sources.SOURCES", [Catalog()])
     res = sources.search_text("властелин колец")
     assert res["hits"] == [] and res["unopenable"] == 1
+
+
+def test_volume_numbers_do_not_share_a_cached_answer(monkeypatch):
+    """«Книга 1» and «Книга 2» normalise to the same title, but they are different questions."""
+    asked = []
+
+    class Catalog:
+        name = "flibusta"
+
+        def search(self, query):
+            asked.append(query)
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr("sources.SOURCES", [Catalog()])
+    sources.search_text("Троецарствие, том 1")
+    sources.search_text("Троецарствие, том 2")
+    assert "Троецарствие, том 2" in asked

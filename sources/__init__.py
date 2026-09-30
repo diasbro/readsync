@@ -94,7 +94,9 @@ def search_text(query: str) -> dict:
     nothing; then shorter searches follow (the first two words, then the longest ones) and rows that
     name at least two words of the query are kept, closest first. Rows are editions as the catalogs
     describe them; the reader picks."""
-    key = norm_title(query)
+    # the query as typed, less case and spacing: norm_title drops volume numbers, and «Книга 1» and
+    # «Книга 2» must not share an answer
+    key = " ".join(query.lower().replace("ё", "е").split())
     cached = CACHE.get(key)
     if cached and time.time() - cached[0] < CACHE_SECONDS:
         return cached[1]  # trying another wording is the usual loop: do not ask the mirrors again for the same one
