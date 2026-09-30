@@ -55,16 +55,19 @@ def ask(queries: list[str], author_query: str = "") -> tuple[list[dict], list[di
     return hits, by_author, author_name, errors
 
 
-def unique(hits: list[dict]) -> list[dict]:
+def unique(hits: list[dict], dropped: list[int] | None = None) -> list[dict]:
     """One row per book: the same link comes back from several terms, and Coollib largely mirrors
     Flibusta, so a file that matches down to its size is the same file. Only formats the pipeline
-    can open stay: a row nothing can be done with is noise in the list."""
+    can open stay: a row nothing can be done with is noise in the list. `dropped` counts the rows
+    thrown out for their format alone, so the reader can be told the book is there but unreadable."""
     links: set[tuple[str, str]] = set()
     files: set[tuple] = set()
     out = []
     order = {n: i for i, n in enumerate(SOURCE_ORDER)}
     for h in sorted(hits, key=lambda h: order.get(h.get("source", ""), 9)):  # the mirror kept is the preferred one
         if h.get("kind") not in OPENS:
+            if dropped is not None and (h.get("source", ""), h.get("url", "")) not in links:
+                dropped[0] += 1
             continue
         link = (h.get("source", ""), h.get("url", ""))
         same = (
@@ -114,12 +117,17 @@ def search_text(query: str) -> dict:
         author_name = author_name or by_query_author[0]["author"]
         by_author = by_query_author + by_author
         hits = [h for h in hits if h not in by_query_author]
-    rows = editions(unique(hits))
+    dropped = [0]
+    rows = editions(unique(hits, dropped))
     rows.sort(key=lambda r: -title_score(query, words, r))  # closest to what was typed first, year decides ties
+    # the author's own shelf is long: the books whose titles answer the query stand at its front
+    by_author_rows = editions(unique(by_author, dropped))
+    by_author_rows.sort(key=lambda r: -title_score(query, words, r))
     out = {
         "note": note if rows else "",
         "hits": rows[:30],
-        "author": {"name": author_name, "hits": editions(unique(by_author))[:80]} if author_name else None,
+        "author": {"name": author_name, "hits": by_author_rows[:80]} if author_name else None,
+        "unopenable": dropped[0],  # found, but in a format the pipeline cannot turn into a book
         "errors": errors,
     }
     if not errors:  # a failed round is worth retrying, a good one is not

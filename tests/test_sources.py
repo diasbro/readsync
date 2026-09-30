@@ -98,6 +98,7 @@ def test_search_falls_back_to_shorter_terms(monkeypatch):
         def author_books(self, query):
             return "", []
 
+    sources.CACHE.clear()
     monkeypatch.setattr("sources.SOURCES", [Catalog()])
     res = sources.search_text("Книга перемен как технология принятия решений")
     assert asked[0] == "Книга перемен как технология принятия решений"  # the phrase is tried first
@@ -125,6 +126,7 @@ def test_two_word_query_needs_both_words(monkeypatch):
         def author_books(self, query):
             return "", []
 
+    sources.CACHE.clear()
     monkeypatch.setattr("sources.SOURCES", [Catalog()])
     res = sources.search_text("властелин колец")
     assert [r["title"] for r in res["hits"]] == ["Властелин колец"]
@@ -145,3 +147,64 @@ def test_a_title_the_query_covers_outranks_a_book_about_it():
     novel = {"title": "Война и мир", "author": "Толстой Лев Николаевич", "translator": ""}
     about = {"title": "Альбом акварелей к роману графа Л.Н. Толстого «Война и мир»", "author": "", "translator": ""}
     assert base.title_score("Толстой Война и мир", words, novel) > base.title_score("Толстой Война и мир", words, about)
+
+
+def test_the_author_the_query_names_outranks_a_namesake_title():
+    """«Виногродский книга перемен» wants his book, not somebody else's book of the same name."""
+    q = "Виногродский книга перемен"
+    words = base.terms(q)
+    his = {"title": "Знаки Книги Перемен", "author": "Виногродский Бронислав Брониславович", "translator": ""}
+    namesake = {"title": "Книга перемен", "author": "Вересов Дмитрий", "translator": ""}
+    assert base.answers_whole_query(words, his)
+    assert not base.answers_whole_query(words, namesake)
+    assert base.title_score(q, words, his) > base.title_score(q, words, namesake)
+
+
+def test_a_surname_alone_does_not_answer_a_query_about_a_title():
+    """The bonus is for leaving nothing of the query unaccounted for, not for a name that half-fits."""
+    words = base.terms("Дюна Герберт")
+    other = {"title": "Стальная крыса", "author": "Гербертов Иван", "translator": ""}
+    right = {"title": "Дюна", "author": "Герберт Фрэнк", "translator": ""}
+    assert not base.answers_whole_query(words, other)
+    assert base.answers_whole_query(words, right)
+    assert base.title_score("Дюна Герберт", words, right) > base.title_score("Дюна Герберт", words, other)
+
+
+def test_the_authors_own_shelf_answers_the_query_first(monkeypatch):
+    """An author has dozens of books: the ones the query asks about come first, not the alphabet."""
+
+    class Catalog:
+        name = "flibusta"
+
+        def search(self, query):
+            return []
+
+        def author_books(self, query):
+            # alphabetically «Антология» leads; only the score can put «Книга Перемен» first
+            return "Виногродский Бронислав Брониславович", [
+                base.hit(self.name, "Антология даосской философии", "/b/1/fb2", "fb2", author="Виногродский Бронислав"),
+                base.hit(self.name, "Знаки Книги Перемен", "/b/2/fb2", "fb2", author="Виногродский Бронислав"),
+            ]
+
+    sources.CACHE.clear()
+    monkeypatch.setattr("sources.SOURCES", [Catalog()])
+    res = sources.search_text("Виногродский книга перемен")
+    assert [r["title"] for r in res["author"]["hits"]] == ["Знаки Книги Перемен", "Антология даосской философии"]
+
+
+def test_a_book_only_in_a_format_we_cannot_open_is_counted(monkeypatch):
+    """Nothing to show is not the same as nothing found: the card says the file is there but unreadable."""
+
+    class Catalog:
+        name = "flibusta"
+
+        def search(self, query):
+            return [base.hit(self.name, "Властелин колец", "/b/1/djvu", "djvu")]
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr("sources.SOURCES", [Catalog()])
+    res = sources.search_text("властелин колец")
+    assert res["hits"] == [] and res["unopenable"] == 1
