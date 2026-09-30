@@ -70,10 +70,18 @@
 
   <button id="return-pill" class="pill" hidden>↧ вернуться к чтению</button>
   <footer id="pager" class="pager" hidden>
-    <button class="ctl" id="pg-prev" title="Назад (←)">‹</button>
-    <span id="pg-info"></span>
-    <button class="ctl" id="pg-next" title="Вперёд (→, пробел)">›</button>
-    <button class="ctl" id="pg-sprint" title="Спринт-таймер">⏱</button>
+    <div class="pg-side" id="pg-read"></div>
+    <div class="pg-nav">
+      <button class="ctl" id="pg-prev" title="Назад (←)">‹</button>
+      <label class="pg-at" title="Номер страницы: впиши и нажми ↵">
+        <input id="pg-cur" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Страница, ↵ чтобы перейти">
+        <span class="pg-of">из <span id="pg-total">1</span></span>
+      </label>
+      <button class="ctl" id="pg-next" title="Вперёд (→, пробел)">›</button>
+    </div>
+    <div class="pg-side pg-right">
+      <button class="ctl" id="pg-sprint" title="Спринт-таймер">⏱</button>
+    </div>
   </footer>
   <div id="loading" class="center-msg">Загрузка…</div>
 
