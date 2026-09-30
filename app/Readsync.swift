@@ -46,21 +46,30 @@ func run(_ tool: String, _ args: [String], cwd: URL? = nil, timeout: TimeInterva
     if let cwd { task.currentDirectoryURL = cwd }
     var env = ProcessInfo.processInfo.environment
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    // nothing here may wait for a person: git and ssh fail instead of asking for a password or a host key
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
     task.environment = env
     let pipe = Pipe()
     task.standardOutput = pipe
     task.standardError = pipe
     do { try task.run() } catch { return (-1, "\(error)") }
-    let deadline = Date().addingTimeInterval(timeout)
+    // read on the side: reading blocks while the tool is silent, and the deadline must still hold then
     var data = Data()
-    while task.isRunning && Date() < deadline {
-        data += pipe.fileHandleForReading.availableData
-        usleep(50_000)
+    let read = DispatchGroup()
+    read.enter()
+    DispatchQueue.global(qos: .utility).async {
+        data = pipe.fileHandleForReading.readDataToEndOfFile()
+        read.leave()
     }
-    if task.isRunning { task.terminate() }
-    task.waitUntilExit()
-    data += pipe.fileHandleForReading.readDataToEndOfFile()
-    return (task.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+    let exited = DispatchSemaphore(value: 0)
+    task.terminationHandler = { _ in exited.signal() }
+    if exited.wait(timeout: .now() + timeout) == .timedOut {
+        task.terminate()
+        if exited.wait(timeout: .now() + 3) == .timedOut { kill(task.processIdentifier, SIGKILL) }
+    }
+    _ = read.wait(timeout: .now() + 5)
+    return (task.isRunning ? -1 : task.terminationStatus, String(data: data, encoding: .utf8) ?? "")
 }
 
 /// The Python inside the app, for this processor. Nothing is installed on the Mac it runs on.
@@ -82,7 +91,7 @@ func findPython() -> String? {
         "/usr/local/bin/python3", "/usr/bin/python3",
     ].compactMap { $0 }
     for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-        let (code, out) = run(path, ["-c", "import sys; print(sys.version_info >= (3, 11))"], timeout: 10)
+        let (code, out) = run(path, ["-c", "import sys; print(sys.version_info >= (3, 12))"], timeout: 10)
         if code == 0 && out.contains("True") { return path }
     }
     return nil

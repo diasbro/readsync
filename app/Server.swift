@@ -42,7 +42,10 @@ final class Server {
     func stop() {
         if let task, task.isRunning {
             task.terminate()
-            task.waitUntilExit()
+            // this runs on the main thread: a server that will not stop gets three seconds, not forever
+            let deadline = Date().addingTimeInterval(3)
+            while task.isRunning && Date() < deadline { usleep(20_000) }
+            if task.isRunning { kill(task.processIdentifier, SIGKILL) }
             log("server stopped")
         }
         task = nil

@@ -129,19 +129,23 @@ enum Payload {
 
     /// Is there anything new upstream? Asked quietly in the background, so the menu can say so
     /// without the reader ever going to look.
-    static func behindBy() -> Int {
-        guard isCheckout, let git = gitPath else { return 0 }
-        if run(git, ["fetch", "--quiet", "origin", "main"], cwd: srcDir, timeout: 120).0 != 0 { return 0 }
+    static func behindBy() -> Int { behind() ?? 0 }
+
+    /// How many commits upstream is ahead, or nil when that could not be learned (no checkout yet,
+    /// no git, no network).
+    static func behind() -> Int? {
+        guard isCheckout, let git = gitPath else { return nil }
+        if run(git, ["fetch", "--quiet", "origin", "main"], cwd: srcDir, timeout: 120).0 != 0 { return nil }
         let out = run(git, ["rev-list", "--count", "HEAD..origin/main"], cwd: srcDir).1
-        return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        return Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// The importers need beautifulsoup4, lxml and pypdf. The app carries them; this only matters
     /// on a Mac whose own Python is standing in, or after an update that asked for something new.
     static func ensureTools(python: String, done: @escaping (Bool) -> Void) {
         let check = ["-c", "import bs4, lxml.etree, pypdf"]
-        if run(python, check, timeout: 30).0 == 0 { done(true); return }
         DispatchQueue.global(qos: .utility).async {
+            if run(python, check, timeout: 30).0 == 0 { DispatchQueue.main.async { done(true) }; return }
             log("installing the import tools next to the books")
             let (code, out) = run(
                 python,

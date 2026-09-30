@@ -26,7 +26,7 @@ final class Menu: NSObject, NSApplicationDelegate {
         python = findPython()
         guard let python else {
             alert(
-                "Нужен Python 3.11 или новее",
+                "Нужен Python 3.12 или новее",
                 "Поставь его и запусти readsync снова:\n\nbrew install python@3.13")
             NSApp.terminate(nil)
             return
@@ -160,15 +160,27 @@ final class Menu: NSObject, NSApplicationDelegate {
     }
 
     /// Git takes as long as the network takes, so it runs off the main thread: the menu keeps opening
-    /// and says «Обновление…» meanwhile. A window appears only when something went wrong.
+    /// and shows what is going on in grey. «Проверка обновлений…» while it is not yet known whether
+    /// there is anything; «Обновление…» only once there is. A window appears only when something failed.
     @objc private func update() {
         guard busy == nil else { return }
-        busy = "Обновление…"
-        behind = 0
+        let known = behind > 0
+        busy = known ? "Обновление…" : "Проверка обновлений…"
         build()
         gitQueue.async {
+            // a check that could not reach upstream falls through to the update, which says why it failed;
+            // a copy of the code that is not a checkout yet goes straight to the update that makes it one
+            if !known, let count = Payload.behind() {
+                DispatchQueue.main.async {
+                    self.busy = count > 0 ? "Обновление…" : nil
+                    self.behind = count
+                    self.build()
+                }
+                if count == 0 { log("already up to date"); return }
+            }
             let result = Payload.update()
             DispatchQueue.main.async {
+                self.behind = 0
                 self.busy = nil
                 switch result {
                 case .updated(let what):
