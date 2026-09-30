@@ -114,9 +114,14 @@
   }
   function resultsHtml(found, current) {
     // rows saved before the reader knew a format stay in hits.json: they are filtered out here too
-    const hits = (found?.hits || []).filter(openable), author = found?.author_hits;
-    const byAuthor = (author?.hits || []).filter(openable);
-    if (!hits.length && !byAuthor.length) return "";
+    const raw = found?.hits || [], author = found?.author_hits, rawByAuthor = author?.hits || [];
+    const hits = raw.filter(openable), byAuthor = rawByAuthor.filter(openable);
+    if (!hits.length && !byAuthor.length) {
+      // the book is on the shelf, just not in a file the pipeline can read: that is worth saying,
+      // an empty card reads as «нет такой книги»
+      const shut = (found?.unopenable || 0) + (raw.length - hits.length) + (rawByAuthor.length - byAuthor.length);
+      return shut ? '<div class="m status warn">нашлось, но только в форматах, которые не открыть</div>' : "";
+    }
     return `<div class="cands">${hits.length ? rowsHtml(hits, current) : ""}${byAuthor.length ? `<div class="hd">у автора ${esc(author.name)}</div>${rowsHtml(byAuthor, current)}` : ""}</div>`;
   }
 
@@ -230,13 +235,16 @@
     $("#library-list").innerHTML = rest.map((x) => x.html).join("") + (query ? addRowHtml(any) : !any ? '<p class="muted small">Пока пусто. Напиши название книги в строке выше, вставь ссылку или перетащи файл.</p>' : "");
     restoreDraft(draft);
   }
-  // a repaint (a finished job, a search coming back) must not wipe a name that is being typed
+  // a repaint (a finished job, a search coming back) must not wipe a name that is being typed.
+  // The field is remembered by name: a half-typed title must not reappear in the search line.
   function keepDraft() {
     const el = document.querySelector(".rename-input, .find-input");
-    return el && { value: el.value, from: el.selectionStart, to: el.selectionEnd, focused: document.activeElement === el };
+    if (!el) return null;
+    const on = el.classList.contains("rename-input") ? ".rename-input" : ".find-input";
+    return { on, value: el.value, from: el.selectionStart, to: el.selectionEnd, focused: document.activeElement === el };
   }
   function restoreDraft(d) {
-    const el = d && document.querySelector(".rename-input, .find-input");
+    const el = d && document.querySelector(d.on);
     if (!el) return;
     el.value = d.value;
     if (d.focused) { el.focus(); el.setSelectionRange(d.from, d.to); }
@@ -316,21 +324,26 @@
     searching.delete(idOf(x));
     paint();
   }
+  // Ask the catalogs. The field the query was typed in stays open the whole time: a search that
+  // found the wrong book is answered by changing a word and asking again, which is the common case,
+  // so a second query simply calls the first one off instead of being dropped on the floor.
   async function searchFor(x, query) {
     const id = idOf(x);
     query = (query || queryOf(x)).trim();
-    if (searching.get(id)?.busy || !query) return;
+    if (!query) return;
+    if (searching.get(id)?.busy) stopSearch(x);
     const t0 = Date.now();
     const ctrl = new AbortController();
     const state0 = { busy: true, t0, ctrl };
     searching.set(id, state0); paint();
     const ticker = setInterval(() => { const el = document.querySelector(`.card[data-key="${CSS.escape(id)}"] .secs`); if (el) el.textContent = Math.round((Date.now() - t0) / 1000); }, 1000);
-    const killer = setTimeout(() => ctrl.abort(), 90000);
+    const killer = setTimeout(() => ctrl.abort(), 150000);  // two rounds of 45 s on the server, plus the reading
     let res = null, state = null;
     try { res = await fetch("/api/search?q=" + q(query), { signal: ctrl.signal }).then((r) => r.json()); if (res.error) throw new Error(res.error); }
-    catch (e) { res = null; state = state0.stopped ? null : { status: e.name === "AbortError" ? "библиотеки не ответили за полторы минуты, попробуй позже" : "поиск не удался: " + esc(e.message) }; }
+    catch (e) { res = null; state = state0.stopped ? null : { status: e.name === "AbortError" ? "библиотеки не ответили, попробуй позже" : "поиск не удался: " + esc(e.message) }; }
     finally { clearInterval(ticker); clearTimeout(killer); }
     if (res && !state0.stopped) {
+      // the reader may have asked again while this was in flight: only the live search saves
       const failed = (res.errors || []).map((e) => SOURCE[e.split(":")[0]] || e.split(":")[0]).filter((v, i, a) => a.indexOf(v) === i);
       const failedNote = failed.length ? `${failed.join(", ")} не ответил${failed.length > 1 ? "и" : ""}` : "";
       const any = res.hits.length || res.author?.hits?.length;
@@ -340,14 +353,18 @@
         ? (said ? (failedNote ? { status: esc(said) } : { note: esc(said) }) : null)
         : { status: esc(failedNote ? `${failedNote}, попробуй ещё раз` : `не нашлось в ${SOURCES_LABEL}`) };
       const found = { hits: res.hits, author_hits: res.author, query };  // the query stays with the card, to search again from
-      if (isShell(x)) wishes = await api("PUT", "/api/wishlist/" + x.id, { ...found, searched: today() }).catch(() => wishes);
-      else await saveHits(x.slug, found);
+      if (searching.get(id) === state0) {
+        if (isShell(x)) wishes = await api("PUT", "/api/wishlist/" + x.id, { ...found, searched: today() }).catch(() => wishes);
+        else await saveHits(x.slug, found);
+      }
     }
     if (state0.stopped) return;  // called off: the card is already back to how it was
-    if (finding === id) finding = null;  // the answer is here, the query goes back to being the title
     if (state) searching.set(id, state); else searching.delete(id);
     paint();
   }
+  // the rename and search fields belong to the card they were opened on: they close with it, or the
+  // next card to open shows a field for a name nobody is editing
+  const closeCard = () => { open = renaming = finding = null; };
   // load a picked edition or an own link/file: a shell becomes the book, a ready book gets its text replaced
   async function loadText(x, fields) {
     // the catalog names the book: a picked edition brings its own title, an own file keeps the card's
@@ -355,7 +372,7 @@
     else Object.assign(fields, { slug: x.slug, replace: "1" });
     const s = await startAdd(fields);
     if (!s) return;
-    open = null;
+    closeCard();
     if (isShell(x)) { await saveHits(s, { hits: x.hits, author_hits: x.author_hits, query: queryOf(x) }); searching.delete(x.id); await api("DELETE", "/api/wishlist/" + x.id).catch(() => {}); }
     renderLibrary();
   }
@@ -368,11 +385,13 @@
     read: async (x) => { await api("PUT", `/api/state/${x.slug}`, { shelf: "reading", shelfAt: Date.now() }); renderLibrary(); },
     pause: async (x) => { await api("PUT", `/api/state/${x.slug}`, { shelf: "library", shelfAt: Date.now() }); renderLibrary(); },
     gear: async (x) => {
-      open = open === idOf(x) ? null : idOf(x);
+      const to = open === idOf(x) ? null : idOf(x);
+      closeCard();
+      open = to;
       if (open && !isShell(x) && !hitsCache[x.slug]) hitsCache[x.slug] = await fetch("/api/hits/" + x.slug).then((r) => r.json()).catch(() => ({}));
       paint();
     },
-    close: () => { open = null; renaming = null; finding = null; paint(); },
+    close: () => { closeCard(); paint(); },
     rename: (x) => { renaming = idOf(x); paint(); const el = document.querySelector(".card.open .rename-input"); el?.focus(); el?.select(); },
     renameNo: () => { renaming = null; paint(); },
     renameYes: async (x, btn) => {
@@ -383,10 +402,13 @@
       if (!title || title === x.title) { paint(); return; }
       // the old search result belongs to the old name: it goes, so the card asks to search again
       const r = isShell(x)
-        ? await api("PUT", "/api/wishlist/" + x.id, { title, searched: "", hits: [], author_hits: null }).catch((err) => ({ error: String(err) }))
+        ? await api("PUT", "/api/wishlist/" + x.id, { title, searched: "", query: "", hits: [], author_hits: null }).catch((err) => ({ error: String(err) }))
         : await api("PUT", "/api/books/" + x.slug, { title }).catch((err) => ({ error: String(err) }));
       if (r.error) { toast("Ошибка: " + r.error); paint(); return; }
       if (isShell(x)) wishes = r;
+      // the query that found the old name goes with it; the server clears the saved copy, this
+      // drops the one in hand so the field offers the new name at once
+      if (hitsCache[x.slug]) hitsCache[x.slug].query = "";
       searching.delete(idOf(x));
       renderLibrary();
     },
@@ -394,19 +416,22 @@
     delNo: () => { confirmDel = null; paint(); },
     delYes: async (x) => {
       confirmDel = null;
-      renaming = null;
-      finding = null;
-      if (isShell(x)) { searching.delete(x.id); wishes = await api("DELETE", "/api/wishlist/" + x.id); paint(); return; }
+      renaming = finding = null;
+      stopSearch(x);  // nothing left to answer: the round in flight must not write to a card that is gone
+      if (isShell(x)) { wishes = await api("DELETE", "/api/wishlist/" + x.id); paint(); return; }
       const r = await api("DELETE", "/api/books/" + x.slug).catch((err) => ({ error: String(err) }));
       if (r.error) toast("Ошибка: " + r.error); else { delete jobs[x.slug]; renderLibrary(); }
     },
-    // one click both asks and shows what is being asked: the field opens with the query in it and
-    // the search is already running, so a wrong word is one Esc and a retype away
+    // one click both asks and shows what is being asked: the field opens with the query in it and the
+    // search starts at once. It then stays open with the answer beside it, so a wrong word is one
+    // retype and one ↵ away, however many times it takes.
     find: async (x) => {
       if (open !== idOf(x)) { await ACTIONS.gear(x); }  // a card searched from the shelf opens with its sections
+      // the field is already open: the link asks for what stands in it now, not for the title again
+      const typed = finding === idOf(x) ? document.querySelector(".card.open .find-input")?.value.trim() : null;
       renaming = null; finding = idOf(x); paint();
       const el = document.querySelector(".card.open .find-input"); el?.focus(); el?.select();
-      searchFor(x);
+      searchFor(x, typed);
     },
     findNo: () => { finding = null; paint(); },  // Esc leaves the field; stopping the search is «отменить»
     findGo: (x, btn) => {
@@ -435,11 +460,11 @@
       const row = btn.closest(".own"), urls = row.querySelector("[name=audio_url]").value.trim().split(/\s+/).filter(Boolean).join("\n"), file = row.querySelector("[name=audio_file]").files[0];
       if (!urls && !file) { toast("Нужна ссылка на аудио или файл"); return; }
       const ok = await startAdd({ slug: x.slug, audio_url: urls, audio_file: file, narrator: row.querySelector("[name=narrator]").value.trim() });
-      if (ok) { open = null; renderLibrary(); }
+      if (ok) { closeCard(); renderLibrary(); }
     },
     align: async (x) => {
       const r = await api("POST", "/api/align/" + x.slug).catch((err) => ({ error: String(err) }));
-      if (r.error) toast("Ошибка: " + r.error); else { open = null; toast("Точное выравнивание запущено, это долго"); pollJobs(); renderLibrary(); }
+      if (r.error) toast("Ошибка: " + r.error); else { closeCard(); toast("Точное выравнивание запущено, это долго"); pollJobs(); renderLibrary(); }
     },
   };
   $("#library").addEventListener("click", (e) => {

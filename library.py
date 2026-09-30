@@ -263,7 +263,22 @@ def rename_book(slug: str, title: str) -> dict:
     tmp = d / "book.toml.tmp"
     tmp.write_text(new_text, encoding="utf-8")
     os.replace(tmp, d / "book.toml")
+    forget_query(slug)
     return {"slug": slug, "title": title}
+
+
+def forget_query(slug: str) -> None:
+    """A renamed book keeps the editions it was picked from — another one may still be worth loading —
+    but not the query that found them: the search field offers the new name instead."""
+    f = BOOKS / slug / "hits.json"
+    try:
+        saved = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not saved.get("query"):
+        return
+    saved["query"] = ""
+    f.write_text(json.dumps(saved, ensure_ascii=False), encoding="utf-8")
 
 
 def delete_book(slug: str) -> None:
