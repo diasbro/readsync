@@ -2,11 +2,16 @@
 (() => {
   "use strict";
   if (!slug) return;
-  const pages = { on: false, spreadW: 0, total: 1, cur: 0, sent: 0 };  // page-mode state
-  onApplied = () => { if (pages.on) requestAnimationFrame(() => { pagesLayout(); goToSentence(pages.sent, false); }); };
+  const pages = { on: false, spreadW: 0, total: 1, cur: 0, sent: 0, capped: false };  // page-mode state
+  const FLOW_CAP = 16777216;  // the widest column flow a browser lays out, in CSS pixels, as measured
+  // `pages.on` means the columns are built and a page can be turned; `hasAudio` means there is a
+  // narrator to play. Both are false while the book loads, and every control asks one of them, so
+  // nothing answers a key or a click before there is something to answer it with.
+  onApplied = () => scheduleRelayout();
   // ---------------- book state ----------------
   const app = $("#app"); app.hidden = false;
   const audio = $("#audio"), textEl = $("#text");
+  const pgCur = $("#pg-cur"), pgTotal = $("#pg-total"), pgRead = $("#pg-read");
   let book, wB, wT0, wT1, wS, sFirst, sLast, sBlock, sWordsCum = [], chapStartWord = [], chapStartTime = [], duration = 0, hasAudio = false;
   let curWord = -1, curSent = -1, curBlock = -1, curChap = -1;
   let userScrolled = false, wordEls = [], sentEls = [], blockEls = [];
@@ -154,6 +159,8 @@
     textEl.querySelectorAll(".w").forEach((el) => (wordEls[+el.dataset.w] = el));
     textEl.querySelectorAll(".s").forEach((el) => (sentEls[+el.dataset.s] = el));
     textEl.querySelectorAll(".blk").forEach((el) => (blockEls[+el.dataset.b] = el));
+    // a picture decodes after the text is laid out and pushes every page along: measure again
+    textEl.querySelectorAll("img").forEach((im) => im.addEventListener("load", scheduleRelayout, { once: true }));
   }
 
   function buildToc() {
@@ -302,32 +309,101 @@
   }
 
   // ---------------- page mode ----------------
+  // A page number is not a place in a book: it changes with the window, the font and the column count.
+  // The place is always the sentence, and every relayout puts that same sentence back on the screen.
+  // The content box, to the fraction of a pixel. `clientWidth` is rounded to whole pixels, and over
+  // hundreds of spreads that rounding walks the text sideways out of the column.
+  function contentWidth() {
+    const cs = getComputedStyle(textEl);
+    const off = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+      + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
+    return textEl.getBoundingClientRect().width - off;
+  }
   function pagesLayout() {
     const gap = parseFloat(getComputedStyle(textEl).columnGap) || 0;
-    pages.spreadW = textEl.clientWidth + gap;
-    pages.total = Math.max(1, Math.ceil((textEl.scrollWidth - 2) / pages.spreadW));
+    pages.spreadW = Math.max(1, contentWidth() + gap);
+    // the flow is spreads of this pitch with no gap after the last one. Round up: a half-filled last
+    // spread is still a page, and losing it would put the end of the book out of reach.
+    pages.total = Math.max(1, Math.ceil((textEl.scrollWidth + gap) / pages.spreadW - 0.02));
+    // A very long book in a narrow column at a large font runs past what the browser will lay out,
+    // and everything after that point is piled onto the last page. Nothing here can undo it, but the
+    // reader must not be left thinking the book simply ends where it stops.
+    pages.capped = textEl.scrollWidth >= FLOW_CAP - pages.spreadW;
+    flowCache.clear();
   }
-  function flowX(el) { const r = el.getClientRects()[0] || el.getBoundingClientRect(); return r.left - textEl.getBoundingClientRect().left + textEl.scrollLeft; }
+  // where a sentence sits in the flow, measured from the start of the book. It does not change when
+  // the columns are scrolled, only when they are laid out again, so one measurement per layout holds.
+  const flowCache = new Map();
+  function flowX(si) {
+    const known = flowCache.get(si);
+    if (known !== undefined) return known;
+    const el = sentEls[si];
+    if (!el) return 0;
+    // the first rect, which is where the sentence starts. Not the leftmost: a sentence that wraps
+    // has a rect at the column's left edge on its second line, and taking that would put sentences
+    // out of order inside a column, which the binary search below relies on.
+    const box = textEl.getBoundingClientRect();
+    const r = el.getClientRects()[0] || el.getBoundingClientRect();
+    const x = r.left - box.left + textEl.scrollLeft;
+    flowCache.set(si, x);
+    return x;
+  }
+  // the spread a sentence starts on. Floor and no fudge: the reader would rather see a line they have
+  // already read at the top of the page than lose the one they stopped at off the left edge.
+  const spreadOfSent = (si) => Math.max(0, Math.floor(flowX(si) / pages.spreadW));
   function sentAtSpread(n) {
-    const x0 = n * pages.spreadW - 1;
+    const x0 = n * pages.spreadW;  // the same boundary spreadOfSent uses, so the two are inverse
     let lo = 0, hi = sentEls.length - 1, ans = hi;
-    while (lo <= hi) { const mid = (lo + hi) >> 1; if (flowX(sentEls[mid]) >= x0) { ans = mid; hi = mid - 1; } else lo = mid + 1; }
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (flowX(mid) >= x0) { ans = mid; hi = mid - 1; } else lo = mid + 1; }
     return ans;
   }
   let sentTimer = 0;
-  function goSpread(n, save = true) {
+  // Show spread `n`. `anchor` is the sentence the reader is on when the caller already knows it: a
+  // relayout must keep the sentence it started from, or every resize event nudges the place a little.
+  function goSpread(n, save = true, anchor = null, step = false) {
     n = Math.max(0, Math.min(pages.total - 1, n));
     const prevSent = pages.sent;
-    pages.cur = n; textEl.scrollLeft = n * pages.spreadW; pages.sent = sentAtSpread(n);
-    if (save && pages.sent > prevSent && pages.sent - prevSent < 400) session.words += sWordsCum[pages.sent] - sWordsCum[prevSent];
-    $("#pg-info").textContent = `${pages.cur + 1} / ${pages.total} · ${book.chapters[chapterOfSent(pages.sent)]?.title || ""}`;
+    pages.cur = n; textEl.scrollLeft = n * pages.spreadW;
+    pages.sent = anchor != null ? Math.max(0, Math.min(sFirst.length - 1, anchor)) : sentAtSpread(n);
+    // words read, not words skipped past: a jump to a page or a chapter is not reading
+    if (save && step && pages.sent > prevSent && pages.sent - prevSent < 400) session.words += sWordsCum[pages.sent] - sWordsCum[prevSent];
+    paintPager();
     $("#chapter-title").textContent = book.chapters[chapterOfSent(pages.sent)]?.title || "";
     if (save) {
       const at = Date.now(); store.set("rs:sent:" + slug, pages.sent); store.set("rs:sentAt:" + slug, at);
       clearTimeout(sentTimer); sentTimer = setTimeout(() => putState({ sent: pages.sent, sentAt: at, sentPct: Math.round((pages.sent / sFirst.length) * 100) }), 300);
     }
   }
-  function goToSentence(si, save = true) { const el = sentEls[si]; goSpread(el ? Math.floor((flowX(el) + 1) / pages.spreadW) : 0, save); }
+  function goToSentence(si, save = true) {
+    if (!sentEls[si]) return goSpread(0, save);  // no such sentence: the page shown and the place saved must agree
+    goSpread(spreadOfSent(si), save, si);
+  }
+  // Turn a page. The columns are rebuilt the moment the window changes but measured only after the
+  // reader's hand stops, so the numbers are checked first: a turn in that gap would use last
+  // window's pitch and land between columns.
+  function turn(delta) {
+    if (!pages.on) return;
+    const gap = parseFloat(getComputedStyle(textEl).columnGap) || 0;
+    if (Math.abs(contentWidth() + gap - pages.spreadW) > 0.5) { clearTimeout(relayoutTimer); relayout(); }
+    goSpread(pages.cur + delta, true, null, true);
+  }
+  // The columns were rebuilt (window resized, font or width changed, a webfont arrived): the reader
+  // keeps their sentence and only the page number under it changes.
+  function relayout() {
+    if (!pages.on) return;
+    pagesLayout();
+    goToSentence(pages.sent, false);
+  }
+  let relayoutTimer = 0;
+  // Laying the columns out again means laying out the whole book: on a long one that is seconds of
+  // work, so a drag of the window edge waits for the reader's hand to stop instead of paying it per
+  // pixel. A timer and not requestAnimationFrame, so a window resized while this tab sits in the
+  // background is still caught up when the reader comes back to it.
+  function scheduleRelayout() {
+    if (!pages.on) return;
+    clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(relayout, 150);
+  }
   function saveMode(m) { const at = Date.now(); store.set("rs:mode:" + slug, m); store.set("rs:modeAt:" + slug, at); putState({ mode: m, modeAt: at }); }
   function enterPages(si, save = true) {
     if (hasAudio && !audio.paused) audio.pause();
@@ -344,10 +420,44 @@
   }
   function toggleMode() { if (!hasAudio) return; pages.on ? exitPages() : enterPages(curSent >= 0 ? curSent : pages.sent); }
   $("#btn-mode").onclick = toggleMode;
-  $("#pg-prev").onclick = () => goSpread(pages.cur - 1);
-  $("#pg-next").onclick = () => goSpread(pages.cur + 1);
-  addEventListener("resize", () => { if (pages.on) { pagesLayout(); goToSentence(pages.sent, false); } });
-  document.fonts.addEventListener("loadingdone", () => { if (pages.on) { pagesLayout(); goToSentence(pages.sent, false); } });
+  $("#pg-prev").onclick = () => turn(-1);
+  $("#pg-next").onclick = () => turn(1);
+  addEventListener("resize", scheduleRelayout);
+  document.fonts.addEventListener("loadingdone", scheduleRelayout);
+
+  // ---- the page number: readable, and a field to jump from ----
+  let pgTyping = false;  // while the reader is typing, a page turn must not overwrite what they wrote
+  function paintPager() {
+    pgTotal.textContent = pages.total;
+    pgCur.style.width = String(pages.total).length + 2 + "ch";
+    if (!pgTyping) pgCur.value = pages.cur + 1;
+    const pct = Math.round((pages.sent / Math.max(1, sFirst.length)) * 100);
+    pgRead.textContent = pages.capped ? "книга не помещается целиком" : `прочитано ${pct}%`;
+    pgRead.classList.toggle("warn", !!pages.capped);
+    pgRead.title = pages.capped
+      ? "В такой колонке браузер не размещает всю книгу, и её конец собран на последней странице. Сделай окно шире или шрифт мельче."
+      : "";
+  }
+  // Take the typed page, or put the real one back when it is empty, out of range or not a number.
+  function commitPage() {
+    pgTyping = false;
+    const n = parseInt(pgCur.value.replace(/\D+/g, ""), 10);
+    if (n >= 1 && n <= pages.total && n - 1 !== pages.cur) goSpread(n - 1);
+    pgCur.value = pages.cur + 1;
+  }
+  pgCur.addEventListener("focus", () => { pgTyping = true; pgCur.select(); });
+  pgCur.addEventListener("input", () => { pgTyping = true; });  // typed into, however the focus got there
+  pgCur.addEventListener("blur", commitPage);
+  pgCur.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commitPage(); pgCur.blur(); }
+    else if (e.key === "Escape") { e.preventDefault(); pgTyping = false; pgCur.value = pages.cur + 1; pgCur.blur(); }
+    else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      // the field stays in hand: it keeps the focus, so it writes the new page itself
+      e.preventDefault();
+      turn(e.key === "ArrowUp" ? -1 : 1);
+      pgCur.value = pages.cur + 1; pgCur.select();
+    }
+  });
 
   // ---------------- controls ----------------
   let pausedAt = 0;
@@ -399,24 +509,58 @@
   prog.addEventListener("input", () => { seekingUI = true; $("#time-cur").textContent = fmt(+prog.value); });
   prog.addEventListener("change", () => { seekingUI = false; seek(+prog.value); });
 
+  const turnZone = (e) => { const r = textEl.getBoundingClientRect(); return (e.clientX - r.left) / r.width; };
   textEl.addEventListener("click", (e) => {
     const nref = e.target.closest(".nref");
     if (nref) { showNote(nref); e.stopPropagation(); return; }
     if (pages.on) {
       if (getSelection().toString()) return;
-      const r = textEl.getBoundingClientRect(), x = (e.clientX - r.left) / r.width;
-      if (x < 0.3) goSpread(pages.cur - 1); else if (x > 0.7) goSpread(pages.cur + 1);
+      const x = turnZone(e);
+      if (x < 0.3) turn(-1); else if (x > 0.7) turn(1);
       return;
     }
+    if (!hasAudio) return;  // a book without audio is read in page mode, and its columns are not up yet
     const w = e.target.closest(".w"), s = e.target.closest(".s");
     if (settings.clickWord && w) return seek(wT0[+w.dataset.w]);
     if (s) { const st = sentStart(+s.dataset.s); if (st != null) seek(st); }
   });
 
+  // which third the pointer is over, so the cursor can say which way a click turns. Kept to a class
+  // change on the way in and out of a third: this fires on every pointer move.
+  let zone = "";
+  textEl.addEventListener("mousemove", (e) => {
+    const now = !pages.on || getSelection()?.type === "Range" ? "" : turnZone(e) < 0.3 ? "turn-prev" : turnZone(e) > 0.7 ? "turn-next" : "";
+    if (now === zone) return;
+    if (zone) textEl.classList.remove(zone);
+    if (now) textEl.classList.add(now);
+    zone = now;
+  }, { passive: true });
+
   // user scroll detection
   const onUserScroll = () => { if (settings.scroll === "off" || pages.on) return; userScrolled = true; $("#return-pill").hidden = false; };
-  addEventListener("wheel", onUserScroll, { passive: true });
   addEventListener("touchmove", onUserScroll, { passive: true });
+  addEventListener("wheel", onUserScroll, { passive: true });  // audio mode: the browser scrolls, we only notice
+  // The columns do not scroll, so in page mode a trackpad flick would do nothing at all. A wheel with
+  // notches turns a page per notch; a trackpad sends a stream of small deltas, so those are added up
+  // and the tail of the gesture's momentum is ignored.
+  let wheelAt = 0, wheelSum = 0, wheelSpent = false;
+  addEventListener("wheel", (e) => {
+    if (!pages.on) return;
+    if (e.ctrlKey || e.metaKey) return;  // zooming the page, not turning it
+    if (e.target instanceof Element && e.target.closest(".drawer, .popup, .modal, .pager")) return;
+    e.preventDefault();
+    const gap = Date.now() - wheelAt;
+    wheelAt = Date.now();
+    if (gap > 220) { wheelSum = 0; wheelSpent = false; }  // a new gesture, not the last one dying out
+    const d = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+    if (e.deltaMode !== 0) { turn(d > 0 ? 1 : -1); return; }  // whole lines or pages: one notch, one page
+    if (wheelSpent) return;
+    wheelSum += d;
+    if (Math.abs(wheelSum) < 30) return;
+    turn(wheelSum > 0 ? 1 : -1);
+    wheelSpent = true;
+    wheelAt = Date.now();  // turning the page took time of its own: that is not a pause in the gesture
+  }, { passive: false });
   $("#return-pill").onclick = () => { userScrolled = false; $("#return-pill").hidden = true; scrollToCurrent(true); };
 
   // keyboard
@@ -425,9 +569,10 @@
     if (e.metaKey || e.ctrlKey || e.altKey) return;  // leave browser/system shortcuts alone
     const k = e.key === "Spacebar" || e.code === "Space" ? " " : e.key;
     if (k === "m") { toggleMode(); return; }
+    if (!pages.on && !hasAudio) return;  // nothing is up yet: the book is still being laid out
     if (pages.on) {
-      if (k === "ArrowRight" || k === "PageDown" || (k === " " && !e.shiftKey)) { e.preventDefault(); goSpread(pages.cur + 1); }
-      else if (k === "ArrowLeft" || k === "PageUp" || (k === " " && e.shiftKey)) { e.preventDefault(); goSpread(pages.cur - 1); }
+      if (k === "ArrowRight" || k === "PageDown" || (k === " " && !e.shiftKey)) { e.preventDefault(); turn(1); }
+      else if (k === "ArrowLeft" || k === "PageUp" || (k === " " && e.shiftKey)) { e.preventDefault(); turn(-1); }
       else if (k === "Home") goSpread(0);
       else if (k === "End") goSpread(pages.total - 1);
       else if (k === "t") toggleDrawer("#toc");
