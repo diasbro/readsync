@@ -22,7 +22,7 @@ packages = []
 py-modules = []
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff==0.16.6", "fonttools", "brotli"]
+dev = ["pytest", "ruff==0.16.9", "fonttools", "brotli"]
 
 [tool.ruff]
 line-length = 120
