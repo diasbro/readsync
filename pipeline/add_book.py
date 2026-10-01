@@ -349,7 +349,8 @@ def main() -> None:
         meta["audio_source"] = " | ".join(args.audio)
         meta["narrator"] = args.narrator or meta.get("narrator", "")
     toml.write_text("".join(f'{k} = "{esc(v)}"\n' for k, v in meta.items() if v != ""), encoding="utf-8")
-    stamp(d, new_edition=bool(args.text or args.audio))
+    # a new edition only with new text: it is what makes sentence positions stale; new audio shows in the sizes
+    stamp(d, new_edition=bool(args.text))
 
     print(
         f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)"),

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Stamp a finished book's identity into book.toml: `id` never changes, `edition` changes whenever the
-text or the audio is replaced, and `files` lists the size of each file the reader needs. A copy of
-the book that arrives piece by piece (iCloud syncs file by file) is complete when the sizes match,
-and a reading position saved against another edition is known to be stale.
+text is replaced, and `files` lists the size of each file the reader needs. A copy of the book that
+arrives piece by piece (iCloud syncs file by file) is complete when the sizes match, new audio shows
+in those sizes, and a sentence position saved against another edition is known to be stale.
 
   python pipeline/manifest.py <book_dir> [--new-edition]
 """
@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 PARTS = ("book.json", "timing.json", "audio.m4a", "audio.mp3")
+ID_RE = re.compile(r'(?m)^id\s*=\s*"[0-9a-f]{32}"')  # a book.toml line holding a valid id
 
 
 def _set(text: str, key: str, value: str) -> str:
@@ -27,7 +28,7 @@ def _set(text: str, key: str, value: str) -> str:
 def stamp(d: Path, new_edition: bool = False) -> None:
     toml = d / "book.toml"
     text = toml.read_text(encoding="utf-8") if toml.exists() else ""
-    if not re.search(r'(?m)^id\s*=\s*"[0-9a-f]{32}"', text):
+    if not ID_RE.search(text):
         text = _set(text, "id", uuid.uuid4().hex)
     if new_edition or not re.search(r"(?m)^edition\s*=", text):
         text = _set(text, "edition", uuid.uuid4().hex)

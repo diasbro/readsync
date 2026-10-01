@@ -40,5 +40,14 @@
     "edition": "",
     "files": [{"settings": {"font": 30}, "settingsAt": 9, "shelf": "reading", "shelfAt": 3}],
     "merged": {"shelf": "reading", "shelfAt": 3}
+  },
+  {
+    "name": "on equal times the earlier file in name order keeps its value",
+    "edition": "",
+    "files": [
+      {"pos": 100, "posAt": 10, "shelf": "reading", "shelfAt": 7},
+      {"pos": 900, "posAt": 10, "shelf": "done", "shelfAt": 7}
+    ],
+    "merged": {"pos": 100, "posAt": 10, "shelf": "reading", "shelfAt": 7}
   }
 ]

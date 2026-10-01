@@ -74,18 +74,24 @@ TRANSLIT = dict(
 
 def ensure_manifests() -> None:
     """Books made before manifests existed get one, once: a phone cannot tell a finished copy of them
-    from a half-synced one otherwise. Books still loading are left to their job."""
+    from a half-synced one otherwise. Books still loading are left to their job, and so are books
+    whose last job failed (their add.log stays until a job succeeds). One unreadable book never
+    keeps the server from starting."""
     sys.path.insert(0, str(ROOT / "pipeline"))
-    from manifest import stamp
+    from manifest import ID_RE, stamp
 
     for toml in BOOKS.glob("*/book.toml"):
         d = toml.parent
-        if (
-            (d / "book.json").exists()
-            and d.name not in JOBS
-            and not re.search(r"(?m)^id\s*=", toml.read_text(encoding="utf-8"))
-        ):
-            stamp(d)
+        try:
+            if (
+                (d / "book.json").exists()
+                and not (d / "add.log").exists()
+                and d.name not in JOBS
+                and not ID_RE.search(toml.read_text(encoding="utf-8"))
+            ):
+                stamp(d)
+        except OSError as e:
+            print(f"manifest skipped for {d.name}: {e}", file=sys.stderr, flush=True)
 
 
 def list_books() -> list[dict]:

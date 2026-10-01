@@ -1,5 +1,8 @@
 PYTHON ?= $(shell command -v python3.12 || command -v python3)
 PY := .venv/bin/python
+# the library the server and add_book use: $READSYNC_BOOKS, else the menu-bar app's, else this checkout's books/
+APP_BOOKS := $(HOME)/Library/Application Support/readsync/books
+BOOKS ?= $(or $(READSYNC_BOOKS),$(shell [ -e "$(APP_BOOKS)" ] && echo "$(APP_BOOKS)" || echo books))
 
 .PHONY: setup serve test lint fmt add-book align app dmg ios-sim
 
@@ -34,7 +37,7 @@ dmg:
 
 # make align slug=my-book   (re-run the precise MMS pass)
 align:
-	$(PY) pipeline/align.py books/$(slug)
+	$(PY) pipeline/align.py "$(BOOKS)/$(slug)"
 
 # the iPhone app in the simulator: build, install, launch (needs Xcode, xcodegen and the iOS simulator)
 SIM ?= iPhone 17

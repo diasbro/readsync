@@ -46,6 +46,7 @@ from library import (
     wishlist_update,
 )
 from sources import search_text
+from state import StateUnavailable
 
 mimetypes.add_type("audio/mp4", ".m4a")
 mimetypes.add_type("audio/webm", ".webm")
@@ -204,7 +205,10 @@ class Handler(SimpleHTTPRequestHandler):
         slug, is_session = self.state_slug()
         if slug is None or is_session:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-        return self.send_json(merge_state(slug, body))
+        try:
+            return self.send_json(merge_state(slug, body))
+        except StateUnavailable as e:  # this device's file is not readable yet: try again, never overwrite it
+            return self.send_json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
 
     def do_POST(self):
         if self.path.startswith("/api/add"):
@@ -233,7 +237,10 @@ class Handler(SimpleHTTPRequestHandler):
         slug, is_session = self.state_slug()
         if slug is None or not is_session:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-        return self.send_json(add_session(slug, delta))
+        try:
+            return self.send_json(add_session(slug, delta))
+        except StateUnavailable as e:
+            return self.send_json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
 
     def do_DELETE(self):
         if self.path.startswith("/api/jobs/"):
