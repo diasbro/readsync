@@ -72,7 +72,8 @@
     if (!hasAudio || remoteMode === "pages") document.fonts.ready.then(() => enterPages(pages.sent, false));
     if (!hasAudio) return;
     audio.src = `/books/${slug}/${meta.audio}`;
-    const remoteWins = (remote.posAt || 0) > store.get("rs:posAt:" + slug, 0) && typeof remote.pos === "number";
+    // in the app the player keeps the position, not this page's cache, so the saved state always wins
+    const remoteWins = typeof remote.pos === "number" && (native || (remote.posAt || 0) > store.get("rs:posAt:" + slug, 0));
     const pos = remoteWins ? remote.pos : store.get("rs:pos:" + slug, 0);
     if (remoteWins) { store.set("rs:pos:" + slug, remote.pos); store.set("rs:posAt:" + slug, remote.posAt); }
     audio.addEventListener("loadedmetadata", () => {
@@ -237,7 +238,7 @@
     const sec = Math.floor(t);
     if (sec !== lastSec || force) {
       lastSec = sec;
-      if (!seekingUI) $("#progress").value = t;
+      if (!seekingUI) { $("#progress").value = t; paintProgress(); }
       $("#time-cur").textContent = fmt(t);
       const chEnd = chapStartTime.slice(curChap + 1).find((x) => isFinite(x)) ?? duration;
       const rate = audio.playbackRate || 1;
@@ -290,10 +291,13 @@
     if (settings.hideUi) idleTimer = setTimeout(() => { if (!audio.paused && $("#toc").hidden && $("#settings").hidden) document.body.classList.add("idle"); }, 4000);
   }
   ["mousemove", "mousedown", "keydown", "touchstart"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
-  function armHidePlayer() {
+  function armHidePlayer(ms = 1500) {
     clearTimeout(hideTimer);
-    if (settings.hideUi && !pages.on) hideTimer = setTimeout(() => { if (!audio.paused) document.body.classList.add("hide-player"); }, 1500);
+    if (settings.hideUi && !pages.on) hideTimer = setTimeout(() => { if (!audio.paused) document.body.classList.add("hide-player"); }, ms);
   }
+  // a finger has no hover: the bars put away come back with a tap, stay while they are used, and go again
+  const touchUI = matchMedia("(hover: none)").matches;
+  if (touchUI) $(".player").addEventListener("touchstart", () => armHidePlayer(4000), { passive: true });
   function showPlayer() { clearTimeout(hideTimer); document.body.classList.remove("hide-player"); $(".player").classList.remove("peek"); }
   addEventListener("mousemove", (e) => {
     if (!document.body.classList.contains("hide-player")) return;
@@ -521,7 +525,9 @@
   $("#btn-focus").onclick = toggleDim;
   let seekingUI = false;
   const prog = $("#progress");
-  prog.addEventListener("input", () => { seekingUI = true; $("#time-cur").textContent = fmt(+prog.value); });
+  // the played part of the bar, drawn by the stylesheet from this one number (once a second at most)
+  function paintProgress() { prog.style.setProperty("--p", ((+prog.value / (+prog.max || 1)) * 100).toFixed(2) + "%"); }
+  prog.addEventListener("input", () => { seekingUI = true; $("#time-cur").textContent = fmt(+prog.value); paintProgress(); });
   prog.addEventListener("change", () => { seekingUI = false; seek(+prog.value); });
 
   const turnZone = (e) => { const r = textEl.getBoundingClientRect(); return (e.clientX - r.left) / r.width; };
@@ -535,6 +541,10 @@
       return;
     }
     if (!hasAudio) return;  // a book without audio is read in page mode, and its columns are not up yet
+    if (touchUI && (document.body.classList.contains("hide-player") || document.body.classList.contains("idle"))) {
+      showPlayer(); armIdle(); armHidePlayer(4000);  // this tap only brings the bars back; the next one may seek
+      return;
+    }
     const w = e.target.closest(".w"), s = e.target.closest(".s");
     if (settings.clickWord && w) return seek(wT0[+w.dataset.w]);
     if (s) { const st = sentStart(+s.dataset.s); if (st != null) seek(st); }

@@ -289,7 +289,12 @@ body.pages #text { position: fixed; top: var(--topbar-h); bottom: var(--pager-h)
   width: min(100vw - 56px, calc(var(--width) * 2 + 4rem)); max-width: none; margin: 0; padding: 32px 0 12px;
   columns: 2; column-gap: 4rem; column-fill: auto; column-rule: 1px solid var(--line); overflow: hidden; cursor: default; }
 /* narrow window: a single page instead of a spread */
-@media (max-width: 900px) { body.pages #text { columns: 1; column-rule: none; width: min(100vw - 40px, var(--width)); } }
+/* narrow window: a single page instead of a spread. Asked for by a width wider than the page, not by a
+   count of one: WebKit treats `columns: 1` as no columns at all and lets the book run straight down */
+@media (max-width: 900px) {
+  body.pages #text { columns: auto; column-width: 3000px; column-rule: none;
+    width: min(100vw - 40px - var(--safe-l) - var(--safe-r), var(--width)); }
+}
 body.pages #text .s { cursor: default; }
 /* the outer thirds turn a page, the middle one selects text: the cursor is what says so */
 body.pages #text.turn-prev { cursor: w-resize; }
@@ -335,6 +340,17 @@ body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
 #chapter-ticks i { position: absolute; top: 0; width: 1px; height: 6px; background: var(--muted); opacity: .6; }
 #chapter-ticks i.l1 { height: 9px; top: -2px; width: 2px; }
 #progress { width: 100%; margin: 10px 0 0; accent-color: var(--accent); }
+/* the bar drawn in the theme's own colours: a thin track filled up to the thumb, the same in every
+   browser (WebKit would otherwise draw a white system knob on a blue track) */
+#progress { -webkit-appearance: none; appearance: none; height: 18px; background: none; cursor: pointer; }
+#progress::-webkit-slider-runnable-track { height: 4px; border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) var(--p, 0%), var(--line) var(--p, 0%)); }
+#progress::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line); }
+#progress::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--accent); }
+#progress::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 50%;
+  background: var(--accent); border: 0; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+#progress::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: 0; }
+@media (max-width: 600px) { #progress::-webkit-slider-thumb { width: 16px; height: 16px; margin-top: -6px; } }
 .controls { display: flex; align-items: center; gap: 12px; max-width: 900px; margin: 4px auto 0; }
 .time { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); min-width: 52px; }
 #time-left { text-align: right; }
@@ -421,9 +437,11 @@ body.hide-player .player.peek { opacity: 1; pointer-events: auto; }
   #text { padding-left: max(18px, var(--safe-l)); padding-right: max(18px, var(--safe-r)); }
   .player { padding-top: 4px; }
   .progress-wrap { height: 22px; }
-  .controls { display: grid; grid-template-columns: 1fr auto 1fr; grid-template-areas: "cur . left" "l main r";
+  .controls { display: grid; grid-template-columns: 1fr auto 1fr; grid-template-areas: ". . ." "l main r";
     row-gap: 4px; column-gap: 6px; margin-top: 0; }
-  #time-cur { grid-area: cur; } #time-left { grid-area: left; }
+  /* each time may reach across to the middle: the columns below are sized by the buttons, not by them */
+  #time-cur { grid-row: 1; grid-column: 1 / 3; justify-self: start; }
+  #time-left { grid-row: 1; grid-column: 2 / 4; justify-self: end; }
   .time { min-width: 0; font-size: 11px; white-space: nowrap; }
   .controls-left { grid-area: l; justify-self: start; }
   .controls-main { grid-area: main; gap: 4px; }
@@ -440,7 +458,8 @@ body.hide-player .player.peek { opacity: 1; pointer-events: auto; }
   .icon { width: 40px; height: 40px; }
   .pill { bottom: calc(var(--player-h) + 12px); }
 }
-/* the narrowest phones: the sprint timer is reached from the page mode bar instead */
-@media (max-width: 400px) { .controls-right #btn-sprint { display: none; } }
+/* a phone's row has room for one extra button: the sprint timer. Focus dimming is the same switch as
+   «Приглушать» in the settings, so its button stays on the wider screens */
+@media (max-width: 600px) { .controls-right #btn-focus { display: none; } }
 /* a touch screen has no keyboard to explain */
 @media (hover: none) and (pointer: coarse) { .drawer .keys { display: none; } }
