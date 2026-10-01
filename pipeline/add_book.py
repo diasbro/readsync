@@ -31,7 +31,9 @@ from tidy import PLAYABLE, tidy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # the same root the server uses: the Mac app keeps the books outside the code it updates
-BOOKS = Path(os.environ.get("READSYNC_BOOKS") or ROOT / "books").expanduser()
+# one library per Mac: the menu-bar app's (which may live in iCloud), else this checkout's own books/
+APP_BOOKS = Path.home() / "Library" / "Application Support" / "readsync" / "books"
+BOOKS = Path(os.environ.get("READSYNC_BOOKS") or (APP_BOOKS if APP_BOOKS.exists() else ROOT / "books")).expanduser()
 PY = sys.executable
 PIPE = ROOT / "pipeline"
 UA = {"User-Agent": "Mozilla/5.0"}

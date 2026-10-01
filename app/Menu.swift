@@ -100,6 +100,10 @@ final class Menu: NSObject, NSApplicationDelegate {
             let reuse = add("Открывать в той же вкладке", "", #selector(toggleReuse), to: sub)
             reuse.state = Browser.reusesTab ? .on : .off
         }
+        if Cloud.isAvailable {
+            let cloud = add("Библиотека в iCloud", "", #selector(toggleCloud), to: sub)
+            cloud.state = Cloud.isOn ? .on : .off
+        }
         sub.addItem(.separator())
         add("Показать книги в Finder", "", #selector(showBooks), to: sub)
         add("Открыть журнал", "", #selector(showLog), to: sub)
@@ -194,6 +198,60 @@ final class Menu: NSObject, NSApplicationDelegate {
                 self.build()
             }
         }
+    }
+
+    /// Books move between this Mac and iCloud Drive/readsync with the server stopped, so nothing is
+    /// half-written while the folder changes place. Every step says what it is about to do first.
+    @objc private func toggleCloud() {
+        guard let python else { return }
+        if Cloud.isOn {
+            guard confirm("Вернуть книги на этот Mac?", "Библиотека переедет из iCloud Drive обратно. На iPhone книги пропадут.")
+            else { return }
+            server.stop()
+            if case .failed(let why) = Cloud.turnOff() { alert("Не вышло вернуть книги", why) }
+        } else if Cloud.hasLibrary {
+            guard confirm(
+                "В iCloud уже есть библиотека readsync",
+                "Открыть её на этом Mac? Здешние книги останутся на месте и вернутся, если выключить iCloud.")
+            else { return }
+            server.stop()
+            if case .failed(let why) = Cloud.turnOn(adopt: true) { alert("Не вышло открыть библиотеку", why) }
+        } else {
+            let need = Cloud.localBytes
+            if let free = Cloud.freeBytes, free < need {
+                alert("В iCloud не хватает места", "Нужно \(Menu.size(need)), свободно \(Menu.size(free)).")
+                return
+            }
+            guard confirm(
+                "Перенести библиотеку в iCloud Drive?",
+                "Книги (\(Menu.size(need))) переедут в iCloud Drive/readsync и будут видны на iPhone.")
+            else { return }
+            server.stop()
+            if case .failed(let why) = Cloud.turnOn(adopt: false) {
+                alert("Не вышло перенести книги", why)
+            } else {
+                alert(
+                    "Библиотека в iCloud",
+                    "Чтобы macOS не выгружала аудио с этого Mac, в Finder нажми на iCloud Drive/readsync "
+                        + "правой кнопкой и выбери «Не выгружать».")
+            }
+        }
+        server.start(python: python)
+        build()
+    }
+
+    private func confirm(_ title: String, _ text: String) -> Bool {
+        let sheet = NSAlert()
+        sheet.messageText = title
+        sheet.informativeText = text
+        sheet.addButton(withTitle: "Да")
+        sheet.addButton(withTitle: "Отмена")
+        NSApp.activate(ignoringOtherApps: true)
+        return sheet.runModal() == .alertFirstButtonReturn
+    }
+
+    static func size(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     @objc private func showBooks() { NSWorkspace.shared.open(booksDir) }
