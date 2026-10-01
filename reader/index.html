@@ -73,12 +73,12 @@
   <footer id="pager" class="pager" hidden>
     <div class="pg-side" id="pg-read"></div>
     <div class="pg-nav">
-      <button class="ctl" id="pg-prev" title="Назад (←)">‹</button>
+      <button class="ctl" id="pg-prev" title="Назад (←)" data-icon="back"></button>
       <label class="pg-at" title="Номер страницы: впиши и нажми ↵">
         <input id="pg-cur" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Страница, ↵ чтобы перейти">
         <span class="pg-of">из <span id="pg-total">1</span></span>
       </label>
-      <button class="ctl" id="pg-next" title="Вперёд (→, пробел)">›</button>
+      <button class="ctl" id="pg-next" title="Вперёд (→, пробел)" data-icon="forward"></button>
     </div>
     <div class="pg-side pg-right">
       <button class="ctl" id="pg-sprint" title="Спринт-таймер" data-icon="timer"></button>
@@ -87,12 +87,12 @@
   <div id="loading" class="center-msg">Загрузка…</div>
 
   <footer class="player">
-    <div class="progress-wrap">
+    <div class="track">
+      <input type="range" id="progress" min="0" max="1000" step="0.1" value="0" aria-label="Место в книге">
       <div id="chapter-ticks"></div>
-      <input type="range" id="progress" min="0" max="1000" step="0.1" value="0">
     </div>
+    <div class="times"><span id="time-cur" class="time">0:00</span><span id="time-chap" class="time" title="До конца главы"></span><span id="time-left" class="time" title="До конца книги"></span></div>
     <div class="controls">
-      <span id="time-cur" class="time">0:00</span>
       <div class="controls-left">
         <select id="speed" title="Скорость ([ / ])">
           <option value="0.75">0.75×</option><option value="0.9">0.9×</option>
@@ -103,16 +103,15 @@
       </div>
       <div class="controls-main">
         <button class="ctl" id="btn-prev-sent" title="Предыдущее предложение (←)" data-icon="prev"></button>
-        <button class="ctl" id="btn-back" title="−10 с (Shift+←)">−10</button>
+        <button class="ctl" id="btn-back" title="−10 с (Shift+←)" data-icon="back10"></button>
         <button class="ctl big" id="btn-play" title="Играть / пауза (пробел)" data-icon="play"></button>
-        <button class="ctl" id="btn-fwd" title="+10 с (Shift+→)">+10</button>
+        <button class="ctl" id="btn-fwd" title="+10 с (Shift+→)" data-icon="fwd10"></button>
         <button class="ctl" id="btn-next-sent" title="Следующее предложение (→)" data-icon="next"></button>
       </div>
       <div class="controls-right">
         <button class="ctl" id="btn-focus" title="Режим фокуса (f)" data-icon="focus"></button>
         <button class="ctl" id="btn-sprint" title="Спринт-таймер" data-icon="timer"></button>
       </div>
-      <span id="time-left" class="time"></span>
     </div>
   </footer>
 

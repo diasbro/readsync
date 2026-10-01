@@ -190,10 +190,16 @@
   }
   function firstSentOfChapter(ci) { const fb = book.chapters[ci].first_block; for (let s = 0; s < sBlock.length; s++) if (sBlock[s] >= fb) return s; return 0; }
   function chapterOfSent(si) { const b = sBlock[si] ?? 0; let c = 0; book.chapters.forEach((ch, i) => { if (ch.first_block <= b && !ch.hidden) c = i; }); return c; }
+  // Chapters cut the bar into parts, but only while the parts stay wider than a fingertip: dozens of cuts
+  // on a narrow bar turn it into a dotted line. Sections go first, then the chapters themselves.
   function drawTicks() {
     const el = $("#chapter-ticks");
-    el.innerHTML = book.chapters.map((c, i) => !c.hidden && isFinite(chapStartTime[i]) && chapStartTime[i] > 0
-      ? `<i class="l${c.level}" style="left:${(chapStartTime[i] / duration) * 100}%" title="${esc(c.title)}"></i>` : "").join("");
+    const cuts = book.chapters.map((c, i) => ({ c, at: chapStartTime[i] / duration }))
+      .filter(({ c, at }) => !c.hidden && at > 0 && at < 1);
+    const room = el.clientWidth / 14;
+    let shown = cuts.length <= room ? cuts : cuts.filter(({ c }) => c.level <= 1);
+    if (shown.length > room) shown = [];
+    el.innerHTML = shown.map(({ c, at }) => `<i class="l${c.level}" style="left:${at * 100}%" title="${esc(c.title)}"></i>`).join("");
   }
 
   // ---------------- sync ----------------
@@ -242,7 +248,8 @@
       $("#time-cur").textContent = fmt(t);
       const chEnd = chapStartTime.slice(curChap + 1).find((x) => isFinite(x)) ?? duration;
       const rate = audio.playbackRate || 1;
-      $("#time-left").textContent = "−" + fmt((chEnd - t) / rate) + " · " + fmt((duration - t) / rate);
+      $("#time-chap").textContent = "глава −" + fmt((chEnd - t) / rate);
+      $("#time-left").textContent = "−" + fmt((duration - t) / rate);
     }
   }
   let lastSec = -1;
@@ -433,7 +440,7 @@
   function exitPages() {
     if (native) window.webkit.messageHandlers.audio.postMessage({ cmd: "pages", on: false });
     pages.on = false; document.body.classList.remove("pages"); $("#pager").hidden = true; setIcon($("#btn-mode"), "book"); $("#btn-mode").title = "Режим книги без аудио (m)";
-    session.stop(); saveMode("audio");
+    session.stop(); saveMode("audio"); drawTicks();  // the bar had no width while the pages covered it
     const st = sentStart(pages.sent);
     if (st != null) seek(st); else update(true);
   }
@@ -442,6 +449,7 @@
   $("#pg-prev").onclick = () => turn(-1);
   $("#pg-next").onclick = () => turn(1);
   addEventListener("resize", scheduleRelayout);
+  addEventListener("resize", () => { if (hasAudio && duration && !pages.on) drawTicks(); });
   document.fonts.addEventListener("loadingdone", scheduleRelayout);
 
   // ---- the page number: readable, and a field to jump from ----
@@ -451,7 +459,7 @@
     pgCur.style.width = String(pages.total).length + 2 + "ch";
     if (!pgTyping) pgCur.value = pages.cur + 1;
     const pct = Math.round((pages.sent / Math.max(1, sFirst.length)) * 100);
-    pgRead.textContent = pages.capped ? "книга не помещается целиком" : `прочитано ${pct}%`;
+    pgRead.innerHTML = pages.capped ? "книга не помещается целиком" : `<span class="pg-word">прочитано </span>${pct}%`;
     pgRead.classList.toggle("warn", !!pages.capped);
     pgRead.title = pages.capped
       ? "В такой колонке браузер не размещает всю книгу, и её конец собран на последней странице. Сделай окно шире или шрифт мельче."

@@ -16,6 +16,10 @@ const ICONS = {
   audio: '<path d="M4.5 15v-2.5a7.5 7.5 0 0 1 15 0V15"/><rect x="3.8" y="13.8" width="3.8" height="5.7" rx="1.4"/><rect x="16.4" y="13.8" width="3.8" height="5.7" rx="1.4"/>',
   close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
   back: '<path d="M14.5 5.5 8 12l6.5 6.5"/>',
+  forward: '<path d="M9.5 5.5 16 12l-6.5 6.5"/>',
+  // ten seconds back and on: a circular arrow round the number, as players draw it
+  back10: '<path d="M5.6 9.2A7.5 7.5 0 1 1 4.5 13"/><path d="M5.3 4.8v4.6h4.6"/><text x="12.6" y="15.6" font-size="7.4" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none" font-family="-apple-system, system-ui, sans-serif">10</text>',
+  fwd10: '<path d="M18.4 9.2A7.5 7.5 0 1 0 19.5 13"/><path d="M18.7 4.8v4.6h-4.6"/><text x="11.4" y="15.6" font-size="7.4" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none" font-family="-apple-system, system-ui, sans-serif">10</text>',
 };
 const iconSvg = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 function setIcon(el, name) { if (el) { el.innerHTML = iconSvg(name); el.dataset.icon = name; } }
