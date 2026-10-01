@@ -74,11 +74,15 @@
     audio.src = `/books/${slug}/${meta.audio}`;
     // in the app the player keeps the position, not this page's cache, so the saved state always wins
     const remoteWins = typeof remote.pos === "number" && (native || (remote.posAt || 0) > store.get("rs:posAt:" + slug, 0));
-    const pos = remoteWins ? remote.pos : store.get("rs:pos:" + slug, 0);
+    const pos = remoteWins ? remote.pos : native ? 0 : store.get("rs:pos:" + slug, 0);
     if (remoteWins) { store.set("rs:pos:" + slug, remote.pos); store.set("rs:posAt:" + slug, remote.posAt); }
     audio.addEventListener("loadedmetadata", () => {
       if (isFinite(audio.duration)) { duration = audio.duration; store.set("rs:dur:" + slug, duration); }
-      if (pos > 0 && pos < duration - 5) audio.currentTime = pos;
+      if (pos > 0 && pos < duration - 5) {
+        if (!native) audio.currentTime = pos;
+        // WebKit reloads a page whose process was killed while the narrator played on: it is already in place
+        else if (audio.paused && Math.abs(audio.currentTime - pos) > 1) audio.restore(pos);
+      }
       $("#progress").max = duration;
       drawTicks();
       update(true); scrollToCurrent(true, true); settle();
@@ -178,10 +182,10 @@
 
   function buildToc() {
     const ol = $("#toc-list");
-    ol.innerHTML = '<li class="lib" data-lib="1"><span>← Библиотека</span></li>' + book.chapters.map((c, i) => c.hidden ? "" : `<li class="l${c.level}" data-ch="${i}"><span>${esc(c.title)}</span><span class="tt">${isFinite(chapStartTime[i]) ? fmt(chapStartTime[i]) : ""}</span></li>`).join("");
+    ol.innerHTML = '<li class="lib" data-lib="1"><span>← Библиотека</span></li>' + book.chapters.map((c, i) => c.hidden ? "" : `<li class="l${+c.level || 1}" data-ch="${i}"><span>${esc(c.title)}</span><span class="tt">${isFinite(chapStartTime[i]) ? fmt(chapStartTime[i]) : ""}</span></li>`).join("");
     ol.addEventListener("click", (e) => {
       const li = e.target.closest("li"); if (!li) return;
-      if (li.dataset.lib) { location.href = "/"; return; }
+      if (li.dataset.lib) { flushSent(true); session.stop(); location.href = "/"; return; }
       const i = +li.dataset.ch;
       if (pages.on) goToSentence(firstSentOfChapter(i));
       else if (isFinite(chapStartTime[i])) seek(chapStartTime[i]);
@@ -199,7 +203,7 @@
     const room = el.clientWidth / 14;
     let shown = cuts.length <= room ? cuts : cuts.filter(({ c }) => c.level <= 1);
     if (shown.length > room) shown = [];
-    el.innerHTML = shown.map(({ c, at }) => `<i class="l${c.level}" style="left:${at * 100}%" title="${esc(c.title)}"></i>`).join("");
+    el.innerHTML = shown.map(({ c, at }) => `<i class="l${+c.level || 1}" style="left:${at * 100}%" title="${esc(c.title)}"></i>`).join("");
   }
 
   // ---------------- sync ----------------
@@ -246,7 +250,7 @@
       lastSec = sec;
       if (!seekingUI) { $("#progress").value = t; paintProgress(); }
       $("#time-cur").textContent = fmt(t);
-      const chEnd = chapStartTime.slice(curChap + 1).find((x) => isFinite(x)) ?? duration;
+      const chEnd = chapStartTime.find((x, i) => i > curChap && !book.chapters[i].hidden && isFinite(x)) ?? duration;
       const rate = audio.playbackRate || 1;
       $("#time-chap").textContent = "глава −" + fmt((chEnd - t) / rate);
       $("#time-left").textContent = "−" + fmt((duration - t) / rate);
@@ -264,8 +268,11 @@
     const el = sentEls[curSent]; if (!el) return;
     if (settings.scroll === "off" && !force) return;
     if (userScrolled && !force) return;
-    const top = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--topbar-h")) || 52;
-    const bottom = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--player-h")) || 108;
+    // the bars as laid out, safe areas and the card's float included. The card is measured by its layout,
+    // not its box on screen: hidden, it slides down, and the reading zone must not move with it
+    const player = $(".player");
+    const top = $(".topbar").getBoundingClientRect().height;
+    const bottom = player.offsetHeight + (parseFloat(getComputedStyle(player).bottom) || 0);
     const vh = innerHeight - top - bottom;
     const r = el.getBoundingClientRect();
     const target = 0.38;
@@ -287,7 +294,7 @@
   // 10 Hz sync loop while playing (cheap: one binary search + a few class toggles per tick)
   let tick = 0;
   audio.addEventListener("play", () => { settling = false; clearInterval(tick); tick = setInterval(() => update(false), 100); setIcon($("#btn-play"), "pause"); if (!native) session.start(); document.body.classList.add("playing"); armIdle(); armHidePlayer(); });
-  audio.addEventListener("pause", () => { clearInterval(tick); update(true); setIcon($("#btn-play"), "play"); if (!native) session.stop(); savePos(); document.body.classList.remove("playing", "idle"); showPlayer(); pausedAt = Date.now(); });
+  audio.addEventListener("pause", () => { clearInterval(tick); update(true); setIcon($("#btn-play"), "play"); if (!native && !pages.on) session.stop(); savePos(); document.body.classList.remove("playing", "idle"); showPlayer(); pausedAt = Date.now(); });
   // distraction-free chrome: the top bar fades after 4 s without pointer/keyboard activity while
   // playing; the player bar hides 1.5 s after play starts (scrolling does not bring it back) and
   // returns on pause or when the pointer reaches the bottom edge
@@ -300,11 +307,19 @@
   ["mousemove", "mousedown", "keydown", "touchstart"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
   function armHidePlayer(ms = 1500) {
     clearTimeout(hideTimer);
-    if (settings.hideUi && !pages.on) hideTimer = setTimeout(() => { if (!audio.paused) document.body.classList.add("hide-player"); }, ms);
+    if (settings.hideUi && !pages.on) hideTimer = setTimeout(() => {
+      if (audio.paused) return;
+      // a hand still on the card (a held button, the bar dragged, the speed list open): wait until it lets go
+      if (playerTouch || $(".player").matches(":active") || document.activeElement === $("#speed")) return armHidePlayer(ms);
+      document.body.classList.add("hide-player");
+    }, ms);
   }
   // a finger has no hover: the bars put away come back with a tap, stay while they are used, and go again
   const touchUI = matchMedia("(hover: none)").matches;
   if (touchUI) $(".player").addEventListener("touchstart", () => armHidePlayer(4000), { passive: true });
+  let playerTouch = false;  // a touch that began on the card and has not ended yet
+  $(".player").addEventListener("touchstart", () => { playerTouch = true; }, { passive: true });
+  ["touchend", "touchcancel"].forEach((ev) => $(".player").addEventListener(ev, () => { playerTouch = false; }, { passive: true }));
   function showPlayer() { clearTimeout(hideTimer); document.body.classList.remove("hide-player"); $(".player").classList.remove("peek"); }
   addEventListener("mousemove", (e) => {
     if (!document.body.classList.contains("hide-player")) return;
@@ -317,10 +332,15 @@
   const onLeave = () => { if (!native && settings.pauseHidden && !audio.paused) audio.pause(); };
   document.addEventListener("visibilitychange", () => { if (document.hidden) { onLeave(); if (pages.on) session.stop(); } else if (pages.on) session.start(); });
   audio.addEventListener("seeked", () => update(true));
+  // a paused narrator that moved anyway (the app's lock screen): repaint. While playing the tick does it
+  audio.addEventListener("timeupdate", () => { if (audio.paused) update(true); });
   audio.addEventListener("ratechange", () => update(true));
   audio.addEventListener("error", () => { $("#loading").hidden = false; $("#loading").textContent = "Ошибка аудио: " + (audio.error?.message || audio.error?.code); });
   setInterval(() => { if (!audio.paused) savePos(); }, 5000);
   addEventListener("beforeunload", () => { savePos(true); session.stop(); });
+  // the links back to the library: in the app the page may be put away without unloading, so the last
+  // page turned and the reading session are saved on the click itself
+  document.querySelectorAll(".back-lib, #book-title").forEach((a) => a.addEventListener("click", () => { flushSent(true); session.stop(); }));
   // a tab only publishes its position after it played or seeked, so a stale background tab
   // closed later cannot clobber progress made in another browser
   let posDirty = false;
@@ -381,7 +401,7 @@
     while (lo <= hi) { const mid = (lo + hi) >> 1; if (flowX(mid) >= x0) { ans = mid; hi = mid - 1; } else lo = mid + 1; }
     return ans;
   }
-  let sentTimer = 0;
+  let sentTimer = 0, sentPatch = null;
   // Show spread `n`. `anchor` is the sentence the reader is on when the caller already knows it: a
   // relayout must keep the sentence it started from, or every resize event nudges the place a little.
   function goSpread(n, save = true, anchor = null, step = false) {
@@ -395,9 +415,12 @@
     $("#chapter-title").textContent = book.chapters[chapterOfSent(pages.sent)]?.title || "";
     if (save) {
       const at = Date.now(); store.set("rs:sent:" + slug, pages.sent); store.set("rs:sentAt:" + slug, at);
-      clearTimeout(sentTimer); sentTimer = setTimeout(() => putState({ sent: pages.sent, sentAt: at, sentPct: Math.round((pages.sent / sFirst.length) * 100) }), 300);
+      sentPatch = { sent: pages.sent, sentAt: at, sentPct: Math.round((pages.sent / sFirst.length) * 100) };
+      clearTimeout(sentTimer); sentTimer = setTimeout(flushSent, 300);
     }
   }
+  // the page turned last, saved now instead of after the pause (the page is being left)
+  function flushSent(keepalive) { clearTimeout(sentTimer); if (sentPatch) putState(sentPatch, keepalive); sentPatch = null; }
   function goToSentence(si, save = true) {
     if (!sentEls[si]) return goSpread(0, save);  // no such sentence: the page shown and the place saved must agree
     goSpread(spreadOfSent(si), save, si);
@@ -458,6 +481,7 @@
     pgTotal.textContent = pages.total;
     pgCur.style.width = String(pages.total).length + 2 + "ch";
     if (!pgTyping) pgCur.value = pages.cur + 1;
+    $("#pg-prev").disabled = pages.cur <= 0; $("#pg-next").disabled = pages.cur >= pages.total - 1;  // the ends say so
     const pct = Math.round((pages.sent / Math.max(1, sFirst.length)) * 100);
     pgRead.innerHTML = pages.capped ? "книга не помещается целиком" : `<span class="pg-word">прочитано </span>${pct}%`;
     pgRead.classList.toggle("warn", !!pages.capped);
@@ -534,7 +558,7 @@
   let seekingUI = false;
   const prog = $("#progress");
   // the played part of the bar, drawn by the stylesheet from this one number (once a second at most)
-  function paintProgress() { prog.style.setProperty("--p", ((+prog.value / (+prog.max || 1)) * 100).toFixed(2) + "%"); }
+  function paintProgress() { prog.parentElement.style.setProperty("--p", ((+prog.value / (+prog.max || 1)) * 100).toFixed(2) + "%"); }
   prog.addEventListener("input", () => { seekingUI = true; $("#time-cur").textContent = fmt(+prog.value); paintProgress(); });
   prog.addEventListener("change", () => { seekingUI = false; seek(+prog.value); });
 

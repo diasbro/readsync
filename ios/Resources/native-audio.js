@@ -17,6 +17,8 @@
     removeEventListener(type, fn) { listeners[type] = (listeners[type] || []).filter((l) => l.fn !== fn); },
     get currentTime() { return now(); },
     set currentTime(v) { st.t = v; st.at = performance.now(); send("seek", { t: v }); },
+    // the saved place put back when the page loads: a seek the reader did not choose, and the app may say so
+    restore(t) { st.t = t; st.at = performance.now(); send("seek", { t, chosen: false }); },
     get duration() { return st.duration; },
     get paused() { return st.paused; },
     get error() { return st.error; },
@@ -37,6 +39,7 @@
       if (s.event === "snapshot") {
         // back from a locked screen: a play or pause that happened meanwhile is told now
         if (wasPaused !== st.paused) emit(st.paused ? "pause" : "play");
+        emit("timeupdate");  // and a position that moved meanwhile is painted
       } else if (s.event) emit(s.event);
     },
   };

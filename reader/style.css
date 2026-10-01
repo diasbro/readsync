@@ -128,7 +128,7 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .switch input { accent-color: var(--accent); }
 .btn { border: 1px solid var(--line); background: var(--panel); border-radius: 10px; padding: 9px 16px; font-size: 14px; color: var(--fg); }
 .btn:hover { border-color: var(--accent); }
-.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn:disabled { opacity: .4; cursor: default; filter: none; }
 .btn.sm { padding: 6px 11px; font-size: 13px; border-radius: 8px; }
@@ -241,9 +241,9 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .in-app .back-lib svg { width: 24px; height: 24px; }
 /* leaving the page there is locking the phone, and the narrator plays on: this switch means nothing */
 .in-app label:has(#set-pause-hidden) { display: none; }
-.icon:hover { background: var(--line); }
+@media (hover: hover) { .icon:hover { background: var(--line); } }
 .badge { font-variant-numeric: tabular-nums; font-size: 13px; padding: 4px 10px; border-radius: 999px;
-  background: var(--accent); color: #fff; }
+  background: var(--accent); color: var(--on-accent); }
 .badge.ending { animation: pulse 1s infinite alternate; }
 @keyframes pulse { to { opacity: .55; } }
 
@@ -286,7 +286,7 @@ html[data-theme="dark"] #text .fig img, html[data-theme="night"] #text .fig img 
 body.pages { overflow: hidden; overscroll-behavior: none; }
 body.pages .player, body.pages #return-pill { display: none !important; }
 body.pages #text { position: fixed; top: var(--topbar-h); bottom: var(--pager-h); left: 50%; transform: translateX(-50%);
-  width: min(100vw - 56px, calc(var(--width) * 2 + 4rem)); max-width: none; margin: 0; padding: 32px 0 12px;
+  width: min(100vw - 56px - var(--safe-l) - var(--safe-r), calc(var(--width) * 2 + 4rem)); max-width: none; margin: 0; padding: 32px 0 12px;
   columns: 2; column-gap: 4rem; column-fill: auto; column-rule: 1px solid var(--line); overflow: hidden; cursor: default; }
 /* narrow window: a single page instead of a spread */
 /* narrow window: a single page instead of a spread. Asked for by a width wider than the page, not by a
@@ -313,6 +313,7 @@ body.pages #text p { break-inside: auto; orphans: 2; widows: 2; }
   font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .pager .ctl { width: 40px; height: 40px; }
 .pager .ctl svg { width: 20px; height: 20px; }
+.pager .ctl:disabled { opacity: .3; cursor: default; }
 .pg-side { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pg-side.warn { color: #d0902e; cursor: help; }
 .pg-right { display: flex; justify-content: flex-end; }
@@ -320,7 +321,7 @@ body.pages #text p { break-inside: auto; orphans: 2; widows: 2; }
 .pg-at { display: flex; align-items: center; gap: 6px; cursor: text; }
 #pg-cur { width: 4ch; height: 30px; padding: 0 4px; text-align: center; font: inherit; font-weight: 600;
   font-variant-numeric: tabular-nums; color: var(--fg); background: var(--chip); border: 1px solid transparent; border-radius: 9px; }
-#pg-cur:hover { border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+@media (hover: hover) { #pg-cur:hover { border-color: color-mix(in srgb, var(--accent) 35%, transparent); } }
 #pg-cur:focus { border-color: var(--accent); background: var(--panel); }
 #pg-cur:focus:not(:focus-visible) { outline: none; }
 .pg-of { color: var(--muted); }
@@ -349,16 +350,23 @@ body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
   background: var(--glass); -webkit-backdrop-filter: saturate(1.5) blur(24px); backdrop-filter: saturate(1.5) blur(24px);
   border: 1px solid var(--glass-edge); box-shadow: var(--float-shadow); }
 .track { position: relative; height: 22px; }
-#progress { position: absolute; inset: 0; width: 100%; height: 22px; margin: 0; cursor: pointer;
-  -webkit-appearance: none; appearance: none; background: none; accent-color: var(--accent); }
-#progress::-webkit-slider-runnable-track { height: 4px; border-radius: 2px;
+/* three layers: the bar, the chapter cuts on it, the range input on top with only its thumb showing,
+   so a cut never shows through the thumb */
+.track::before { content: ""; position: absolute; left: 0; right: 0; top: 9px; height: 4px; border-radius: 2px;
   background: linear-gradient(to right, var(--accent) var(--p, 0%), var(--chip) var(--p, 0%)); }
-#progress::-moz-range-track { height: 4px; border-radius: 2px; background: var(--chip); }
-#progress::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--accent); }
+#progress { position: absolute; z-index: 1; inset: 0; width: 100%; height: 22px; margin: 0; cursor: pointer;
+  -webkit-appearance: none; appearance: none; background: none; accent-color: var(--accent); }
+#progress::-webkit-slider-runnable-track { height: 4px; background: none; }
+#progress::-moz-range-track { height: 4px; background: none; }
 #progress::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 50%;
   background: var(--accent); border: 2px solid var(--panel); box-shadow: 0 1px 4px rgba(0,0,0,.25); transition: transform .15s; }
 #progress::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--accent); border: 2px solid var(--panel); }
 #progress:active::-webkit-slider-thumb { transform: scale(1.25); }
+/* a thumb a finger can find: still centred on the 4px track */
+@media (pointer: coarse) {
+  #progress::-webkit-slider-thumb { width: 20px; height: 20px; margin-top: -8px; }
+  #progress::-moz-range-thumb { width: 17px; height: 17px; }
+}
 /* chapters: thin cuts through the bar, so it reads as a bar of parts and not a dial */
 #chapter-ticks { position: absolute; left: 0; right: 0; top: 9px; height: 4px; pointer-events: none; }
 #chapter-ticks i { position: absolute; top: 0; width: 1px; height: 4px; margin-left: -.5px; background: var(--panel); }
@@ -372,7 +380,6 @@ body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
 .controls-main { display: flex; align-items: center; gap: 4px; }
 .ctl { width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--fg);
   display: inline-flex; align-items: center; justify-content: center; transition: background .15s, transform .12s; }
-.ctl:hover { background: var(--chip); }
 .ctl:active { transform: scale(.9); }
 .ctl svg { width: 22px; height: 22px; }
 #btn-prev-sent, #btn-next-sent { color: var(--muted); }
@@ -380,12 +387,16 @@ body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
 #btn-back svg, #btn-fwd svg { width: 28px; height: 28px; }
 .ctl.big { width: 58px; height: 58px; margin: 0 8px; background: var(--accent); color: var(--on-accent);
   box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 38%, transparent); }
-.ctl.big:hover { background: color-mix(in srgb, var(--accent) 88%, #000); }
 .ctl.big svg { width: 26px; height: 26px; }
 .ctl.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 #speed { -webkit-appearance: none; appearance: none; width: 58px; height: 30px; padding: 0; border: 0; border-radius: 15px;
   background: var(--chip); color: var(--fg); font: 600 13px var(--ui); font-variant-numeric: tabular-nums; cursor: pointer; text-align: center; text-align-last: center; }
-#speed:hover { background: color-mix(in srgb, var(--fg) 12%, transparent); }
+/* a finger has no hover: on a touch screen the last button tapped would keep the look */
+@media (hover: hover) {
+  .ctl:hover { background: var(--chip); }
+  .ctl.big:hover { background: color-mix(in srgb, var(--accent) 88%, #000); }
+  #speed:hover { background: color-mix(in srgb, var(--fg) 12%, transparent); }
+}
 /* distraction-free: the top bar fades when the pointer is idle; the player slides away while
    playing and comes back on pause or when the pointer reaches the bottom edge */
 .topbar { transition: opacity .3s; }
@@ -425,7 +436,7 @@ body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { o
 .seg { display: flex; gap: 6px; flex-wrap: wrap; }
 .seg button { min-width: 30%; }
 .seg button { flex: 1; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 8px 6px; font-size: 14px; }
-.seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.seg button.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 #toc-list { list-style: none; margin: 0; padding: 8px 0; }
 #toc-list li { padding: 8px 16px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
 #toc-list li.l1 { font-weight: 600; margin-top: 6px; }
@@ -456,7 +467,7 @@ body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { o
 .modal-box h3 { margin: 0 0 8px; }
 .row-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .row-btns button { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 8px 14px; }
-.row-btns .primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.row-btns .primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 
 /* a phone: the same card, edge to edge less a thumb's margin; the focus button leaves the row, since
    «Приглушать» in the settings is the same switch, so the controls keep their size */
@@ -472,5 +483,14 @@ body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { o
   .controls-right #btn-focus { display: none; }
   .icon { width: 40px; height: 40px; }
 }
+/* the smallest phones: speed, five controls and the timer need 48 + 4×36 + 50 + 2×4 + 36 = 286px; on a
+   320px screen the card is 304px with a 1px edge, which holds that with 8px of padding a side */
+@media (max-width: 360px) {
+  .player { padding-left: 8px; padding-right: 8px; }
+  .ctl { width: 36px; }
+  .ctl.big { width: 50px; height: 50px; margin: 0 4px; }
+  #speed { width: 48px; }
+  .controls-main { gap: 0; }
+}
 /* a touch screen has no keyboard to explain */
-@media (hover: none) and (pointer: coarse) { .drawer .keys { display: none; } }
+@media (hover: none) and (pointer: coarse) { .drawer .keys, .key-hint { display: none; } }
