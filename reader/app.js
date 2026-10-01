@@ -21,6 +21,7 @@
   // In the iPhone app the narrator plays natively (background, lock screen, headphones): the same
   // interface as <audio>, but the app owns the position, the sessions and the lock-screen controls.
   const native = !!window.nativeAudio;
+  if (native) document.documentElement.classList.add("in-app");  // the page sits inside the iPhone app
   const audio = window.nativeAudio || $("#audio"), textEl = $("#text");
   const pgCur = $("#pg-cur"), pgTotal = $("#pg-total"), pgRead = $("#pg-read");
   let book, wB, wT0, wT1, wS, sFirst, sLast, sBlock, sWordsCum = [], chapStartWord = [], chapStartTime = [], duration = 0, hasAudio = false;
@@ -277,8 +278,8 @@
 
   // 10 Hz sync loop while playing (cheap: one binary search + a few class toggles per tick)
   let tick = 0;
-  audio.addEventListener("play", () => { settling = false; clearInterval(tick); tick = setInterval(() => update(false), 100); $("#btn-play").textContent = "❚❚"; if (!native) session.start(); document.body.classList.add("playing"); armIdle(); armHidePlayer(); });
-  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; if (!native) session.stop(); savePos(); document.body.classList.remove("playing", "idle"); showPlayer(); pausedAt = Date.now(); });
+  audio.addEventListener("play", () => { settling = false; clearInterval(tick); tick = setInterval(() => update(false), 100); setIcon($("#btn-play"), "pause"); if (!native) session.start(); document.body.classList.add("playing"); armIdle(); armHidePlayer(); });
+  audio.addEventListener("pause", () => { clearInterval(tick); update(true); setIcon($("#btn-play"), "play"); if (!native) session.stop(); savePos(); document.body.classList.remove("playing", "idle"); showPlayer(); pausedAt = Date.now(); });
   // distraction-free chrome: the top bar fades after 4 s without pointer/keyboard activity while
   // playing; the player bar hides 1.5 s after play starts (scrolling does not bring it back) and
   // returns on pause or when the pointer reaches the bottom edge
@@ -419,13 +420,15 @@
   function saveMode(m) { const at = Date.now(); store.set("rs:mode:" + slug, m); store.set("rs:modeAt:" + slug, at); putState({ mode: m, modeAt: at }); }
   function enterPages(si, save = true) {
     if (hasAudio && !audio.paused) audio.pause();
-    pages.on = true; document.body.classList.add("pages"); $("#pager").hidden = false; $("#btn-mode").textContent = "🎧"; $("#btn-mode").title = "Вернуться к аудио (m)";
+    if (native) window.webkit.messageHandlers.audio.postMessage({ cmd: "pages", on: true });  // the lock screen must not start the narrator under a page
+    pages.on = true; document.body.classList.add("pages"); $("#pager").hidden = false; setIcon($("#btn-mode"), "audio"); $("#btn-mode").title = "Вернуться к аудио (m)";
     closeDrawers(); pagesLayout(); goToSentence(si ?? pages.sent, false);
     if (save) saveMode("pages");
     session.start();
   }
   function exitPages() {
-    pages.on = false; document.body.classList.remove("pages"); $("#pager").hidden = true; $("#btn-mode").textContent = "📖"; $("#btn-mode").title = "Режим книги без аудио (m)";
+    if (native) window.webkit.messageHandlers.audio.postMessage({ cmd: "pages", on: false });
+    pages.on = false; document.body.classList.remove("pages"); $("#pager").hidden = true; setIcon($("#btn-mode"), "book"); $("#btn-mode").title = "Режим книги без аудио (m)";
     session.stop(); saveMode("audio");
     const st = sentStart(pages.sent);
     if (st != null) seek(st); else update(true);
@@ -487,7 +490,7 @@
   function seek(t) { settling = false; audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); posDirty = true; userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
   // coming back to a paused tab: adopt a newer position/settings written by another browser
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden || !audio.paused) return;
+    if (document.hidden || !audio.paused || native) return;  // in the app the player catches up itself
     loadRemote().then(() => {
       if ((remote.posAt || 0) > store.get("rs:posAt:" + slug, 0) && typeof remote.pos === "number") {
         audio.currentTime = remote.pos; posDirty = false; store.set("rs:pos:" + slug, remote.pos); store.set("rs:posAt:" + slug, remote.posAt);
@@ -526,7 +529,7 @@
     const nref = e.target.closest(".nref");
     if (nref) { showNote(nref); e.stopPropagation(); return; }
     if (pages.on) {
-      if (getSelection().toString()) return;
+      if (getSelection().toString() || Date.now() - swiped < 400) return;
       const x = turnZone(e);
       if (x < 0.3) turn(-1); else if (x > 0.7) turn(1);
       return;
@@ -547,6 +550,24 @@
     if (now) textEl.classList.add(now);
     zone = now;
   }, { passive: true });
+
+  // A finger turns pages the way a book's pages turn: a horizontal swipe, either way. Only a swipe
+  // that is clearly sideways counts, so a tap or a slip of the thumb does nothing.
+  let swipe = null;
+  textEl.addEventListener("touchstart", (e) => {
+    swipe = pages.on && e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, at: Date.now() } : null;
+  }, { passive: true });
+  textEl.addEventListener("touchend", (e) => {
+    if (!swipe || !pages.on) return;
+    const t = e.changedTouches[0], dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
+    const quick = Date.now() - swipe.at < 600;
+    swipe = null;
+    if (quick && Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      turn(dx < 0 ? 1 : -1);
+      swiped = Date.now();  // the click that follows a swipe is not a tap on a third
+    }
+  }, { passive: true });
+  let swiped = 0;
 
   // user scroll detection
   const onUserScroll = () => { if (settings.scroll === "off" || pages.on) return; userScrolled = true; $("#return-pill").hidden = false; };
