@@ -204,9 +204,20 @@ final class Menu: NSObject, NSApplicationDelegate {
     /// half-written while the folder changes place. Every step says what it is about to do first.
     @objc private func toggleCloud() {
         guard let python else { return }
+        // a job writes into the library while it runs and outlives the server: the folder stays put until it ends
+        let jobs = runningJobs()
+        if !jobs.isEmpty {
+            alert("Книги ещё загружаются", "Библиотеку можно перенести, когда закончится: \(jobs.joined(separator: ", ")).")
+            return
+        }
         if Cloud.isOn {
-            guard confirm("Вернуть книги на этот Mac?", "Библиотека переедет из iCloud Drive обратно. На iPhone книги пропадут.")
-            else { return }
+            let sure =
+                Cloud.isAdopted
+                ? confirm(
+                    "Отключить библиотеку iCloud на этом Mac?",
+                    "Книги останутся в iCloud Drive и на iPhone, этот Mac снова откроет свои прежние книги.")
+                : confirm("Вернуть книги на этот Mac?", "Библиотека переедет из iCloud Drive обратно. На iPhone книги пропадут.")
+            guard sure else { return }
             server.stop()
             if case .failed(let why) = Cloud.turnOff() { alert("Не вышло вернуть книги", why) }
         } else if Cloud.hasLibrary {
@@ -238,6 +249,23 @@ final class Menu: NSObject, NSApplicationDelegate {
         }
         server.start(python: python)
         build()
+    }
+
+    /// Books the server is loading right now, by slug. Asked with a short wait: the reader just chose a menu item.
+    private func runningJobs() -> [String] {
+        guard server.isRunning else { return [] }
+        final class Box: @unchecked Sendable { var slugs: [String] = [] }
+        let box = Box()
+        let answered = DispatchSemaphore(value: 0)
+        let request = URLRequest(url: server.url.appendingPathComponent("api/jobs"), timeoutInterval: 3)
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            if let data, let jobs = (try? JSONSerialization.jsonObject(with: data)) as? [String: [String: Any]] {
+                box.slugs = jobs.filter { ($0.value["running"] as? Bool) == true }.map(\.key).sorted()
+            }
+            answered.signal()
+        }.resume()
+        _ = answered.wait(timeout: .now() + 4)
+        return box.slugs
     }
 
     private func confirm(_ title: String, _ text: String) -> Bool {

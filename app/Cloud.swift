@@ -14,15 +14,20 @@ enum Cloud {
 
     static var isAvailable: Bool { FileManager.default.fileExists(atPath: drive.path) }
 
+    /// The iCloud library came from elsewhere: turning it off moves nothing back.
+    static var isAdopted: Bool { UserDefaults.standard.bool(forKey: adoptedKey) }
+
     /// Whether the books the server reads are the ones in iCloud.
     static var isOn: Bool {
         link.resolvingSymlinksInPath().path == library.resolvingSymlinksInPath().path
     }
 
-    /// Books (and the shared library files) in a folder, without the placeholder git keeps there.
+    /// Books (and the shared library files) in a folder, without the placeholder git keeps there,
+    /// Finder's notes and half-written temporary files: those are leftovers, not part of the library.
     private static func entries(_ dir: URL) -> [URL] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-        return names.filter { $0 != ".gitkeep" && $0 != ".DS_Store" }.map { dir.appendingPathComponent($0) }
+        return names.filter { $0 != ".gitkeep" && $0 != ".DS_Store" && !$0.hasSuffix(".tmp") }
+            .map { dir.appendingPathComponent($0) }
     }
 
     static var localBytes: Int64 {
@@ -46,6 +51,36 @@ enum Cloud {
 
     enum Move { case done, failed(String) }
 
+    private struct Refusal: LocalizedError {
+        let errorDescription: String?
+        init(_ text: String) { errorDescription = text }
+    }
+
+    /// Moves are all or nothing: a name already taken at a destination stops them before anything
+    /// moves, and a failure partway (in the moves or in `then`) puts back what had moved, so the
+    /// library is never split between this Mac and iCloud.
+    private static func move(_ moves: [(from: URL, to: URL)], then finish: () throws -> Void) throws {
+        let fm = FileManager.default
+        let taken = moves.filter { fm.fileExists(atPath: $0.to.path) }.map(\.to.lastPathComponent)
+        if !taken.isEmpty { throw Refusal("Там уже есть: \(taken.joined(separator: ", "))") }
+        var done: [(from: URL, to: URL)] = []
+        do {
+            for m in moves {
+                try fm.moveItem(at: m.from, to: m.to)
+                done.append(m)
+            }
+            try finish()
+        } catch {
+            var stuck: [String] = []
+            for m in done.reversed() {
+                try? fm.createDirectory(at: m.from.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if (try? fm.moveItem(at: m.to, to: m.from)) == nil { stuck.append(m.to.path) }
+            }
+            if stuck.isEmpty { throw error }
+            throw Refusal("\(error.localizedDescription)\nНе вернулись на место: \(stuck.joined(separator: ", "))")
+        }
+    }
+
     /// Move this Mac's books into iCloud and serve them from there. When iCloud already holds a
     /// library, `adopt` serves that one and keeps the local books aside, untouched.
     static func turnOn(adopt: Bool) -> Move {
@@ -55,25 +90,22 @@ enum Cloud {
             try fm.createDirectory(at: library, withIntermediateDirectories: true)
             if adopt {
                 var kept = local
+                var aside: [(from: URL, to: URL)] = []
                 if (try? fm.destinationOfSymbolicLink(atPath: link.path)) == nil, fm.fileExists(atPath: link.path) {
                     // the books sit right in the app's folder: set them aside under another name, untouched
                     kept = link.deletingLastPathComponent().appendingPathComponent("books-local")
-                    if fm.fileExists(atPath: kept.path) { throw CocoaError(.fileWriteFileExists) }
-                    try fm.moveItem(at: link, to: kept)
+                    aside = [(link, kept)]
                 }
+                try move(aside) { try pointBooks(at: library) }
                 UserDefaults.standard.set(kept.path, forKey: localKey)
                 UserDefaults.standard.set(true, forKey: adoptedKey)
             } else {
                 // books move one by one: the local folder stays (git keeps a placeholder in a clone's books/)
-                for item in entries(local) {
-                    let dest = library.appendingPathComponent(item.lastPathComponent)
-                    if fm.fileExists(atPath: dest.path) { continue }
-                    try fm.moveItem(at: item, to: dest)
-                }
+                let books = entries(local).map { ($0, library.appendingPathComponent($0.lastPathComponent)) }
+                try move(books) { try pointBooks(at: library) }
                 UserDefaults.standard.set(local.path, forKey: localKey)
                 UserDefaults.standard.set(false, forKey: adoptedKey)
             }
-            try pointBooks(at: library)
             log("library in iCloud: \(library.path)")
             return .done
         } catch {
@@ -85,21 +117,24 @@ enum Cloud {
     static func turnOff() -> Move {
         let fm = FileManager.default
         let local = URL(fileURLWithPath: UserDefaults.standard.string(forKey: localKey) ?? link.path)
+        var unlinked = false
         do {
             if same(local, link), (try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil {
                 try fm.removeItem(at: link)  // the books lived right here before: a folder again, not a link
+                unlinked = true
             }
             try fm.createDirectory(at: local, withIntermediateDirectories: true)
             // a library another Mac keeps in iCloud stays there; only this Mac's own books come back
-            for item in UserDefaults.standard.bool(forKey: adoptedKey) ? [] : entries(library) {
-                let dest = local.appendingPathComponent(item.lastPathComponent)
-                if fm.fileExists(atPath: dest.path) { continue }
-                try fm.moveItem(at: item, to: dest)
-            }
-            try pointBooks(at: local)
+            let adopted = UserDefaults.standard.bool(forKey: adoptedKey)
+            let books = adopted ? [] : entries(library).map { ($0, local.appendingPathComponent($0.lastPathComponent)) }
+            try move(books) { try pointBooks(at: local) }
             log("library back on this Mac: \(local.path)")
             return .done
         } catch {
+            if unlinked, entries(link).isEmpty {  // nothing came back: the link to iCloud is put back as it was
+                try? fm.removeItem(at: link)
+                try? fm.createSymbolicLink(at: link, withDestinationURL: library)
+            }
             return .failed(error.localizedDescription)
         }
     }
@@ -117,7 +152,10 @@ enum Cloud {
         if (try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil {
             try fm.removeItem(at: link)
         } else if fm.fileExists(atPath: link.path) {
-            if !entries(link).isEmpty { return }  // a real folder that still holds books is never replaced
+            if same(target, link) { return }  // the books are served right from this folder, even an empty one
+            // a real folder that still holds books is never replaced; leftovers go with it
+            let left = entries(link).map(\.lastPathComponent)
+            if !left.isEmpty { throw Refusal("В \(link.path) остались: \(left.joined(separator: ", "))") }
             try fm.removeItem(at: link)
         }
         if same(target, link) { return }
