@@ -26,6 +26,7 @@ from library import (
     STATE_LOCK,
     add_session,
     delete_book,
+    ensure_manifests,
     job_status,
     list_books,
     load_settings,
@@ -297,6 +298,7 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or 8765))
     args = ap.parse_args()
+    ensure_manifests()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"readsync: http://{args.host}:{args.port}/  (books: {', '.join(b['slug'] for b in list_books()) or 'none'})")
     with contextlib.suppress(KeyboardInterrupt):

@@ -1,0 +1,44 @@
+[
+  {
+    "name": "newest value of each key wins, whichever device wrote it",
+    "edition": "e1",
+    "files": [
+      {"pos": 100, "posAt": 10, "mode": "audio", "modeAt": 50},
+      {"pos": 900, "posAt": 20, "mode": "pages", "modeAt": 40}
+    ],
+    "merged": {"pos": 900, "posAt": 20, "mode": "audio", "modeAt": 50}
+  },
+  {
+    "name": "statistics add up across devices, each file holding only its own sessions",
+    "edition": "",
+    "files": [
+      {"stats": {"days": {"2026-10-01": {"sec": 60, "words": 100}}}},
+      {"stats": {"days": {"2026-10-01": {"sec": 30, "words": 50}, "2026-10-02": {"sec": 5, "words": 7}}}}
+    ],
+    "merged": {"stats": {"days": {"2026-10-01": {"sec": 90.0, "words": 150.0}, "2026-10-02": {"sec": 5.0, "words": 7.0}}}}
+  },
+  {
+    "name": "a sentence position from another edition of the text is dropped",
+    "edition": "e2",
+    "files": [
+      {"sent": 500, "sentAt": 90, "sentPct": 40, "sentEdition": "e1"},
+      {"sent": 12, "sentAt": 10, "sentPct": 1, "sentEdition": "e2"}
+    ],
+    "merged": {"sent": 12, "sentAt": 10, "sentPct": 1}
+  },
+  {
+    "name": "sentPct travels with the sent that wins",
+    "edition": "e1",
+    "files": [
+      {"sent": 5, "sentAt": 100, "sentPct": 3, "sentEdition": "e1"},
+      {"sent": 900, "sentAt": 50, "sentPct": 99, "sentEdition": "e1"}
+    ],
+    "merged": {"sent": 5, "sentAt": 100, "sentPct": 3}
+  },
+  {
+    "name": "keys outside the merge, such as old per-book settings, do not come through",
+    "edition": "",
+    "files": [{"settings": {"font": 30}, "settingsAt": 9, "shelf": "reading", "shelfAt": 3}],
+    "merged": {"shelf": "reading", "shelfAt": 3}
+  }
+]

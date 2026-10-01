@@ -26,6 +26,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from manifest import stamp  # noqa: E402
 from tidy import PLAYABLE, tidy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -346,6 +347,7 @@ def main() -> None:
         meta["audio_source"] = " | ".join(args.audio)
         meta["narrator"] = args.narrator or meta.get("narrator", "")
     toml.write_text("".join(f'{k} = "{esc(v)}"\n' for k, v in meta.items() if v != ""), encoding="utf-8")
+    stamp(d, new_edition=bool(args.text or args.audio))
 
     print(
         f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)"),
