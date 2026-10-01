@@ -25,6 +25,9 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tidy import PLAYABLE, tidy  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 # the same root the server uses: the Mac app keeps the books outside the code it updates
 BOOKS = Path(os.environ.get("READSYNC_BOOKS") or ROOT / "books").expanduser()
@@ -158,6 +161,7 @@ def build_text(sources: list[str], d: Path, title: str, author: str) -> None:
         if (part / "images").is_dir():
             for f in (part / "images").iterdir():
                 shutil.copy(f, d / "images" / f.name)
+    shutil.rmtree(parts_dir)  # the downloads served their purpose: the merged book is all that is read
 
 
 def fetch_audio(src: str, d: Path, idx: int, lang: str) -> Path:
@@ -266,8 +270,7 @@ def build_audio(sources: list[str], d: Path, lang: str) -> None:
     elif (d / "whisper.json3").exists():
         (d / "whisper.json3").unlink()
     for p in parts:
-        if len(parts) > 1 or p.suffix != ".webm":
-            p.unlink()  # the concatenated m4a is the source from now on
+        p.unlink()  # the concatenated m4a is the source from now on
     lst.unlink()
 
 
@@ -305,7 +308,9 @@ def main() -> None:
     book = json.loads((d / "book.json").read_text(encoding="utf-8"))
 
     # new text under existing captions (an edition replaced): the word timing is rebuilt from them
-    retime = bool(args.text) and not args.audio and (d / "yt.merged.json3").exists() and (d / "audio16k.wav").exists()
+    has_captions = any(d.glob("yt.*.json3")) or (d / "whisper.json3").exists()
+    has_audio = any((d / name).exists() for name in PLAYABLE)
+    retime = bool(args.text) and not args.audio and has_captions and has_audio
     if retime:
         for stale in ("timing.json", "anchors.json", "align.log"):
             (d / stale).unlink(missing_ok=True)
@@ -346,10 +351,13 @@ def main() -> None:
         f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)"),
         flush=True,
     )
-    if (args.audio or retime) and not args.no_align:
-        print("running precise MMS alignment (about 15 min per hour of audio, low priority)...", flush=True)
-        run([PY, str(PIPE / "align.py"), str(d)])
-        print("done: precise timing", flush=True)
+    try:
+        if (args.audio or retime) and not args.no_align:
+            print("running precise MMS alignment (about 15 min per hour of audio, low priority)...", flush=True)
+            run([PY, str(PIPE / "align.py"), str(d)])
+            print("done: precise timing", flush=True)
+    finally:
+        tidy(d)  # whatever the alignment did, the downloads and derived audio are not kept
 
 
 if __name__ == "__main__":
