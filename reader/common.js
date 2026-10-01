@@ -2,6 +2,28 @@
  Plain JS, no build step; the three files share one global scope. */
 "use strict";
 const $ = (s) => document.querySelector(s);
+// Line icons in the page's own colour. Characters like ▶ ⏮ ⏱ ⚙ turn into colour emoji on an iPhone.
+const ICONS = {
+  play: '<path d="M8 5.2v13.6L19 12z" fill="currentColor" stroke="none"/>',
+  pause: '<path d="M7.5 5h3v14h-3zM13.5 5h3v14h-3z" fill="currentColor" stroke="none"/>',
+  prev: '<path d="M6.5 5.5v13M18 6.5 9.5 12l8.5 5.5z"/>',
+  next: '<path d="M17.5 5.5v13M6 6.5l8.5 5.5L6 17.5z"/>',
+  focus: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/>',
+  timer: '<circle cx="12" cy="13.5" r="7"/><path d="M12 10v3.5l2.3 1.6M10 3h4"/>',
+  menu: '<path d="M4.5 7h15M4.5 12h15M4.5 17h9"/>',
+  gear: '<path d="M4.5 7.5h8M17.5 7.5h2M4.5 16.5h2M11.5 16.5h8"/><circle cx="15" cy="7.5" r="2.3"/><circle cx="9" cy="16.5" r="2.3"/>',
+  book: '<path d="M12 6.8C10 5.3 7.2 4.8 4.5 5.2v12.6c2.7-.4 5.5.1 7.5 1.6 2-1.5 4.8-2 7.5-1.6V5.2c-2.7-.4-5.5.1-7.5 1.6zM12 6.8v12.6"/>',
+  audio: '<path d="M4.5 15v-2.5a7.5 7.5 0 0 1 15 0V15"/><rect x="3.8" y="13.8" width="3.8" height="5.7" rx="1.4"/><rect x="16.4" y="13.8" width="3.8" height="5.7" rx="1.4"/>',
+  close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
+  back: '<path d="M14.5 5.5 8 12l6.5 6.5"/>',
+  forward: '<path d="M9.5 5.5 16 12l-6.5 6.5"/>',
+  // ten seconds back and on: a circular arrow round the number, as players draw it
+  back10: '<path d="M5.6 9.2A7.5 7.5 0 1 1 4.5 13"/><path d="M5.3 4.8v4.6h4.6"/><text x="12.6" y="15.6" font-size="7.4" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none" font-family="-apple-system, system-ui, sans-serif">10</text>',
+  fwd10: '<path d="M18.4 9.2A7.5 7.5 0 1 0 19.5 13"/><path d="M18.7 4.8v4.6h-4.6"/><text x="11.4" y="15.6" font-size="7.4" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none" font-family="-apple-system, system-ui, sans-serif">10</text>',
+};
+const iconSvg = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+function setIcon(el, name) { if (el) { el.innerHTML = iconSvg(name); el.dataset.icon = name; } }
+document.querySelectorAll("[data-icon]").forEach((el) => setIcon(el, el.dataset.icon));
 const slug = new URLSearchParams(location.search).get("book");
 // also the apostrophe: catalog titles carry them and some attributes here are single-quoted
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -15,6 +37,13 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 const today = () => new Date().toISOString().slice(0, 10);
+// Inside the iPhone app there is no server: the reader's writes go to Swift over a message bridge,
+// which answers with the same JSON the server would. Reads still go through fetch (a URL scheme).
+const bridge = window.webkit?.messageHandlers?.readsync;
+function send(method, path, body, keepalive) {
+  if (bridge) return bridge.postMessage({ method, path, body }).then((json) => ({ ok: true, json: () => Promise.resolve(json) }));
+  return fetch(path, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), keepalive: !!keepalive });
+}
 
 // ---------------- settings ----------------
 const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", sent: true, word: true, wordStyle: "bg",
@@ -57,7 +86,7 @@ let settingsTimer = 0, onSettingsSynced = () => {};
 function persistSettings() {
   const at = Date.now(); store.set("rs:settingsAt", at);
   clearTimeout(settingsTimer);
-  settingsTimer = setTimeout(() => fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings, settingsAt: at }) }).catch(() => {}), 400);
+  settingsTimer = setTimeout(() => send("PUT", "/api/settings", { settings, settingsAt: at }).catch(() => {}), 400);
 }
 function adoptSettings(remoteSettings) {
   if (remoteSettings && remoteSettings.settings && (remoteSettings.settingsAt || 0) > store.get("rs:settingsAt", 0)) {

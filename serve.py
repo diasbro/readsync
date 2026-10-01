@@ -26,6 +26,7 @@ from library import (
     STATE_LOCK,
     add_session,
     delete_book,
+    ensure_manifests,
     job_status,
     list_books,
     load_settings,
@@ -45,6 +46,7 @@ from library import (
     wishlist_update,
 )
 from sources import search_text
+from state import StateUnavailable
 
 mimetypes.add_type("audio/mp4", ".m4a")
 mimetypes.add_type("audio/webm", ".webm")
@@ -203,7 +205,10 @@ class Handler(SimpleHTTPRequestHandler):
         slug, is_session = self.state_slug()
         if slug is None or is_session:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-        return self.send_json(merge_state(slug, body))
+        try:
+            return self.send_json(merge_state(slug, body))
+        except StateUnavailable as e:  # this device's file is not readable yet: try again, never overwrite it
+            return self.send_json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
 
     def do_POST(self):
         if self.path.startswith("/api/add"):
@@ -232,7 +237,10 @@ class Handler(SimpleHTTPRequestHandler):
         slug, is_session = self.state_slug()
         if slug is None or not is_session:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-        return self.send_json(add_session(slug, delta))
+        try:
+            return self.send_json(add_session(slug, delta))
+        except StateUnavailable as e:
+            return self.send_json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
 
     def do_DELETE(self):
         if self.path.startswith("/api/jobs/"):
@@ -297,6 +305,7 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or 8765))
     args = ap.parse_args()
+    ensure_manifests()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"readsync: http://{args.host}:{args.port}/  (books: {', '.join(b['slug'] for b in list_books()) or 'none'})")
     with contextlib.suppress(KeyboardInterrupt):

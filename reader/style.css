@@ -15,7 +15,7 @@
 :root {
   color-scheme: light;
   --bg: #fbfaf7; --fg: #1d1c1a; --muted: #7a7670; --line: #e6e2da;
-  --panel: #ffffff; --accent: #b4532a;
+  --panel: #ffffff; --accent: #b4532a; --on-accent: #fff;
   --sent-bg: #fff3c4; --word-bg: color-mix(in srgb, var(--accent) 16%, transparent);
   --font-size: 20px; --lh: 1.65; --width: 42rem;
   --serif: "Iowan Old Style", "Palatino Linotype", "Literata", Georgia, "Times New Roman", serif;
@@ -23,7 +23,10 @@
   --ui: "Inter", var(--sans);
   --family: "Literata", var(--serif);
   --weight: 400;
-  --topbar-h: 52px; --player-h: 108px; --pager-h: 46px;
+  /* the bars grow by the screen's unsafe edges (notch, home indicator); zero in a desktop browser */
+  --safe-t: env(safe-area-inset-top, 0px); --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px); --safe-r: env(safe-area-inset-right, 0px);
+  --topbar-h: calc(52px + var(--safe-t)); --player-h: calc(150px + var(--safe-b)); --pager-h: calc(76px + var(--safe-b));
 }
 html[data-theme="sepia"] {
   color-scheme: light;
@@ -33,13 +36,13 @@ html[data-theme="sepia"] {
 html[data-theme="dark"] {
   color-scheme: dark;
   --bg: #15161a; --fg: #d9d6cf; --muted: #8b8985; --line: #2a2c33; --panel: #1e2027;
-  --sent-bg: #2f3140; --accent: #e0885e; --word-bg: color-mix(in srgb, var(--accent) 24%, transparent);
+  --sent-bg: #2f3140; --accent: #e0885e; --on-accent: var(--bg); --word-bg: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 /* warm dark: less blue light for evening reading */
 html[data-theme="night"] {
   color-scheme: dark;
   --bg: #1a1613; --fg: #d6c9b5; --muted: #8a7d6c; --line: #2d2721; --panel: #211c17;
-  --sent-bg: #33291c; --accent: #d59260; --word-bg: color-mix(in srgb, var(--accent) 24%, transparent);
+  --sent-bg: #33291c; --accent: #d59260; --on-accent: var(--bg); --word-bg: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--fg); }
@@ -125,7 +128,7 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .switch input { accent-color: var(--accent); }
 .btn { border: 1px solid var(--line); background: var(--panel); border-radius: 10px; padding: 9px 16px; font-size: 14px; color: var(--fg); }
 .btn:hover { border-color: var(--accent); }
-.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn:disabled { opacity: .4; cursor: default; filter: none; }
 .btn.sm { padding: 6px 11px; font-size: 13px; border-radius: 8px; }
@@ -221,17 +224,26 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 
 /* ---------- layout ---------- */
 .topbar { position: fixed; top: 0; left: 0; right: 0; height: var(--topbar-h); z-index: 20;
-  display: flex; align-items: center; gap: 10px; padding: 0 12px;
+  display: flex; align-items: center; gap: 10px; padding: var(--safe-t) max(12px, var(--safe-r)) 0 max(12px, var(--safe-l));
   background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--line); }
 .topbar-title { flex: 1; min-width: 0; line-height: 1.25; }
 #book-title { display: block; font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: inherit; text-decoration: none; }
 #book-title:hover { color: var(--accent); }
 #chapter-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.icon { background: none; border: 0; font-size: 20px; width: 36px; height: 36px; border-radius: 8px; color: var(--fg); }
-.icon:hover { background: var(--line); }
+.icon { background: none; border: 0; font-size: 20px; width: 36px; height: 36px; border-radius: 8px; color: var(--fg);
+  display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.icon svg, .ctl svg { width: 20px; height: 20px; }
+.ctl.big svg { width: 24px; height: 24px; }
+/* the way back to the library: inside the iPhone app only, where the library is a screen of its own */
+.back-lib { display: none; color: var(--fg); }
+.in-app .back-lib { display: inline-flex; margin-right: -6px; }
+.in-app .back-lib svg { width: 24px; height: 24px; }
+/* leaving the page there is locking the phone, and the narrator plays on: this switch means nothing */
+.in-app label:has(#set-pause-hidden) { display: none; }
+@media (hover: hover) { .icon:hover { background: var(--line); } }
 .badge { font-variant-numeric: tabular-nums; font-size: 13px; padding: 4px 10px; border-radius: 999px;
-  background: var(--accent); color: #fff; }
+  background: var(--accent); color: var(--on-accent); }
 .badge.ending { animation: pulse 1s infinite alternate; }
 @keyframes pulse { to { opacity: .55; } }
 
@@ -274,10 +286,15 @@ html[data-theme="dark"] #text .fig img, html[data-theme="night"] #text .fig img 
 body.pages { overflow: hidden; overscroll-behavior: none; }
 body.pages .player, body.pages #return-pill { display: none !important; }
 body.pages #text { position: fixed; top: var(--topbar-h); bottom: var(--pager-h); left: 50%; transform: translateX(-50%);
-  width: min(100vw - 56px, calc(var(--width) * 2 + 4rem)); max-width: none; margin: 0; padding: 32px 0 12px;
+  width: min(100vw - 56px - var(--safe-l) - var(--safe-r), calc(var(--width) * 2 + 4rem)); max-width: none; margin: 0; padding: 32px 0 12px;
   columns: 2; column-gap: 4rem; column-fill: auto; column-rule: 1px solid var(--line); overflow: hidden; cursor: default; }
 /* narrow window: a single page instead of a spread */
-@media (max-width: 900px) { body.pages #text { columns: 1; column-rule: none; width: min(100vw - 40px, var(--width)); } }
+/* narrow window: a single page instead of a spread. Asked for by a width wider than the page, not by a
+   count of one: WebKit treats `columns: 1` as no columns at all and lets the book run straight down */
+@media (max-width: 900px) {
+  body.pages #text { columns: auto; column-width: 3000px; column-rule: none;
+    width: min(100vw - 40px - var(--safe-l) - var(--safe-r), var(--width)); }
+}
 body.pages #text .s { cursor: default; }
 /* the outer thirds turn a page, the middle one selects text: the cursor is what says so */
 body.pages #text.turn-prev { cursor: w-resize; }
@@ -286,76 +303,140 @@ body.pages #text .s.cur, body.pages #text .w.cur { background: none; box-shadow:
 body.pages #text .k-title { break-after: avoid; }
 body.pages #text .k-title.lvl1 { margin-top: 1.2em; }
 body.pages #text p { break-inside: auto; orphans: 2; widows: 2; }
-/* three tracks of equal weight: whatever the sides say, the arrows and the page number stay put.
-   They used to share one centred row with the chapter title, which slid them around as pages turned. */
-.pager { position: fixed; left: 0; right: 0; bottom: 0; height: var(--pager-h); z-index: 20;
-  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: 0 14px;
-  background: color-mix(in srgb, var(--panel) 92%, transparent); border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.pager .ctl { height: 32px; min-width: 40px; font-size: 18px; line-height: 1; }
+/* the page bar floats like the player: a capsule of glass over the page, three tracks of equal weight so
+   the arrows and the page number never move whatever the sides say */
+.pager { position: fixed; z-index: 20; left: 0; right: 0; bottom: calc(10px + var(--safe-b)); margin: 0 auto;
+  width: min(600px, 100vw - 20px - var(--safe-l) - var(--safe-r)); height: 54px; border-radius: 27px;
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; padding: 0 8px 0 18px;
+  background: var(--glass); -webkit-backdrop-filter: saturate(1.5) blur(24px); backdrop-filter: saturate(1.5) blur(24px);
+  border: 1px solid var(--glass-edge); box-shadow: var(--float-shadow);
+  font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pager .ctl { width: 40px; height: 40px; }
+.pager .ctl svg { width: 20px; height: 20px; }
+.pager .ctl:disabled { opacity: .3; cursor: default; }
 .pg-side { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pg-side.warn { color: #d0902e; cursor: help; }
 .pg-right { display: flex; justify-content: flex-end; }
-.pg-nav { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.pg-nav { display: flex; align-items: center; justify-content: center; gap: 4px; }
 .pg-at { display: flex; align-items: center; gap: 6px; cursor: text; }
-#pg-cur { width: 4ch; height: 28px; padding: 0 4px; text-align: center; font: inherit; font-variant-numeric: tabular-nums;
-  color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
-#pg-cur:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+#pg-cur { width: 4ch; height: 30px; padding: 0 4px; text-align: center; font: inherit; font-weight: 600;
+  font-variant-numeric: tabular-nums; color: var(--fg); background: var(--chip); border: 1px solid transparent; border-radius: 9px; }
+@media (hover: hover) { #pg-cur:hover { border-color: color-mix(in srgb, var(--accent) 35%, transparent); } }
 #pg-cur:focus { border-color: var(--accent); background: var(--panel); }
 #pg-cur:focus:not(:focus-visible) { outline: none; }
 .pg-of { color: var(--muted); }
-@media (max-width: 560px) { .pager { gap: 6px; padding: 0 8px; font-size: 12px; } .pager .ctl { min-width: 34px; } }
+@media (max-width: 560px) {
+  .pager { width: calc(100vw - 16px - var(--safe-l) - var(--safe-r)); bottom: calc(8px + var(--safe-b)); padding: 0 6px 0 14px; gap: 4px; font-size: 12px; }
+  .pg-word { display: none; }
+}
 body.pages [data-mode="audio"], body:not(.pages) [data-mode="pages"] { display: none; }
 body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
 .pill { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--player-h) + 16px); z-index: 25;
   border: 0; border-radius: 999px; padding: 10px 18px; background: var(--fg); color: var(--bg);
   box-shadow: 0 6px 20px rgba(0,0,0,.25); font-size: 14px; }
 
-/* ---------- player ---------- */
-.player { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; height: var(--player-h);
-  background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(12px);
-  border-top: 1px solid var(--line); padding: 8px 14px calc(8px + env(safe-area-inset-bottom)); }
-.progress-wrap { position: relative; height: 26px; max-width: 900px; margin: 0 auto; }
-#chapter-ticks { position: absolute; left: 0; right: 0; top: 4px; height: 6px; pointer-events: none; }
-#chapter-ticks i { position: absolute; top: 0; width: 1px; height: 6px; background: var(--muted); opacity: .6; }
-#chapter-ticks i.l1 { height: 9px; top: -2px; width: 2px; }
-#progress { width: 100%; margin: 10px 0 0; accent-color: var(--accent); }
-.controls { display: flex; align-items: center; gap: 12px; max-width: 900px; margin: 4px auto 0; }
-.time { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); min-width: 52px; }
-#time-left { text-align: right; }
-.controls-main { flex: 1; display: flex; justify-content: center; align-items: center; gap: 8px; }
-.controls-right { display: flex; align-items: center; gap: 6px; }
-.ctl { border: 1px solid var(--line); background: var(--panel); border-radius: 10px; height: 38px; min-width: 44px;
-  padding: 0 10px; font-size: 15px; }
-.ctl:hover { border-color: var(--accent); }
-.ctl.big { height: 48px; min-width: 64px; font-size: 22px; background: var(--accent); color: #fff; border-color: var(--accent); }
-.ctl.on { background: var(--accent); color: #fff; border-color: var(--accent); }
-#speed { border: 1px solid var(--line); background: var(--panel); border-radius: 10px; height: 38px; padding: 0 6px; }
+/* ---------- player: a card of glass floating over the page ----------
+   One clean bar with the chapters as gaps in it (a row of tick marks read as a radio dial), the times
+   under it, then the controls: speed, the sentence and ten-second steps around a round play button,
+   and the sprint timer. Every button is just its icon until it is touched or hovered. */
+:root {
+  --glass: color-mix(in srgb, var(--panel) 82%, transparent);
+  --glass-edge: color-mix(in srgb, var(--fg) 8%, transparent);
+  --chip: color-mix(in srgb, var(--fg) 7%, transparent);
+  --float-shadow: 0 12px 40px rgba(0,0,0,.14), 0 2px 8px rgba(0,0,0,.06);
+}
+.player { position: fixed; z-index: 20; left: 0; right: 0; bottom: calc(10px + var(--safe-b)); margin: 0 auto;
+  width: min(680px, 100vw - 20px - var(--safe-l) - var(--safe-r)); padding: 12px 16px 10px; border-radius: 26px;
+  background: var(--glass); -webkit-backdrop-filter: saturate(1.5) blur(24px); backdrop-filter: saturate(1.5) blur(24px);
+  border: 1px solid var(--glass-edge); box-shadow: var(--float-shadow); }
+.track { position: relative; height: 22px; }
+/* three layers: the bar, the chapter cuts on it, the range input on top with only its thumb showing,
+   so a cut never shows through the thumb */
+.track::before { content: ""; position: absolute; left: 0; right: 0; top: 9px; height: 4px; border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) var(--p, 0%), var(--chip) var(--p, 0%)); }
+#progress { position: absolute; z-index: 1; inset: 0; width: 100%; height: 22px; margin: 0; cursor: pointer;
+  -webkit-appearance: none; appearance: none; background: none; accent-color: var(--accent); }
+#progress::-webkit-slider-runnable-track { height: 4px; background: none; }
+#progress::-moz-range-track { height: 4px; background: none; }
+#progress::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--panel); box-shadow: 0 1px 4px rgba(0,0,0,.25); transition: transform .15s; }
+#progress::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--accent); border: 2px solid var(--panel); }
+#progress:active::-webkit-slider-thumb { transform: scale(1.25); }
+/* a thumb a finger can find: still centred on the 4px track */
+@media (pointer: coarse) {
+  #progress::-webkit-slider-thumb { width: 20px; height: 20px; margin-top: -8px; }
+  #progress::-moz-range-thumb { width: 17px; height: 17px; }
+}
+/* chapters: thin cuts through the bar, so it reads as a bar of parts and not a dial */
+#chapter-ticks { position: absolute; left: 0; right: 0; top: 9px; height: 4px; pointer-events: none; }
+#chapter-ticks i { position: absolute; top: 0; width: 1px; height: 4px; margin-left: -.5px; background: var(--panel); }
+#chapter-ticks i.l1 { width: 1.5px; margin-left: -.75px; }
+.times { display: flex; justify-content: space-between; gap: 12px; margin-top: 1px; }
+.time { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#time-chap { opacity: .75; }
+.controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; margin-top: 4px; }
+.controls-left { justify-self: start; }
+.controls-right { justify-self: end; display: flex; gap: 2px; }
+.controls-main { display: flex; align-items: center; gap: 4px; }
+.ctl { width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--fg);
+  display: inline-flex; align-items: center; justify-content: center; transition: background .15s, transform .12s; }
+.ctl:active { transform: scale(.9); }
+.ctl svg { width: 22px; height: 22px; }
+#btn-prev-sent, #btn-next-sent { color: var(--muted); }
+#btn-prev-sent svg, #btn-next-sent svg { width: 18px; height: 18px; }
+#btn-back svg, #btn-fwd svg { width: 28px; height: 28px; }
+.ctl.big { width: 58px; height: 58px; margin: 0 8px; background: var(--accent); color: var(--on-accent);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 38%, transparent); }
+.ctl.big svg { width: 26px; height: 26px; }
+.ctl.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+#speed { -webkit-appearance: none; appearance: none; width: 58px; height: 30px; padding: 0; border: 0; border-radius: 15px;
+  background: var(--chip); color: var(--fg); font: 600 13px var(--ui); font-variant-numeric: tabular-nums; cursor: pointer; text-align: center; text-align-last: center; }
+/* a finger has no hover: on a touch screen the last button tapped would keep the look */
+@media (hover: hover) {
+  .ctl:hover { background: var(--chip); }
+  .ctl.big:hover { background: color-mix(in srgb, var(--accent) 88%, #000); }
+  #speed:hover { background: color-mix(in srgb, var(--fg) 12%, transparent); }
+}
 /* distraction-free: the top bar fades when the pointer is idle; the player slides away while
    playing and comes back on pause or when the pointer reaches the bottom edge */
 .topbar { transition: opacity .3s; }
 body.playing.idle .topbar { opacity: .12; }
 body.playing.idle .topbar:hover { opacity: 1; }
 body.playing.idle { cursor: none; }
-.player { transition: opacity .35s ease; }
-body.hide-player .player { opacity: 0; pointer-events: none; }
-body.hide-player .player.peek { opacity: 1; pointer-events: auto; }
+.player { transition: opacity .35s ease, transform .35s ease; }
+body.hide-player .player { opacity: 0; transform: translateY(18px); pointer-events: none; }
+body.hide-player .player.peek { opacity: 1; transform: none; pointer-events: auto; }
+/* the text fades out under the card instead of running on beneath it */
+#app::after { content: ""; position: fixed; z-index: 19; left: 0; right: 0; bottom: 0; pointer-events: none;
+  height: calc(var(--player-h) + 28px); background: linear-gradient(transparent, var(--bg) 55%); transition: opacity .35s; }
+body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { opacity: 0; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 /* ---------- drawers ---------- */
 .drawer { position: fixed; top: 0; bottom: 0; width: min(360px, 92vw); z-index: 40; background: var(--panel);
-  border-right: 1px solid var(--line); overflow: auto; padding: 0 0 30px; box-shadow: 0 0 40px rgba(0,0,0,.2); }
+  border-right: 1px solid var(--line); overflow: auto; padding: 0 0 calc(30px + var(--safe-b)); box-shadow: 0 0 40px rgba(0,0,0,.2);
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .drawer.left { left: 0; } .drawer.right { right: 0; border-left: 1px solid var(--line); border-right: 0; }
-.drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px;
+.drawer-head { display: flex; justify-content: space-between; align-items: center; padding: calc(12px + var(--safe-t)) 16px 12px;
   border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
 .drawer section { padding: 12px 16px; border-bottom: 1px solid var(--line); }
 .drawer h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .drawer label { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 8px 0; font-size: 14px; }
 .drawer label input[type=range] { width: 150px; accent-color: var(--accent); }
-.drawer label.row { justify-content: flex-start; }
+/* on/off settings read as switches: the words first, the switch at the edge, as a phone lays them out */
+.drawer label.row { flex-direction: row-reverse; justify-content: space-between; line-height: 1.35; }
+.drawer label.row input[type=checkbox] { appearance: none; -webkit-appearance: none; flex: none; margin: 0;
+  width: 42px; height: 26px; border-radius: 13px; background: var(--line); position: relative; cursor: pointer;
+  transition: background .2s; }
+.drawer label.row input[type=checkbox]::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: transform .2s; }
+.drawer label.row input[type=checkbox]:checked { background: var(--accent); }
+.drawer label.row input[type=checkbox]:checked::after { transform: translateX(16px); }
+@media (max-width: 600px) { .seg button { font-size: 13px; padding: 9px 4px; } .drawer label { font-size: 15px; } }
 .seg { display: flex; gap: 6px; flex-wrap: wrap; }
 .seg button { min-width: 30%; }
 .seg button { flex: 1; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 8px 6px; font-size: 14px; }
-.seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.seg button.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 #toc-list { list-style: none; margin: 0; padding: 8px 0; }
 #toc-list li { padding: 8px 16px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
 #toc-list li.l1 { font-weight: 600; margin-top: 6px; }
@@ -386,12 +467,30 @@ body.hide-player .player.peek { opacity: 1; pointer-events: auto; }
 .modal-box h3 { margin: 0 0 8px; }
 .row-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .row-btns button { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 8px 14px; }
-.row-btns .primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.row-btns .primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 
+/* a phone: the same card, edge to edge less a thumb's margin; the focus button leaves the row, since
+   «Приглушать» in the settings is the same switch, so the controls keep their size */
 @media (max-width: 600px) {
-  :root { --player-h: 118px; }
-  #text { padding-left: 16px; padding-right: 16px; }
-  .time { min-width: 40px; font-size: 12px; }
-  .ctl { min-width: 40px; padding: 0 8px; }
-  #speed { display: none; }
+  :root { --player-h: calc(146px + var(--safe-b)); }
+  #text { padding-left: max(18px, var(--safe-l)); padding-right: max(18px, var(--safe-r)); }
+  .player { width: calc(100vw - 16px - var(--safe-l) - var(--safe-r)); bottom: calc(8px + var(--safe-b));
+    padding: 10px 10px 8px; border-radius: 24px; }
+  .times { padding: 0 6px; }
+  .controls-main { gap: 0; }
+  .ctl { width: 42px; }
+  .ctl.big { width: 56px; height: 56px; margin: 0 6px; }
+  .controls-right #btn-focus { display: none; }
+  .icon { width: 40px; height: 40px; }
 }
+/* the smallest phones: speed, five controls and the timer need 48 + 4×36 + 50 + 2×4 + 36 = 286px; on a
+   320px screen the card is 304px with a 1px edge, which holds that with 8px of padding a side */
+@media (max-width: 360px) {
+  .player { padding-left: 8px; padding-right: 8px; }
+  .ctl { width: 36px; }
+  .ctl.big { width: 50px; height: 50px; margin: 0 4px; }
+  #speed { width: 48px; }
+  .controls-main { gap: 0; }
+}
+/* a touch screen has no keyboard to explain */
+@media (hover: none) and (pointer: coarse) { .drawer .keys, .key-hint { display: none; } }

@@ -26,11 +26,14 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from manifest import stamp  # noqa: E402
 from tidy import PLAYABLE, tidy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # the same root the server uses: the Mac app keeps the books outside the code it updates
-BOOKS = Path(os.environ.get("READSYNC_BOOKS") or ROOT / "books").expanduser()
+# one library per Mac: the menu-bar app's (which may live in iCloud), else this checkout's own books/
+APP_BOOKS = Path.home() / "Library" / "Application Support" / "readsync" / "books"
+BOOKS = Path(os.environ.get("READSYNC_BOOKS") or (APP_BOOKS if APP_BOOKS.exists() else ROOT / "books")).expanduser()
 PY = sys.executable
 PIPE = ROOT / "pipeline"
 UA = {"User-Agent": "Mozilla/5.0"}
@@ -346,6 +349,8 @@ def main() -> None:
         meta["audio_source"] = " | ".join(args.audio)
         meta["narrator"] = args.narrator or meta.get("narrator", "")
     toml.write_text("".join(f'{k} = "{esc(v)}"\n' for k, v in meta.items() if v != ""), encoding="utf-8")
+    # a new edition only with new text: it is what makes sentence positions stale; new audio shows in the sizes
+    stamp(d, new_edition=bool(args.text))
 
     print(
         f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)"),

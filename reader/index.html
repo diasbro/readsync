@@ -14,7 +14,7 @@
   <header class="lib-head">
     <div class="lib-title-row">
       <h1><span class="mark" aria-hidden="true"><i></i></span>readsync</h1>
-      <div class="lib-tools"><button class="icon" id="lib-settings" title="Настройки">⚙</button></div>
+      <div class="lib-tools"><button class="icon" id="lib-settings" title="Настройки" data-icon="gear"></button></div>
       <div id="lib-prefs" class="popup prefs" hidden>
         <div class="popup-title">Тема</div>
         <div class="seg" id="lib-theme">
@@ -56,14 +56,15 @@
 
 <div id="app" hidden>
   <header class="topbar">
-    <button class="icon" id="btn-toc" title="Оглавление (t)">☰</button>
+    <a class="icon back-lib" href="/" title="Библиотека" data-icon="back"></a>
+    <button class="icon" id="btn-toc" title="Оглавление (t)" data-icon="menu"></button>
     <div class="topbar-title">
       <a id="book-title" href="/" title="Библиотека"></a>
       <div id="chapter-title" class="muted"></div>
     </div>
     <div id="sprint-badge" class="badge" hidden></div>
-    <button class="icon" id="btn-mode" title="Режим: книга без аудио / с аудио (m)">📖</button>
-    <button class="icon" id="btn-settings" title="Настройки">⚙</button>
+    <button class="icon" id="btn-mode" title="Режим: книга без аудио / с аудио (m)" data-icon="book"></button>
+    <button class="icon" id="btn-settings" title="Настройки" data-icon="gear"></button>
   </header>
 
   <main id="text"></main>
@@ -72,54 +73,55 @@
   <footer id="pager" class="pager" hidden>
     <div class="pg-side" id="pg-read"></div>
     <div class="pg-nav">
-      <button class="ctl" id="pg-prev" title="Назад (←)">‹</button>
+      <button class="ctl" id="pg-prev" title="Назад (←)" data-icon="back"></button>
       <label class="pg-at" title="Номер страницы: впиши и нажми ↵">
         <input id="pg-cur" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Страница, ↵ чтобы перейти">
         <span class="pg-of">из <span id="pg-total">1</span></span>
       </label>
-      <button class="ctl" id="pg-next" title="Вперёд (→, пробел)">›</button>
+      <button class="ctl" id="pg-next" title="Вперёд (→, пробел)" data-icon="forward"></button>
     </div>
     <div class="pg-side pg-right">
-      <button class="ctl" id="pg-sprint" title="Спринт-таймер">⏱</button>
+      <button class="ctl" id="pg-sprint" title="Спринт-таймер" data-icon="timer"></button>
     </div>
   </footer>
   <div id="loading" class="center-msg">Загрузка…</div>
 
   <footer class="player">
-    <div class="progress-wrap">
+    <div class="track">
+      <input type="range" id="progress" min="0" max="1000" step="0.1" value="0" aria-label="Место в книге">
       <div id="chapter-ticks"></div>
-      <input type="range" id="progress" min="0" max="1000" step="0.1" value="0">
     </div>
+    <div class="times"><span id="time-cur" class="time">0:00</span><span id="time-chap" class="time" title="До конца главы"></span><span id="time-left" class="time" title="До конца книги"></span></div>
     <div class="controls">
-      <span id="time-cur" class="time">0:00</span>
-      <div class="controls-main">
-        <button class="ctl" id="btn-prev-sent" title="Предыдущее предложение (←)">⏮</button>
-        <button class="ctl" id="btn-back" title="−10 с (Shift+←)">−10</button>
-        <button class="ctl big" id="btn-play" title="Играть / пауза (пробел)">▶</button>
-        <button class="ctl" id="btn-fwd" title="+10 с (Shift+→)">+10</button>
-        <button class="ctl" id="btn-next-sent" title="Следующее предложение (→)">⏭</button>
-      </div>
-      <div class="controls-right">
+      <div class="controls-left">
         <select id="speed" title="Скорость ([ / ])">
           <option value="0.75">0.75×</option><option value="0.9">0.9×</option>
           <option value="1" selected>1×</option><option value="1.1">1.1×</option>
           <option value="1.25">1.25×</option><option value="1.5">1.5×</option>
           <option value="1.75">1.75×</option><option value="2">2×</option>
         </select>
-        <button class="ctl" id="btn-focus" title="Режим фокуса (f)">◎</button>
-        <button class="ctl" id="btn-sprint" title="Спринт-таймер">⏱</button>
       </div>
-      <span id="time-left" class="time"></span>
+      <div class="controls-main">
+        <button class="ctl" id="btn-prev-sent" title="Предыдущее предложение (←)" data-icon="prev"></button>
+        <button class="ctl" id="btn-back" title="−10 с (Shift+←)" data-icon="back10"></button>
+        <button class="ctl big" id="btn-play" title="Играть / пауза (пробел)" data-icon="play"></button>
+        <button class="ctl" id="btn-fwd" title="+10 с (Shift+→)" data-icon="fwd10"></button>
+        <button class="ctl" id="btn-next-sent" title="Следующее предложение (→)" data-icon="next"></button>
+      </div>
+      <div class="controls-right">
+        <button class="ctl" id="btn-focus" title="Режим фокуса (f)" data-icon="focus"></button>
+        <button class="ctl" id="btn-sprint" title="Спринт-таймер" data-icon="timer"></button>
+      </div>
     </div>
   </footer>
 
   <aside id="toc" class="drawer left" hidden>
-    <div class="drawer-head"><strong>Оглавление</strong><button class="icon" data-close>✕</button></div>
+    <div class="drawer-head"><strong>Оглавление</strong><button class="icon" data-close data-icon="close" title="Закрыть"></button></div>
     <ol id="toc-list"></ol>
   </aside>
 
   <aside id="settings" class="drawer right" hidden>
-    <div class="drawer-head"><strong>Настройки</strong><button class="icon" data-close>✕</button></div>
+    <div class="drawer-head"><strong>Настройки</strong><button class="icon" data-close data-icon="close" title="Закрыть"></button></div>
     <section>
       <h4>Текст</h4>
       <label>Размер <input type="range" id="set-font" min="15" max="28" step="1"></label>
@@ -168,7 +170,7 @@
           <option value="bg">Мягкая заливка</option>
           <option value="underline">Подчёркивание</option>
         </select></label>
-      <label>Приглушать (f)
+      <label>Приглушать<span class="key-hint"> (f)</span>
         <select id="set-dim">
           <option value="off">Нет</option>
           <option value="para">Всё, кроме абзаца</option>
@@ -193,13 +195,13 @@
       <h4>Статистика</h4>
       <div id="stats" class="stats"></div>
     </section>
-    <section class="muted small" data-mode="audio">
+    <section class="muted small keys" data-mode="audio">
       <h4>Клавиши</h4>
       пробел — играть/пауза · ← → — предложения · Shift+← → — ±10 с ·
       r — повторить предложение · [ ] — скорость · f — фокус · t — оглавление · a — вернуться к чтению ·
       m — режим книги
     </section>
-    <section class="muted small" data-mode="pages">
+    <section class="muted small keys" data-mode="pages">
       <h4>Клавиши</h4>
       ← → пробел — листать · Shift+пробел — назад · Home / End — начало и конец ·
       t — оглавление · m — вернуться к аудио

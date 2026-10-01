@@ -25,6 +25,7 @@ import onnxruntime as ort
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from manifest import stamp  # noqa: E402
 from tidy import tidy  # noqa: E402
 from timing_from_anchors import interpolate  # noqa: E402
 
@@ -172,6 +173,7 @@ def main() -> None:
     out = [[w[0], w[1], w[2], round(float(t0[i]), 3), round(float(t1[i]), 3)] for i, w in enumerate(words)]
     (d / "timing.json").write_text(json.dumps({"source": "mms", "duration": duration, "words": out}), encoding="utf-8")
     tidy(d)  # the 16 kHz copy and the anchors were only for this pass
+    stamp(d)  # same edition, new timing.json size
     print(
         f"done: aligned {good.mean():.1%} of words by MMS, bad windows={bad_windows}, "
         f"{(time.time() - started) / 60:.1f} min",

@@ -16,11 +16,15 @@ import tomllib
 import urllib.parse
 from pathlib import Path
 
+import state
+
 ROOT = Path(__file__).resolve().parent
 READER = ROOT / "reader"
 # books live next to the code when run from a checkout, and outside it when the Mac app runs:
 # the app updates its code in place, so nothing of the reader's may sit inside it
-BOOKS = Path(os.environ.get("READSYNC_BOOKS") or ROOT / "books").expanduser()
+# one library per Mac: the menu-bar app's (which may live in iCloud), else this checkout's own books/
+APP_BOOKS = Path.home() / "Library" / "Application Support" / "readsync" / "books"
+BOOKS = Path(os.environ.get("READSYNC_BOOKS") or (APP_BOOKS if APP_BOOKS.exists() else ROOT / "books")).expanduser()
 STATE_LOCK = threading.Lock()
 SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 JOBS: dict[str, dict] = {}
@@ -66,6 +70,28 @@ TRANSLIT = dict(
         strict=True,
     )
 )
+
+
+def ensure_manifests() -> None:
+    """Books made before manifests existed get one, once: a phone cannot tell a finished copy of them
+    from a half-synced one otherwise. Books still loading are left to their job, and so are books
+    whose last job failed (their add.log stays until a job succeeds). One unreadable book never
+    keeps the server from starting."""
+    sys.path.insert(0, str(ROOT / "pipeline"))
+    from manifest import ID_RE, stamp
+
+    for toml in BOOKS.glob("*/book.toml"):
+        d = toml.parent
+        try:
+            if (
+                (d / "book.json").exists()
+                and not (d / "add.log").exists()
+                and d.name not in JOBS
+                and not ID_RE.search(toml.read_text(encoding="utf-8"))
+            ):
+                stamp(d)
+        except OSError as e:
+            print(f"manifest skipped for {d.name}: {e}", file=sys.stderr, flush=True)
 
 
 def list_books() -> list[dict]:
@@ -120,51 +146,26 @@ def list_books() -> list[dict]:
 
 
 def load_state(slug: str) -> dict:
-    p = BOOKS / slug / "state.json"
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    """The reading state every device has written for this book, merged (see state.py)."""
+    if not SLUG_RE.match(slug):
         return {}
-
-
-def save_state(slug: str, state: dict) -> None:
-    p = BOOKS / slug / "state.json"
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, p)
+    return state.load(BOOKS / slug)
 
 
 def merge_state(slug: str, patch: dict) -> dict:
-    """Last writer wins per key (by client timestamp in <key>At); stats days are merged by max."""
-    with STATE_LOCK:
-        st = load_state(slug)
-        for key in ("pos", "sent", "mode", "settings", "opened", "shelf"):
-            if key in patch and patch.get(key + "At", 0) >= st.get(key + "At", 0):
-                st[key], st[key + "At"] = patch[key], patch.get(key + "At", 0)
-                if key == "sent" and "sentPct" in patch:
-                    st["sentPct"] = patch["sentPct"]
-        if isinstance(patch.get("stats"), dict):
-            days = st.setdefault("stats", {}).setdefault("days", {})
-            for day, v in patch["stats"].get("days", {}).items():
-                cur = days.get(day, {"sec": 0, "words": 0})
-                days[day] = {"sec": max(cur["sec"], v.get("sec", 0)), "words": max(cur["words"], v.get("words", 0))}
-        save_state(slug, st)
-        return st
+    if not SLUG_RE.match(slug) or not (BOOKS / slug).is_dir():
+        raise ValueError("unknown book")
+    return state.put(BOOKS / slug, patch)
 
 
 def add_session(slug: str, delta: dict) -> dict:
-    with STATE_LOCK:
-        st = load_state(slug)
-        days = st.setdefault("stats", {}).setdefault("days", {})
-        day = str(delta.get("day", ""))[:10]
-        try:
-            sec, words = float(delta.get("sec", 0)), float(delta.get("words", 0))
-        except (TypeError, ValueError):
-            sec, words = 0.0, 0.0
-        cur = days.get(day, {"sec": 0, "words": 0})
-        days[day] = {"sec": cur["sec"] + max(0.0, sec), "words": cur["words"] + max(0.0, words)}
-        save_state(slug, st)
-        return st
+    if not SLUG_RE.match(slug) or not (BOOKS / slug).is_dir():
+        raise ValueError("unknown book")
+    try:
+        sec, words = float(delta.get("sec", 0)), float(delta.get("words", 0))
+    except (TypeError, ValueError):
+        sec, words = 0.0, 0.0
+    return state.add_session(BOOKS / slug, str(delta.get("day", ""))[:10], sec, words)
 
 
 SETTINGS_FILE = BOOKS / "settings.json"
@@ -492,10 +493,7 @@ def start_job(form: dict) -> tuple[dict | None, str]:
         if val(k):
             cmd += [flag, val(k)]
     if replace:  # new text, new sentence numbering: the page-mode position starts over (audio seconds stay valid)
-        st = load_state(slug)
-        for k in ("sent", "sentAt", "sentPct"):
-            st.pop(k, None)
-        save_state(slug, st)
+        state.forget_sent(d)
     if not (d / "book.toml").exists():  # a stub so the card shows up as "loading" right away; add_book fills it in
         esc_ = lambda v: str(v).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
         stub = {"slug": slug, "title": title or slug, "author": val("author")}
