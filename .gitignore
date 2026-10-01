@@ -14,3 +14,7 @@ dist/
 build/
 
 
+# the iPhone app's generated project and build output
+ios/Readsync.xcodeproj/
+ios/build/
+ios/Info.plist

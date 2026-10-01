@@ -1,7 +1,7 @@
 PYTHON ?= $(shell command -v python3.12 || command -v python3)
 PY := .venv/bin/python
 
-.PHONY: setup serve test lint fmt add-book align app dmg
+.PHONY: setup serve test lint fmt add-book align app dmg ios-sim
 
 setup:
 	$(PYTHON) -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -e ".[dev]"
@@ -35,3 +35,12 @@ dmg:
 # make align slug=my-book   (re-run the precise MMS pass)
 align:
 	$(PY) pipeline/align.py books/$(slug)
+
+# the iPhone app in the simulator: build, install, launch (needs Xcode, xcodegen and the iOS simulator)
+SIM ?= iPhone 17
+ios-sim:
+	cd ios && xcodegen generate -q && xcodebuild -quiet -project Readsync.xcodeproj -scheme Readsync \
+		-destination 'platform=iOS Simulator,name=$(SIM)' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+	xcrun simctl boot '$(SIM)' 2>/dev/null || true
+	xcrun simctl install '$(SIM)' ios/build/Build/Products/Debug-iphonesimulator/Readsync.app
+	xcrun simctl launch '$(SIM)' io.github.diasbro.readsync
