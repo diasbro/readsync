@@ -15,6 +15,13 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 const today = () => new Date().toISOString().slice(0, 10);
+// Inside the iPhone app there is no server: the reader's writes go to Swift over a message bridge,
+// which answers with the same JSON the server would. Reads still go through fetch (a URL scheme).
+const bridge = window.webkit?.messageHandlers?.readsync;
+function send(method, path, body, keepalive) {
+  if (bridge) return bridge.postMessage({ method, path, body }).then((json) => ({ ok: true, json: () => Promise.resolve(json) }));
+  return fetch(path, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), keepalive: !!keepalive });
+}
 
 // ---------------- settings ----------------
 const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", sent: true, word: true, wordStyle: "bg",
@@ -57,7 +64,7 @@ let settingsTimer = 0, onSettingsSynced = () => {};
 function persistSettings() {
   const at = Date.now(); store.set("rs:settingsAt", at);
   clearTimeout(settingsTimer);
-  settingsTimer = setTimeout(() => fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings, settingsAt: at }) }).catch(() => {}), 400);
+  settingsTimer = setTimeout(() => send("PUT", "/api/settings", { settings, settingsAt: at }).catch(() => {}), 400);
 }
 function adoptSettings(remoteSettings) {
   if (remoteSettings && remoteSettings.settings && (remoteSettings.settingsAt || 0) > store.get("rs:settingsAt", 0)) {

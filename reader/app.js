@@ -18,7 +18,10 @@
   };
   // ---------------- book state ----------------
   const app = $("#app"); app.hidden = false;
-  const audio = $("#audio"), textEl = $("#text");
+  // In the iPhone app the narrator plays natively (background, lock screen, headphones): the same
+  // interface as <audio>, but the app owns the position, the sessions and the lock-screen controls.
+  const native = !!window.nativeAudio;
+  const audio = window.nativeAudio || $("#audio"), textEl = $("#text");
   const pgCur = $("#pg-cur"), pgTotal = $("#pg-total"), pgRead = $("#pg-read");
   let book, wB, wT0, wT1, wS, sFirst, sLast, sBlock, sWordsCum = [], chapStartWord = [], chapStartTime = [], duration = 0, hasAudio = false;
   let curWord = -1, curSent = -1, curBlock = -1, curChap = -1;
@@ -30,7 +33,7 @@
     fetch(`/api/state/${slug}`).then((r) => r.json()).then((s) => (remote = s || {})).catch(() => (remote = {})),
     fetchSettings().then((s) => (remoteSettings = s || {})),
   ]);
-  const putState = (patch, keepalive) => fetch(`/api/state/${slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch), keepalive: !!keepalive }).catch(() => {});
+  const putState = (patch, keepalive) => send("PUT", `/api/state/${slug}`, patch, keepalive).catch(() => {});
 
   async function load() {
     const [meta, bookJ, timingJ] = await Promise.all([
@@ -42,7 +45,7 @@
     // settings are global on the server; older per-book copies migrate the first time they are seen
     if (!remoteSettings.settings && remote.settings) {  // per-book copy from an older version: promote it to global
       remoteSettings = { settings: remote.settings, settingsAt: remote.settingsAt || 1 };
-      fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(remoteSettings) }).catch(() => {});
+      send("PUT", "/api/settings", remoteSettings).catch(() => {});
     }
     onSettingsSynced = syncSettingsUI;
     adoptSettings(remoteSettings);
@@ -224,7 +227,7 @@
       if (ci !== curChap) {
         curChap = ci;
         $("#chapter-title").textContent = book.chapters[ci]?.title || "";
-        if ("mediaSession" in navigator && "MediaMetadata" in window) {
+        if ("mediaSession" in navigator && "MediaMetadata" in window && !native) {
           navigator.mediaSession.metadata = new MediaMetadata({ title: book.chapters[ci]?.title || book.title, artist: book.author, album: book.title });
         }
         document.querySelectorAll("#toc-list li").forEach((li) => { const k = +li.dataset.ch; li.classList.toggle("cur", k === ci); li.classList.toggle("done", k < ci); });
@@ -274,8 +277,8 @@
 
   // 10 Hz sync loop while playing (cheap: one binary search + a few class toggles per tick)
   let tick = 0;
-  audio.addEventListener("play", () => { settling = false; clearInterval(tick); tick = setInterval(() => update(false), 100); $("#btn-play").textContent = "❚❚"; session.start(); document.body.classList.add("playing"); armIdle(); armHidePlayer(); });
-  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; session.stop(); savePos(); document.body.classList.remove("playing", "idle"); showPlayer(); pausedAt = Date.now(); });
+  audio.addEventListener("play", () => { settling = false; clearInterval(tick); tick = setInterval(() => update(false), 100); $("#btn-play").textContent = "❚❚"; if (!native) session.start(); document.body.classList.add("playing"); armIdle(); armHidePlayer(); });
+  audio.addEventListener("pause", () => { clearInterval(tick); update(true); $("#btn-play").textContent = "▶"; if (!native) session.stop(); savePos(); document.body.classList.remove("playing", "idle"); showPlayer(); pausedAt = Date.now(); });
   // distraction-free chrome: the top bar fades after 4 s without pointer/keyboard activity while
   // playing; the player bar hides 1.5 s after play starts (scrolling does not bring it back) and
   // returns on pause or when the pointer reaches the bottom edge
@@ -298,7 +301,8 @@
     player.classList.toggle("peek", e.clientY >= zone);
   }, { passive: true });
   // focus aid: pause when the reader leaves the tab or window
-  const onLeave = () => { if (settings.pauseHidden && !audio.paused) audio.pause(); };
+  // the app keeps playing on a locked screen: leaving the page is the phone being locked, not the reader leaving
+  const onLeave = () => { if (!native && settings.pauseHidden && !audio.paused) audio.pause(); };
   document.addEventListener("visibilitychange", () => { if (document.hidden) { onLeave(); if (pages.on) session.stop(); } else if (pages.on) session.start(); });
   audio.addEventListener("seeked", () => update(true));
   audio.addEventListener("ratechange", () => update(true));
@@ -310,7 +314,7 @@
   let posDirty = false;
   audio.addEventListener("playing", () => { posDirty = true; });
   function savePos(keepalive) {
-    if (!posDirty) return;
+    if (!posDirty || native) return;  // in the app the player saves its own position, even while the screen is locked
     const at = Date.now();
     store.set("rs:pos:" + slug, audio.currentTime); store.set("rs:posAt:" + slug, at);
     putState({ pos: audio.currentTime, posAt: at }, keepalive);
@@ -598,7 +602,7 @@
     else if (k === "a") { userScrolled = false; $("#return-pill").hidden = true; scrollToCurrent(true); }
     else if (k === "Escape") { closeDrawers(); $("#note-pop").hidden = true; $("#sprint-menu").hidden = true; }
   });
-  if ("mediaSession" in navigator) {
+  if ("mediaSession" in navigator && !native) {  // the app runs the lock screen itself
     navigator.mediaSession.setActionHandler("play", () => play());
     navigator.mediaSession.setActionHandler("pause", () => audio.pause());
     navigator.mediaSession.setActionHandler("seekbackward", () => seek(audio.currentTime - 10));
@@ -664,7 +668,7 @@
       const d = st.days[today()] || { sec: 0, words: 0 };
       d.sec += sec; d.words += words; st.days[today()] = d; store.set("rs:stats:" + slug, st);
       sprint.words += words;
-      fetch(`/api/state/${slug}/session`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ day: today(), sec, words }), keepalive: true })
+      send("POST", `/api/state/${slug}/session`, { day: today(), sec, words }, true)
         .then((r) => r.json()).then((s) => { if (s && s.stats) store.set("rs:stats:" + slug, s.stats); }).catch(() => {});
     },
   };
@@ -706,6 +710,7 @@
     }, 500);
   }
   function chime() {
+    if (native) { bridge.postMessage({ method: "CHIME" }); return; }  // a Web Audio context would take over the app's audio session
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       [523.25, 659.25, 783.99].forEach((f, i) => {
