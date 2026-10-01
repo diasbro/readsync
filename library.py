@@ -552,5 +552,7 @@ def job_status() -> dict:
         # the last plain line, not the traceback frames: that is what the card shows
         tail = [ln for ln in lines if not ln.startswith(("  ", "Traceback", "+ ")) and "CalledProcessError" not in ln]
         lines = tail or lines
+        if code == 0:  # a finished job has nothing left to say: its log goes with it
+            (BOOKS / slug / "add.log").unlink(missing_ok=True)
         out[slug] = {"running": code is None, "exit": code, "log": lines[-6:], "started": j["started"]}
     return out

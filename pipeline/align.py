@@ -25,6 +25,7 @@ import onnxruntime as ort
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tidy import tidy  # noqa: E402
 from timing_from_anchors import interpolate  # noqa: E402
 
 SR = 16000
@@ -77,6 +78,8 @@ def main() -> None:
     import ctc_forced_aligner as cfa
 
     book = json.loads((d / "book.json").read_text(encoding="utf-8"))
+    if not (d / "anchors.json").exists():  # derived file, removed after every run: rebuilt from the captions
+        subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "anchors.py"), str(d)], check=True)
     anc = json.loads((d / "anchors.json").read_text(encoding="utf-8"))
     words, anchors, duration = anc["words"], anc["anchors"], anc["duration"]
     base = interpolate(words, anchors, duration)  # fallback timing
@@ -168,6 +171,7 @@ def main() -> None:
         t1[i] = min(max(t1[i], t0[i] + 0.05), nxt, t0[i] + MAX_WORD_SEC)
     out = [[w[0], w[1], w[2], round(float(t0[i]), 3), round(float(t1[i]), 3)] for i, w in enumerate(words)]
     (d / "timing.json").write_text(json.dumps({"source": "mms", "duration": duration, "words": out}), encoding="utf-8")
+    tidy(d)  # the 16 kHz copy and the anchors were only for this pass
     print(
         f"done: aligned {good.mean():.1%} of words by MMS, bad windows={bad_windows}, "
         f"{(time.time() - started) / 60:.1f} min",
