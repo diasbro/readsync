@@ -77,10 +77,12 @@ final class Shelf: ObservableObject {
 
     private let fm = FileManager.default
     private var scoped: URL?
+    private var folderLost = false  // a folder was chosen but cannot be reached now
     private let bookmarkKey = "libraryBookmark"
+    private let folderLostMessage = "Нет доступа к папке библиотеки: выбери её снова"
 
-    /// Where the app keeps its own copies.
-    nonisolated static var localRoot: URL {
+    /// Where the app keeps its own copies; made once.
+    nonisolated static let localRoot: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("books", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -89,18 +91,20 @@ final class Shelf: ObservableObject {
         var copy = dir
         try? copy.setResourceValues(values)
         return dir
-    }
+    }()
 
     nonisolated static func localDir(_ slug: String) -> URL { localRoot.appendingPathComponent(slug, isDirectory: true) }
 
-    /// The shared library: the chosen folder, or the app's own folder in Files.
-    var sharedRoot: URL {
+    /// The shared library: the chosen folder, or the app's own folder in Files. None while the chosen one
+    /// cannot be reached: reading state written to the app's folder instead would be lost to the other devices.
+    var sharedRoot: URL? {
         if let scoped { return scoped }
-        return fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return folderLost ? nil : fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
     /// The folder that holds the book folders: the chosen one, or its `books` subfolder.
-    var booksRoot: URL {
+    var booksRoot: URL? {
+        guard let sharedRoot else { return nil }
         let inner = sharedRoot.appendingPathComponent("books", isDirectory: true)
         return fm.fileExists(atPath: inner.path) ? inner : sharedRoot
     }
@@ -121,10 +125,13 @@ final class Shelf: ObservableObject {
             url.startAccessingSecurityScopedResource()
         {
             scoped = url
+            folderLost = false
+            if message == folderLostMessage { message = "" }
             folderName = url.lastPathComponent
             if stale, let fresh = try? url.bookmarkData() { UserDefaults.standard.set(fresh, forKey: bookmarkKey) }
         } else {
-            message = "Нет доступа к папке библиотеки: выбери её снова"
+            folderLost = true
+            message = folderLostMessage
             folderName = "папка недоступна"
         }
     }
@@ -136,6 +143,7 @@ final class Shelf: ObservableObject {
         }
         scoped?.stopAccessingSecurityScopedResource()
         scoped = url
+        folderLost = false
         message = ""
         folderName = url.lastPathComponent
         if let data = try? url.bookmarkData() { UserDefaults.standard.set(data, forKey: bookmarkKey) }
@@ -145,8 +153,10 @@ final class Shelf: ObservableObject {
     // ---- what is on the shelf ----
 
     func refresh() async {
+        if folderLost { restoreFolder() }  // the folder may be back (iCloud signed in again, say)
         let root = booksRoot
         let found = await Task.detached { () -> [Book] in
+            guard let root else { return [] }
             let fm = FileManager.default
             let dirs = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
             var out: [Book] = []
@@ -167,12 +177,13 @@ final class Shelf: ObservableObject {
         books = (found + localOnly).sorted { $0.title.localizedCompare($1.title) == .orderedAscending }
         for book in found { copies[book.slug] = localCopy(of: book) }
         for book in localOnly where !isFetching(book.slug) { copies[book.slug] = .here }
-        let all = books, dirs = Dictionary(uniqueKeysWithValues: all.map { ($0.slug, sharedDir($0.slug)) })
+        let all = books, dirs = Dictionary(uniqueKeysWithValues: all.compactMap { b in sharedDir(b.slug).map { (b.slug, $0) } })
         let measured = await Task.detached { () -> [String: Progress] in
             var out: [String: Progress] = [:]
             for book in all {
-                Self.cacheCover(book.slug, from: dirs[book.slug]!)
-                let st = ReadingState.load(shared: dirs[book.slug]!, edition: book.edition)
+                guard let dir = dirs[book.slug] else { continue }
+                Self.cacheCover(book.slug, from: dir)
+                let st = ReadingState.load(shared: dir, edition: book.edition)
                 var p = Progress(opened: ReadingState.num(st["opened"]))
                 let duration = Self.duration(book.slug)
                 if book.hasAudio, duration > 0, st["mode"] as? String != "pages" {
@@ -184,6 +195,7 @@ final class Shelf: ObservableObject {
             }
             return out
         }.value
+        Player.forgetMissingCovers()
         progress = measured
     }
 
@@ -210,7 +222,12 @@ final class Shelf: ObservableObject {
 
     nonisolated static func cachedCover(_ slug: String) -> URL? {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: coverRoot.path)) ?? []
-        return names.first { $0.hasPrefix(slug + ".") }.map { coverRoot.appendingPathComponent($0) }
+        // exactly <slug>.<ext>: the cover of "a.b" is not the cover of "a"
+        return names.first { name in
+            guard name.hasPrefix(slug + ".") else { return false }
+            let ext = name.dropFirst(slug.count + 1)
+            return !ext.isEmpty && !ext.contains(".")
+        }.map { coverRoot.appendingPathComponent($0) }
     }
 
     nonisolated static func cacheCover(_ slug: String, from shared: URL) {
@@ -221,7 +238,9 @@ final class Shelf: ObservableObject {
             return
         }
         let images = shared.appendingPathComponent("images", isDirectory: true)
-        guard let cover = Coordinated.list(images).first(where: { $0.lastPathComponent.hasPrefix("cover.") }) else { return }
+        // a cover not downloaded yet is its `.cover.x.icloud` placeholder: the coordinated copy fetches it
+        guard let cover = Coordinated.list(images).map(ReadingState.realName).first(where: { $0.lastPathComponent.hasPrefix("cover.") })
+        else { return }
         _ = Coordinated.copy(cover, to: coverRoot.appendingPathComponent("\(slug).\(cover.pathExtension)"))
     }
 
@@ -248,8 +267,12 @@ final class Shelf: ObservableObject {
 
     func fetch(_ book: Book) {
         if case .fetching = copy(of: book.slug) { return }
+        guard let root = booksRoot else {
+            message = folderLostMessage
+            return
+        }
         copies[book.slug] = .fetching(0)
-        let source = booksRoot.appendingPathComponent(book.slug, isDirectory: true)
+        let source = root.appendingPathComponent(book.slug, isDirectory: true)
         Task.detached {
             let result = Self.copyBook(book.slug, from: source) { done in
                 Task { @MainActor in
@@ -290,6 +313,10 @@ final class Shelf: ObservableObject {
             let total = Double(max(book.bytes, 1))
             var done: Int64 = 0
             for (name, size) in book.files.sorted(by: { $0.value < $1.value }) {
+                // a file of the book's folder, never a path out of it
+                guard !name.contains("/"), !name.contains(".."), !name.hasPrefix(".") else {
+                    return .failure(Failure(message: "в book.toml чужое имя файла: \(name)"))
+                }
                 // copied as a file, not read into memory: the audio alone is hundreds of megabytes
                 let dest = staging.appendingPathComponent(name)
                 guard Coordinated.copy(source.appendingPathComponent(name), to: dest) else {
@@ -303,13 +330,18 @@ final class Shelf: ObservableObject {
                 progress(Double(done) / total)
             }
             let images = source.appendingPathComponent("images", isDirectory: true)
-            if let names = try? fm.contentsOfDirectory(atPath: images.path), !names.isEmpty {
+            // an image not downloaded yet is its `.name.icloud` placeholder: read by its real name, it is fetched
+            let names = Set(Coordinated.list(images).map { ReadingState.realName($0).lastPathComponent })
+                .filter { !$0.hasPrefix(".") }
+            if !names.isEmpty {
                 let dest = staging.appendingPathComponent("images", isDirectory: true)
                 try fm.createDirectory(at: dest, withIntermediateDirectories: true)
-                for name in names where !name.hasPrefix(".") {
-                    if let data = Coordinated.read(images.appendingPathComponent(name)) {
-                        try data.write(to: dest.appendingPathComponent(name))
+                for name in names.sorted() {
+                    // a copy short of an image is not a whole copy
+                    guard let data = Coordinated.read(images.appendingPathComponent(name)) else {
+                        return .failure(Failure(message: "\(name) ещё не пришёл из iCloud"))
                     }
+                    try data.write(to: dest.appendingPathComponent(name))
                 }
             }
             // the manifest last, as on the Mac: a copy with it is a whole copy
@@ -333,7 +365,8 @@ final class Shelf: ObservableObject {
     }
 
     /// The shared folder of one book: where its reading state lives.
-    func sharedDir(_ slug: String) -> URL { booksRoot.appendingPathComponent(slug, isDirectory: true) }
+    /// None while the chosen folder cannot be reached: the state is then neither read nor written.
+    func sharedDir(_ slug: String) -> URL? { booksRoot?.appendingPathComponent(slug, isDirectory: true) }
 }
 
 /// Reads and writes that iCloud's file provider sees: a file not downloaded yet is fetched first, and a

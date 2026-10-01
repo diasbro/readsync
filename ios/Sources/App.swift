@@ -141,6 +141,7 @@ struct LibraryView: View {
     private func open(_ book: Book) {
         switch shelf.copy(of: book.slug) {
         case .here, .outdated:
+            openWhenReady = nil  // a fetch that ends later must not swap the book being read
             reading = book.slug  // a newer version waits for its own swipe
         case .fetching:
             openWhenReady = book.slug

@@ -49,7 +49,11 @@ struct ReaderView: UIViewRepresentable {
     func updateUIView(_ web: WKWebView, context: Context) {}
 
     static func dismantleUIView(_ web: WKWebView, coordinator: Bridge) {
-        Player.shared.stop()  // closing the book stops its narrator; the place is saved
+        // closing the book stops its narrator (the place is saved), but not one another book has taken since
+        if Player.shared.slug == coordinator.slug { Player.shared.stop() }
+        #if DEBUG
+            coordinator.debugTimer?.invalidate()
+        #endif
         web.configuration.userContentController.removeAllScriptMessageHandlers()
     }
 }
@@ -77,6 +81,13 @@ final class Bridge: NSObject, WKNavigationDelegate {
     let close: () -> Void
     let files: Files
     weak var web: WKWebView?
+
+    /// The reader's writes still on their way: closing a book waits for them (Player.flush).
+    private static var writes: [UUID: Task<Void, Never>] = [:]
+
+    static func flushWrites() async {
+        for task in Array(writes.values) { await task.value }
+    }
 
     init(slug: String, close: @escaping () -> Void) {
         self.slug = slug
@@ -107,9 +118,15 @@ final class Bridge: NSObject, WKNavigationDelegate {
             AppSettings.save(body)
             return replyHandler(AppSettings.load(), nil)
         }
+        // the path names the book: a write meant for another one is not this page's to make
+        let named = path.hasPrefix("/api/state/")
+            ? path.dropFirst("/api/state/".count).split(separator: "/").first.map { $0.removingPercentEncoding ?? String($0) }
+            : nil
+        guard named == slug else { return replyHandler(nil, "не та книга") }
         guard let book = Shelf.shared.localBook(slug) else { return replyHandler(nil, "нет книги") }
-        let dir = Shelf.shared.sharedDir(slug)
-        Task.detached {
+        guard let dir = Shelf.shared.sharedDir(slug) else { return replyHandler(nil, "папка библиотеки недоступна") }
+        let id = UUID()
+        Bridge.writes[id] = Task.detached {
             let out: [String: Any]
             if path.hasSuffix("/session") {
                 out = ReadingState.addSession(
@@ -122,7 +139,10 @@ final class Bridge: NSObject, WKNavigationDelegate {
                 out = ReadingState.put(shared: dir, edition: book.edition, patch: patch)
             }
             let sendable = JSONBox(out)
-            await MainActor.run { replyHandler(sendable.value, nil) }
+            await MainActor.run {
+                Bridge.writes[id] = nil
+                replyHandler(sendable.value, nil)
+            }
         }
     }
 
@@ -146,7 +166,7 @@ final class Bridge: NSObject, WKNavigationDelegate {
     #if DEBUG
         /// Debug builds only: a script dropped at Documents/debug.js runs in the page, and what it
         /// returns lands in Documents/debug-out.json. The simulator has no other way into the page.
-        private var debugTimer: Timer?
+        var debugTimer: Timer?
         func watchDebugScript() {
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             debugTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -157,7 +177,7 @@ final class Bridge: NSObject, WKNavigationDelegate {
                     web.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { result in
                         let out: Any
                         switch result {
-                        case .success(let v): out = ["ok": v ?? NSNull()]
+                        case .success(let v): out = ["ok": v]
                         case .failure(let e): out = ["error": "\(e)"]
                         }
                         let data = (try? JSONSerialization.data(withJSONObject: out, options: [.fragmentsAllowed]))
@@ -204,7 +224,8 @@ final class Files: NSObject, WKURLSchemeHandler {
         _ = lock.withLock { stopped.insert(ObjectIdentifier(task)) }
     }
 
-    private func finish(_ task: any WKURLSchemeTask, status: Int, type: String, data: Data) {
+    /// On the main thread, where WebKit tells of a stop too: none can come between the check and the answer.
+    @MainActor private func finish(_ task: any WKURLSchemeTask, status: Int, type: String, data: Data) {
         // a task the page gave up on must not be answered: WebKit throws if it is
         if lock.withLock({ stopped.remove(ObjectIdentifier(task)) != nil }) { return }
         let response = HTTPURLResponse(
@@ -224,7 +245,7 @@ final class Files: NSObject, WKURLSchemeHandler {
         if path.hasPrefix("/api/state/") {
             let s = String(path.dropFirst("/api/state/".count))
             guard let book = Shelf.localCopy(s) else { return json([:]) }
-            let dir = await MainActor.run { Shelf.shared.sharedDir(s) }
+            guard let dir = await MainActor.run(body: { Shelf.shared.sharedDir(s) }) else { return json([:]) }
             return json(ReadingState.load(shared: dir, edition: book.edition))
         }
         if path.hasPrefix("/books/") {

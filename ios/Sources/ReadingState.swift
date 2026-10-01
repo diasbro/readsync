@@ -62,7 +62,7 @@ enum ReadingState {
     }
 
     /// The real name behind an iCloud placeholder (`.name.icloud`), so a file not downloaded yet still counts.
-    private static func realName(_ url: URL) -> URL {
+    static func realName(_ url: URL) -> URL {
         let name = url.lastPathComponent
         guard name.hasPrefix("."), name.hasSuffix(".icloud") else { return url }
         return url.deletingLastPathComponent().appendingPathComponent(String(name.dropFirst().dropLast(7)))
@@ -81,11 +81,12 @@ enum ReadingState {
         var files = Coordinated.list(dir.appendingPathComponent("state", isDirectory: true))
             .map(realName)
             .filter { isDeviceFile($0.lastPathComponent) }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }  // the contract's order: equal times, earlier file wins
             .map(read)
-        // a book the Mac has not opened since it went per device still has its one old file: read it too
+        // a book the Mac has not opened since it went per device still has its one old file: read it too,
+        // first, where the Mac's migration puts it before any device file
         let legacy = dir.appendingPathComponent("state.json")
-        if FileManager.default.fileExists(atPath: legacy.path) { files.append(read(legacy)) }
+        if FileManager.default.fileExists(atPath: legacy.path) { files.insert(read(legacy), at: 0) }
         return merge(files, edition: edition)
     }
 
@@ -97,7 +98,11 @@ enum ReadingState {
             return obj
         }
         if let known = cached(url) { return known }
-        return FileManager.default.fileExists(atPath: url.path) ? nil : [:]
+        // only its placeholder here (iCloud took the file back): it exists all the same
+        let evicted = ((try? FileManager.default.contentsOfDirectory(
+            at: url.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? [])
+            .contains { $0.lastPathComponent != url.lastPathComponent && realName($0).lastPathComponent == url.lastPathComponent }
+        return FileManager.default.fileExists(atPath: url.path) || evicted ? nil : [:]
     }
 
     private static func ownURL(_ dir: URL) -> URL {
@@ -107,8 +112,15 @@ enum ReadingState {
     /// A change from this phone. Only the merged keys are taken; statistics come from sessions alone.
     @discardableResult
     static func put(shared dir: URL, edition: String, patch: [String: Any]) -> [String: Any] {
+        write(shared: dir, edition: edition, patch: patch)
+        return load(shared: dir, edition: edition)
+    }
+
+    /// `put` without the merge read back: false when nothing was written, so the caller can try again.
+    @discardableResult
+    static func write(shared dir: URL, edition: String, patch: [String: Any]) -> Bool {
         queue.sync {
-            guard var st = readOwn(ownURL(dir)) else { return }
+            guard var st = readOwn(ownURL(dir)) else { return false }
             for key in lww where patch[key] != nil {
                 if num(patch[key + "At"]) >= num(st[key + "At"]) {
                     st[key] = patch[key]
@@ -119,9 +131,8 @@ enum ReadingState {
                     }
                 }
             }
-            save(st, dir)
+            return save(st, dir)
         }
-        return load(shared: dir, edition: edition)
     }
 
     @discardableResult
@@ -140,10 +151,13 @@ enum ReadingState {
         return load(shared: dir, edition: edition)
     }
 
-    private static func save(_ st: [String: Any], _ dir: URL) {
-        guard let data = try? JSONSerialization.data(withJSONObject: st) else { return }
+    @discardableResult
+    private static func save(_ st: [String: Any], _ dir: URL) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: st) else { return false }
         let url = ownURL(dir)
-        if Coordinated.write(data, to: url) { remember(url, st) }
+        guard Coordinated.write(data, to: url) else { return false }
+        remember(url, st)
+        return true
     }
 
     /// The UTC day the reader counts statistics in (common.js `today`).
@@ -169,9 +183,8 @@ enum Device {
             kSecReturnData as String: true,
         ]
         var out: CFTypeRef?
-        if SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
-            let data = out as? Data, let id = String(data: data, encoding: .utf8)
-        {
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        if status == errSecSuccess, let data = out as? Data, let id = String(data: data, encoding: .utf8) {
             return id
         }
         // where the Keychain is out of reach (an unsigned build) the app's own defaults keep the id:
@@ -179,6 +192,8 @@ enum Device {
         let id = UserDefaults.standard.string(forKey: "deviceID")
             ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         UserDefaults.standard.set(id, forKey: "deviceID")
+        // a Keychain that failed (locked, say) rather than came up empty may hold an id: none is added over it
+        guard status == errSecItemNotFound else { return id }
         let add: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "readsync",
