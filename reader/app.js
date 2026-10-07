@@ -28,7 +28,9 @@
   // its side the phone has no inset at the top.
   const insetProbe = document.body.appendChild(Object.assign(document.createElement("div"), { style: "position:fixed;top:0;height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none" }));
   const fitEars = () => document.documentElement.classList.toggle("ears", native && insetProbe.offsetHeight >= 24);
-  fitEars(); new ResizeObserver(fitEars).observe(insetProbe);  // the web view learns its insets after the first paint
+  // the web view learns its insets after the first paint: the bars move then, and pages measured before
+  // it are measured against the wrong box, so they are laid out again
+  fitEars(); new ResizeObserver(() => { fitEars(); scheduleRelayout(); }).observe(insetProbe);
   const earsInfo = (left, right) => { $("#ears-info .ear-l").textContent = left; $("#ears-info .ear-r").textContent = right; };
   const audio = window.nativeAudio || $("#audio"), textEl = $("#text");
   const pgCur = $("#pg-cur"), pgTotal = $("#pg-total"), pgRead = $("#pg-read");

@@ -147,6 +147,7 @@ final class Shelf: ObservableObject {
             folderName = url.lastPathComponent
             if stale, let fresh = try? url.bookmarkData() { UserDefaults.standard.set(fresh, forKey: bookmarkKey) }
         } else {
+            print("readsync: the library folder's bookmark did not resolve")  // seen with `devicectl … --console`
             folderLost = true
             message = folderLostMessage
             folderName = "папка недоступна"
@@ -322,6 +323,7 @@ final class Shelf: ObservableObject {
     func fetch(_ book: Book, textOnly: Bool? = nil) -> Task<Void, Never>? {
         if case .fetching = copy(of: book.slug) { return nil }
         guard let root = booksRoot else {
+            print("readsync: \(book.slug) not copied: no library folder")
             message = folderLostMessage
             return nil
         }
@@ -346,6 +348,7 @@ final class Shelf: ObservableObject {
                     shelf.localBytes[book.slug] = mine?.bytes
                     Player.forgetCover(book.slug)
                 case .failure(let why):
+                    print("readsync: \(book.slug) not copied: \(why.message)")
                     shelf.copies[book.slug] = Self.localCopy(book.slug) == nil ? .failed(why.message) : .outdated
                     shelf.message = why.message
                 }
