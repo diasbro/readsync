@@ -83,6 +83,19 @@ def test_a_failed_text_leaves_no_downloads(tmp_path, monkeypatch):
     assert not (tmp_path / "b" / "parts").exists()
 
 
+def test_a_new_book_that_failed_leaves_no_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(add_book, "BOOKS", tmp_path)
+
+    def blocked(src, d, t, a, w):
+        raise SystemExit("на сайте вместо книги заглушка")
+
+    monkeypatch.setattr(add_book, "build_text", blocked)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "nb", "--text", "https://example.org/b"])
+    with pytest.raises(SystemExit):
+        add_book.main()
+    assert not (tmp_path / "nb").exists()
+
+
 def test_failed_audio_keeps_old_audio_and_timing(tmp_path, monkeypatch, work_root):
     """New audio is built in the work dir: a failure halfway leaves the book exactly as it was."""
     d = finished_book(tmp_path, monkeypatch)

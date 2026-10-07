@@ -400,6 +400,7 @@ def main() -> None:
     # a stop (SIGTERM to the job's process group) unwinds like an error, so the cleanup below runs
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     d = BOOKS / args.slug
+    new = not d.exists()
     d.mkdir(parents=True, exist_ok=True)
     w = claim(work_dir(args.slug))  # downloads and intermediate files, outside the (iCloud) library
     try:
@@ -407,6 +408,8 @@ def main() -> None:
     finally:
         tidy(d)  # finished, failed or stopped: the downloads and derived audio are not kept
         shutil.rmtree(w, ignore_errors=True)
+        if new and not any(d.iterdir()):
+            d.rmdir()  # a book that never came to be leaves no folder (the server's jobs keep theirs for the log)
 
 
 def build(args: argparse.Namespace, d: Path, w: Path) -> None:
