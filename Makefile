@@ -1,13 +1,19 @@
-PYTHON ?= $(shell command -v python3.12 || command -v python3)
+# the Python the menu app carries (app/build.sh) builds the books: the dev venv and CI use the same one
+PY_APP := $(shell sed -n 's/^PY_VERSION=//p' app/build.sh)
+PYTHON ?= $(shell uv python find $(PY_APP) 2>/dev/null || command -v python3)
 PY := .venv/bin/python
 # the library the server and add_book use: $READSYNC_BOOKS, else the menu-bar app's, else this checkout's books/
 APP_BOOKS := $(HOME)/Library/Application Support/readsync/books
 BOOKS ?= $(or $(READSYNC_BOOKS),$(shell [ -e "$(APP_BOOKS)" ] && echo "$(APP_BOOKS)" || echo books))
 
-.PHONY: setup serve test lint fmt add-book align compact app dmg ios-sim ios-device ios-autoinstall
+.PHONY: setup venv serve test lint fmt add-book align compact app dmg ios-sim ios-device ios-autoinstall
 
 setup:
-	$(PYTHON) -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -e ".[dev]"
+	command -v uv >/dev/null && uv python install -q $(PY_APP) || true
+	$(MAKE) venv
+
+venv:
+	$(PYTHON) -m venv --clear .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -e ".[dev]"
 
 serve:
 	$(PY) serve.py

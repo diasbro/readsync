@@ -310,7 +310,7 @@ enum HTMLText {
     /// html.parser's CDATA_CONTENT_ELEMENTS: raw text up to their own end tag.
     static let rawText: Set<String> = ["script", "style", "xmp", "iframe", "noembed", "noframes"]
 
-    /// A document read as BeautifulSoup(markup, "html.parser") would (html.parser of Python 3.12.15, bs4 4.15): the
+    /// A document read as BeautifulSoup(markup, "html.parser") would (html.parser of Python 3.13.15, bs4 4.15): the
     /// root holds the top-level nodes. Doctypes, declarations and processing instructions are not kept.
     static func parse(_ text: String) -> Node {
         let p = HTMLParser(Array(text.unicodeScalars))
@@ -697,6 +697,107 @@ enum HTMLText {
                 break
             }
         }
+        return character(v, big: big, html: html)
+    }
+
+    /// Python's `int(t, 16 if hex else 10)`, or nil where it raises: blanks around, a sign, `0x` for hex, any
+    /// decimal digit, single underscores between digits. `big`: past U+10FFFF, or below zero.
+    static func pyInt(_ t: [Unicode.Scalar], hex: Bool) -> (UInt32, Bool)? {
+        var a = 0, b = t.count
+        while a < b, Py.isSpace(t[a]) { a += 1 }
+        while b > a, Py.isSpace(t[b - 1]) { b -= 1 }
+        var neg = false
+        if a < b, t[a] == "+" || t[a] == "-" {
+            neg = t[a] == "-"
+            a += 1
+        }
+        if hex, a + 1 < b, t[a] == "0", t[a + 1] == "x" || t[a + 1] == "X" {
+            a += 2
+            if a < b, t[a] == "_" { a += 1 }
+        }
+        guard a < b else { return nil }
+        let base: UInt32 = hex ? 16 : 10
+        var v: UInt32 = 0
+        var big = false
+        var underscore = true  // no underscore first, none twice, none last
+        for c in t[a..<b] {
+            if c == "_" {
+                if underscore { return nil }
+                underscore = true
+                continue
+            }
+            let d: UInt32
+            if c.properties.numericType == .decimal, let x = c.properties.numericValue {
+                d = UInt32(x)
+            } else if hex, c.isASCII, let x = Character(c).hexDigitValue {
+                d = UInt32(x)
+            } else {
+                return nil
+            }
+            underscore = false
+            if !big {
+                v = v * base + d
+                big = v > 0x10FFFF
+            }
+        }
+        if underscore { return nil }
+        return (v, big || (neg && v != 0))
+    }
+
+    /// html.parser's `_unescape_attrvalue`: numeric references always, a name only when it is an entity as written
+    /// (`&amp;`, `&amp`, not `&copy2024`) and no `=` follows it.
+    static func attributeUnescape(_ s: String) -> String {
+        guard s.contains("&") else { return s }
+        let t = Array(s.unicodeScalars)
+        let n = t.count
+        func isAlnum(_ c: Unicode.Scalar) -> Bool {
+            ("a"..."z").contains(c) || ("A"..."Z").contains(c) || ("0"..."9").contains(c)
+        }
+        var out = String.UnicodeScalarView()
+        var i = 0
+        while i < n {
+            guard t[i] == "&", i + 1 < n else {
+                out.append(t[i])
+                i += 1
+                continue
+            }
+            var k = i + 1
+            let numeric = t[k] == "#"
+            if numeric {
+                if k + 1 < n, ("0"..."9").contains(t[k + 1]) {
+                    k += 1
+                    while k < n, ("0"..."9").contains(t[k]) { k += 1 }
+                } else if k + 2 < n, t[k + 1] == "x" || t[k + 1] == "X", Character(t[k + 2]).isHexDigit, t[k + 2].isASCII {
+                    k += 2
+                    while k < n, t[k].isASCII, Character(t[k]).isHexDigit { k += 1 }
+                } else {
+                    out.append("&")
+                    i += 1
+                    continue
+                }
+            } else if ("a"..."z").contains(t[k]) || ("A"..."Z").contains(t[k]) {
+                k += 1
+                while k < n, isAlnum(t[k]) { k += 1 }
+            } else {
+                out.append("&")
+                i += 1
+                continue
+            }
+            let name = Py.string(Array(t[(i + 1)..<k]))
+            let mark = k < n && (t[k] == ";" || t[k] == "=") ? t[k] : nil
+            let ref = "&" + name + (mark.map { String($0) } ?? "")
+            if numeric || (mark != "=" && html5[name + (mark == ";" ? ";" : "")] != nil) {
+                out.append(contentsOf: unescape(ref).unicodeScalars)
+            } else {
+                out.append(contentsOf: ref.unicodeScalars)
+            }
+            i = mark == nil ? k : k + 1
+        }
+        return String(out)
+    }
+
+    /// The character of a reference's number.
+    static func character(_ v: UInt32, big: Bool, html: Bool) -> String {
         if html {
             if !big, let r = invalidCharrefs[v] { return r }
             if big || (0xD800...0xDFFF).contains(v) { return "\u{FFFD}" }
@@ -754,7 +855,7 @@ enum HTMLText {
     }
 }
 
-/// Python's `html.parser.HTMLParser` as of 3.12.15 (the HTML5 tokenizer rules backported to 3.12, 3.13 and 3.14)
+/// Python's `html.parser.HTMLParser` of 3.13.15 (the Python the Mac app ships, with the HTML5 tokenizer rules)
 /// with `convert_charrefs=False`, driving the tree BeautifulSoup builds: the same tokens, the same handling of
 /// what never ends (a quote drops the rest, a comment runs to the end), the same text.
 private final class HTMLParser {
@@ -989,19 +1090,31 @@ private final class HTMLParser {
                     i = s[e - 1] == ";" ? e : e - 1
                     continue
                 }
-                if find(";" as S, from: i) != nil {
+                if i + 2 < n, ("0"..."9").contains(s[i + 2]) || i + 3 < n && (s[i + 2] == "x" || s[i + 2] == "X") && isHex(s[i + 3]) {
+                    // incomplete: at the end the rest is the reference's
+                    if end {
+                        charrefTail(s[(i + 2)...])
+                        i = n
+                    }
+                    break loop
+                } else if i + 3 < n {
                     handleData("&#")
                     i += 2
+                } else {
+                    break loop
                 }
-                break loop
             } else {  // "&"
                 if let (name, e) = entityref(i) {
                     handleData(HTMLText.html5[name + ";"] ?? "&" + name)
                     i = s[e - 1] == ";" ? e : e - 1
                     continue
                 }
-                if i + 1 < n, isLetter(s[i + 1]) || s[i + 1] == "#" {  // incomplete
-                    if end, i + 2 == n { i += 1 }
+                if i + 1 < n, isLetter(s[i + 1]) || s[i + 1] == "#" {  // incomplete: at the end the rest is its name
+                    if end {
+                        let name = Py.string(Array(s[(i + 1)...]))
+                        handleData(HTMLText.html5[name + ";"] ?? "&" + name)
+                        i = n
+                    }
                     break loop
                 } else if i + 1 < n {
                     handleData("&")
@@ -1045,6 +1158,29 @@ private final class HTMLParser {
         } else if at(i, "<?") {
             other()
         }
+    }
+
+    /// bs4's `handle_charref` given everything after an unfinished `&#`: the number Python's `int` reads in it, else
+    /// the leading digits (and what follows them up to a line end, the rest is lost), else nothing and the text.
+    func charrefTail(_ rest: ArraySlice<S>) {
+        var t = Array(rest)
+        let hex = t.first == "x" || t.first == "X"
+        if hex { t.removeFirst() }
+        if let (v, big) = HTMLText.pyInt(t, hex: hex) {
+            handleData(HTMLText.character(v, big: big, html: false))
+            return
+        }
+        var e = 0
+        while e < t.count, ("0"..."9").contains(t[e]) || hex && ("a"..."f").contains(t[e]) { e += 1 }
+        guard e > 0 else {
+            handleData("")
+            handleData(ArraySlice(t))
+            return
+        }
+        handleData(HTMLText.numeric(Array(t[..<e]), hex: hex, html: false))
+        var line = e
+        while line < t.count, t[line] != "\n" { line += 1 }
+        handleData(t[e..<line])
     }
 
     /// `&#(?:[0-9]+|[xX][0-9a-fA-F]+)[^0-9a-fA-F]` at `k`: the digits, whether hex, and the match's end.
@@ -1142,7 +1278,7 @@ private final class HTMLParser {
                 if r.count >= 2, s[r.lowerBound] == "'" || s[r.lowerBound] == "\"", s[r.upperBound - 1] == s[r.lowerBound] {
                     r = (r.lowerBound + 1)..<(r.upperBound - 1)
                 }
-                value = HTMLText.unescape(Py.string(Array(s[r])))
+                value = HTMLText.attributeUnescape(Py.string(Array(s[r])))
             }
             attrs.append((lower(k, a.nameEnd), value))
             k = skipJunk(a.value?.upperBound ?? a.nameEnd)
@@ -1196,8 +1332,16 @@ private final class HTMLParser {
         endData(.comment)
     }
 
-    /// `--!?>` searched from `i + 4`, else `-?>` right there.
+    /// `-?>` right at `i + 4` (an empty comment), else `--!?>` searched from there.
     func parseComment(_ i: Int) -> Int {
+        if i + 4 < n, s[i + 4] == ">" {
+            comment(s[(i + 4)..<(i + 4)])
+            return i + 5
+        }
+        if i + 5 < n, s[i + 4] == "-", s[i + 5] == ">" {
+            comment(s[(i + 4)..<(i + 4)])
+            return i + 6
+        }
         var j = i + 4
         while j + 2 < n {
             if s[j] == "-", s[j + 1] == "-" {
@@ -1211,14 +1355,6 @@ private final class HTMLParser {
                 }
             }
             j += 1
-        }
-        if i + 4 < n, s[i + 4] == ">" {
-            comment(s[(i + 4)..<(i + 4)])
-            return i + 5
-        }
-        if i + 5 < n, s[i + 4] == "-", s[i + 5] == ">" {
-            comment(s[(i + 4)..<(i + 4)])
-            return i + 6
         }
         return -1
     }
@@ -1238,15 +1374,6 @@ private final class HTMLParser {
         if i + 9 <= n, lower(i, i + 9) == "<!doctype" {
             guard let gt = find(">" as S, from: i + 9) else { return -1 }
             other()
-            return gt + 1
-        }
-        if at(i, "<![") {
-            guard let gt = find(">" as S, from: i + 3) else { return -1 }
-            if s[gt - 1] == "]" {
-                section(s[(i + 3)..<(gt - 1)])
-            } else {
-                comment(s[(i + 2)..<gt])
-            }
             return gt + 1
         }
         return bogusComment(i)
