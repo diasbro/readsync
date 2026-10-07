@@ -35,6 +35,7 @@ struct LibraryView: View {
     @State private var openWhenReady: String?  // tapped while not on the phone yet: opens as soon as it is
     @State private var picking = false
     @State private var lockText = Player.shared.lockText
+    @AppStorage(Shelf.dropReadKey) private var dropRead = false
 
     var body: some View {
         NavigationStack {
@@ -53,6 +54,7 @@ struct LibraryView: View {
                         Button("Обновить", systemImage: "arrow.clockwise") { Task { await shelf.refresh() } }
                         Button("Скачать все книги", systemImage: "icloud.and.arrow.down") { Task { await shelf.fetchAll() } }
                         Toggle("Текст на экране блокировки", systemImage: "lock.iphone", isOn: $lockText)
+                        Toggle("Убирать прочитанные", systemImage: "checkmark.circle", isOn: $dropRead)
                         Text("Папка: \(shelf.folderName)")
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -64,8 +66,9 @@ struct LibraryView: View {
             }
             .task { await shelf.refresh() }
             .onChange(of: lockText) { _, on in Player.shared.lockText = on }
+            .onChange(of: dropRead) { _, on in if on { Task { await shelf.refresh() } } }
             .onChange(of: shelf.copies) { _, copies in
-                if let slug = openWhenReady, copies[slug] == .here {
+                if let slug = openWhenReady, copies[slug] == .here || copies[slug] == .textOnly {
                     openWhenReady = nil
                     reading = slug
                 }
@@ -99,7 +102,11 @@ struct LibraryView: View {
                 SectionTitle("Читаю сейчас")
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 0, trailing: 20))
-                NowReading(book: current, progress: shelf.progress[current.slug]?.fraction ?? 0) { open(current) }
+                NowReading(
+                    book: current, progress: shelf.progress[current.slug]?.fraction ?? 0,
+                    listen: current.hasAudio && shelf.copy(of: current.slug) != .textOnly
+                ) { open(current) }
+                .contextMenu { actions(current, shelf.copy(of: current.slug)) }  // a text-only one gets its audio here
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 12, trailing: 16))
                     .listRowSeparator(.hidden)
                 SectionTitle("Все книги")
@@ -108,6 +115,15 @@ struct LibraryView: View {
             }
             ForEach(shelf.books.filter { $0.slug != shelf.current?.slug }) { book in
                 row(book)
+            }
+            if !shelf.localBytes.isEmpty {
+                let n = shelf.localBytes.count
+                let size = ByteCountFormatter.string(fromByteCount: shelf.localBytes.values.reduce(0, +), countStyle: .file)
+                Text("На iPhone: \(n) \(booksWord(n)) · \(size)")
+                    .font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+                    .frame(maxWidth: .infinity)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 14, leading: 20, bottom: 14, trailing: 20))
             }
         }
         .listStyle(.plain)
@@ -133,13 +149,23 @@ struct LibraryView: View {
             BookRow(book: book, copy: copy, progress: shelf.progress[book.slug]?.fraction ?? 0)
         }
         .buttonStyle(.plain)
-        .swipeActions(edge: .trailing) {
-            if copy == .here || copy == .outdated {
-                Button("Убрать с iPhone", systemImage: "iphone.slash", role: .destructive) { shelf.remove(book.slug) }
-            }
-            if copy == .outdated {
-                Button("Обновить", systemImage: "arrow.down.circle") { shelf.fetch(book) }.tint(.accentColor)
-            }
+        .swipeActions(edge: .trailing) { actions(book, copy) }
+        .contextMenu { actions(book, copy) }
+    }
+
+    @ViewBuilder private func actions(_ book: Book, _ copy: Copy) -> some View {
+        if copy.isReadable {
+            Button("Убрать с iPhone", systemImage: "iphone.slash", role: .destructive) { shelf.remove(book.slug) }
+        }
+        if copy == .outdated {
+            Button("Обновить", systemImage: "arrow.down.circle") { shelf.fetch(book) }.tint(.accentColor)
+        }
+        // an audiobook to read as pages: its text without the hundreds of megabytes of audio
+        if book.hasAudio, copy == .absent || copy.isFailed {
+            Button("Скачать без звука", systemImage: "text.book.closed") { shelf.fetch(book, textOnly: true) }.tint(.indigo)
+        }
+        if copy == .textOnly {
+            Button("Скачать со звуком", systemImage: "headphones") { shelf.fetch(book, textOnly: false) }.tint(.accentColor)
         }
     }
 
@@ -156,7 +182,7 @@ struct LibraryView: View {
 
     private func open(_ book: Book) {
         switch shelf.copy(of: book.slug) {
-        case .here, .outdated:
+        case .here, .textOnly, .outdated:
             openWhenReady = nil  // a fetch that ends later must not swap the book being read
             reading = book.slug  // a newer version waits for its own swipe
         case .fetching:
@@ -166,6 +192,14 @@ struct LibraryView: View {
             shelf.fetch(book)
         }
     }
+}
+
+/// «книга», «книги», «книг» for `n`.
+func booksWord(_ n: Int) -> String {
+    let (ten, hundred) = (n % 10, n % 100)
+    if ten == 1, hundred != 11 { return "книга" }
+    if (2...4).contains(ten), !(12...14).contains(hundred) { return "книги" }
+    return "книг"
 }
 
 struct Slug: Identifiable {
@@ -187,6 +221,7 @@ struct SectionTitle: View {
 struct NowReading: View {
     let book: Book
     let progress: Double
+    let listen: Bool  // an audiobook with its audio on the phone
     let open: () -> Void
     @Environment(\.colorScheme) private var scheme
 
@@ -207,7 +242,7 @@ struct NowReading: View {
                     HStack {
                         Text(percent(progress)).font(.caption).foregroundStyle(.secondary).monospacedDigit()
                         Spacer()
-                        Label(book.hasAudio ? "Слушать" : "Читать", systemImage: book.hasAudio ? "headphones" : "book")
+                        Label(listen ? "Слушать" : "Читать", systemImage: listen ? "headphones" : "book")
                             .font(.subheadline.weight(.semibold))
                             .padding(.horizontal, 14).padding(.vertical, 7)
                             .background(Color.accentColor, in: Capsule())
@@ -308,6 +343,14 @@ struct BookRow: View {
             HStack(spacing: 8) {
                 ProgressBar(value: progress).frame(maxWidth: 120)
                 Text(percent(progress)).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+            }
+        case .textOnly:
+            HStack(spacing: 8) {
+                if progress > 0 {
+                    ProgressBar(value: progress).frame(maxWidth: 120)
+                    Text(percent(progress)).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                }
+                Label("без звука", systemImage: "text.book.closed").font(.caption2).foregroundStyle(.secondary)
             }
         case .absent:
             Text("Не скачана · \(ByteCountFormatter.string(fromByteCount: book.bytes, countStyle: .file))")

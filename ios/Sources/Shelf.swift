@@ -61,8 +61,17 @@ struct Progress: Equatable {
     var opened = 0.0
 }
 
+/// `textOnly`: a copy of an audiobook without its audio, read as pages.
 enum Copy: Equatable {
-    case absent, fetching(Double), here, outdated, failed(String)
+    case absent, fetching(Double), here, textOnly, outdated, failed(String)
+
+    /// A copy the reader can open.
+    var isReadable: Bool { self == .here || self == .textOnly || self == .outdated }
+
+    var isFailed: Bool {
+        if case .failed = self { return true }
+        return false
+    }
 }
 
 @MainActor
@@ -73,6 +82,8 @@ final class Shelf: ObservableObject {
     @Published private(set) var copies: [String: Copy] = [:]
     @Published private(set) var progress: [String: Progress] = [:]
     @Published private(set) var folderName = ""
+    /// What each local copy weighs, by its own manifest: the library's «На iPhone» line.
+    @Published private(set) var localBytes: [String: Int64] = [:]
     @Published var message = ""
 
     private let fm = FileManager.default
@@ -82,6 +93,9 @@ final class Shelf: ObservableObject {
     private var launched = false  // the first refresh has run: `-fetchAll YES` acts once, after it
     private let bookmarkKey = "libraryBookmark"
     private let folderLostMessage = "Нет доступа к папке библиотеки: выбери её снова"
+    /// The library's «Убирать прочитанные». Not in AppSettings: the reader's save there keeps
+    /// only the keys it knows of and would switch it off.
+    nonisolated static let dropReadKey = "dropRead"
 
     /// Where the app keeps its own copies; made once.
     nonisolated static let localRoot: URL = {
@@ -174,9 +188,11 @@ final class Shelf: ObservableObject {
         // a copy whose book left the Mac's library (or a folder that cannot be reached right now) stays
         // readable until the reader removes it
         let shared = Set(found.map(\.slug))
-        let localOnly = ((try? fm.contentsOfDirectory(atPath: Self.localRoot.path)) ?? [])
-            .filter { !$0.hasPrefix(".") && !shared.contains($0) }
+        let local = ((try? fm.contentsOfDirectory(atPath: Self.localRoot.path)) ?? [])
+            .filter { !$0.hasPrefix(".") }
             .compactMap(Self.localCopy)
+        localBytes = Dictionary(uniqueKeysWithValues: local.map { ($0.slug, $0.bytes) })
+        let localOnly = local.filter { !shared.contains($0.slug) }
         books = (found + localOnly).sorted { $0.title.localizedCompare($1.title) == .orderedAscending }
         for book in found { copies[book.slug] = localCopy(of: book) }
         for book in localOnly where !isFetching(book.slug) { copies[book.slug] = .here }
@@ -200,6 +216,12 @@ final class Shelf: ObservableObject {
         }.value
         Player.forgetMissingCovers()
         progress = measured
+        if UserDefaults.standard.bool(forKey: Self.dropReadKey) {
+            let here = Set(copies.filter { $0.value.isReadable }.map(\.key))
+            for slug in Self.readToDrop(measured, local: here, loaded: Player.shared.slug, now: ReadingState.nowMs) {
+                remove(slug)
+            }
+        }
         if !launched {
             launched = true
             // launched with `-fetchAll YES`: every book onto the phone, as the menu's «Скачать все книги»
@@ -214,9 +236,30 @@ final class Shelf: ObservableObject {
 
     private func localCopy(of book: Book) -> Copy {
         if isFetching(book.slug) { return copies[book.slug]! }
-        guard let mine = Self.localCopy(book.slug) else { return .absent }
+        return Self.copyState(local: Self.localCopy(book.slug), shared: book)
+    }
+
+    /// A local copy against the book as the Mac has it now.
+    nonisolated static func copyState(local mine: Book?, shared book: Book) -> Copy {
+        guard let mine else { return .absent }
         // the same edition with other sizes is new timing from the Mac's precise alignment
-        return mine.edition == book.edition && mine.files == book.files ? .here : .outdated
+        guard mine.edition == book.edition else { return .outdated }
+        if mine.files == book.files { return .here }
+        if mine.audioName == nil, let audio = book.audioName, mine.files == book.files.filter({ $0.key != audio }) {
+            return .textOnly
+        }
+        return .outdated
+    }
+
+    /// Finished books not opened for a week, whose copies go when «Убирать прочитанные» is on. The reading
+    /// state stays in the shared library; the book the narrator holds stays too.
+    nonisolated static func readToDrop(_ progress: [String: Progress], local: Set<String>, loaded: String?, now: Double)
+        -> [String]
+    {
+        let week = 7 * 86_400_000.0  // `opened` is in milliseconds, as the reader writes it
+        return progress.filter { slug, p in
+            local.contains(slug) && slug != loaded && p.fraction >= 0.99 && now - p.opened >= week
+        }.map(\.key).sorted()
     }
 
     func copy(of slug: String) -> Copy { copies[slug] ?? .absent }
@@ -263,7 +306,7 @@ final class Shelf: ObservableObject {
 
     /// The book to come back to: the last one opened that has a copy on this phone.
     var current: Book? {
-        books.filter { copy(of: $0.slug) == .here || copy(of: $0.slug) == .outdated }
+        books.filter { copy(of: $0.slug).isReadable }
             .filter { (progress[$0.slug]?.opened ?? 0) > 0 }
             .max { (progress[$0.slug]?.opened ?? 0) < (progress[$1.slug]?.opened ?? 0) }
     }
@@ -273,20 +316,22 @@ final class Shelf: ObservableObject {
 
     // ---- getting a copy ----
 
-    /// The task ends once the copy is in or has failed.
+    /// The task ends once the copy is in or has failed. `textOnly`: an audiobook without its audio; left
+    /// out, a copy keeps the kind it is.
     @discardableResult
-    func fetch(_ book: Book) -> Task<Void, Never>? {
+    func fetch(_ book: Book, textOnly: Bool? = nil) -> Task<Void, Never>? {
         if case .fetching = copy(of: book.slug) { return nil }
         guard let root = booksRoot else {
             message = folderLostMessage
             return nil
         }
+        let textOnly = book.audioName != nil && (textOnly ?? (Self.localCopy(book.slug).map { $0.audioName == nil } ?? false))
         if Player.shared.slug == book.slug { Player.shared.stop() }  // its files are about to be swapped under it
         sweepStaging()
         copies[book.slug] = .fetching(0)
         let source = root.appendingPathComponent(book.slug, isDirectory: true)
         return Task.detached {
-            let result = Self.copyBook(book.slug, from: source) { done in
+            let result = Self.copyBook(book.slug, from: source, textOnly: textOnly) { done in
                 Task { @MainActor in
                     if Shelf.shared.isFetching(book.slug) { Shelf.shared.copies[book.slug] = .fetching(done) }
                 }
@@ -296,7 +341,9 @@ final class Shelf: ObservableObject {
                 guard shelf.isFetching(book.slug) else { return }  // removed while it was coming in
                 switch result {
                 case .success:
-                    shelf.copies[book.slug] = .here
+                    let mine = Self.localCopy(book.slug)
+                    shelf.copies[book.slug] = mine.map { Self.copyState(local: $0, shared: book) } ?? .here
+                    shelf.localBytes[book.slug] = mine?.bytes
                     Player.forgetCover(book.slug)
                 case .failure(let why):
                     shelf.copies[book.slug] = Self.localCopy(book.slug) == nil ? .failed(why.message) : .outdated
@@ -333,10 +380,30 @@ final class Shelf: ObservableObject {
 
     struct Failure: Error { let message: String }
 
+    /// The files of the manifest a copy takes, smallest first; a text-only copy leaves the audio.
+    nonisolated static func parts(of book: Book, textOnly: Bool) -> [(name: String, size: Int64)] {
+        book.files.filter { !textOnly || $0.key != book.audioName }
+            .sorted { ($0.value, $0.key) < ($1.value, $1.key) }
+            .map { (name: $0.key, size: $0.value) }
+    }
+
+    /// The manifest with `files` as given: a text-only copy says what it holds, so the reader opens it as pages.
+    nonisolated static func manifest(_ toml: String, files: [(name: String, size: Int64)]) -> String {
+        let line = "files = \"" + files.map { "\($0.name):\($0.size)" }.joined(separator: ",") + "\""
+        var lines = toml.components(separatedBy: "\n")
+        if let i = lines.firstIndex(where: { $0.split(separator: "=", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces) == "files" }) {
+            lines[i] = line
+        } else {
+            lines.insert(line, at: lines.last == "" ? lines.count - 1 : lines.count)
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// Copy the files the reader needs, check them against the manifest, then swap the copy in whole.
-    nonisolated static func copyBook(_ slug: String, from source: URL, progress: @escaping (Double) -> Void)
-        -> Result<Void, Failure>
-    {
+    /// `textOnly`: everything but the audio.
+    nonisolated static func copyBook(
+        _ slug: String, from source: URL, textOnly: Bool = false, progress: @escaping (Double) -> Void
+    ) -> Result<Void, Failure> {
         let fm = FileManager.default
         // the manifest as it is now, read once: the files are checked against it and it is the one kept
         guard let toml = Coordinated.read(source.appendingPathComponent("book.toml")),
@@ -347,9 +414,10 @@ final class Shelf: ObservableObject {
         try? fm.removeItem(at: staging)
         do {
             try fm.createDirectory(at: staging, withIntermediateDirectories: true)
-            let total = Double(max(book.bytes, 1))
+            let wanted = parts(of: book, textOnly: textOnly)
+            let total = Double(max(wanted.reduce(0) { $0 + $1.size }, 1))
             var done: Int64 = 0
-            for (name, size) in book.files.sorted(by: { $0.value < $1.value }) {
+            for (name, size) in wanted {
                 // a file of the book's folder, never a path out of it
                 guard !name.contains("/"), !name.contains(".."), !name.hasPrefix(".") else {
                     return .failure(Failure(message: "в book.toml чужое имя файла: \(name)"))
@@ -382,13 +450,16 @@ final class Shelf: ObservableObject {
                 }
             }
             // the manifest last, as on the Mac: a copy with it is a whole copy
-            try toml.write(to: staging.appendingPathComponent("book.toml"))
+            let kept = textOnly ? Data(manifest(text, files: wanted).utf8) : toml
+            try kept.write(to: staging.appendingPathComponent("book.toml"))
             let dest = localDir(slug)
             if fm.fileExists(atPath: dest.path) {
                 _ = try fm.replaceItemAt(dest, withItemAt: staging)  // one step: the old copy stays until the new one is in
             } else {
                 try fm.moveItem(at: staging, to: dest)
             }
+            // iCloud's own download of the audio goes back to the cloud: the phone keeps it once, in the copy
+            if let audio = book.audioName { try? fm.evictUbiquitousItem(at: source.appendingPathComponent(audio)) }
             return .success(())
         } catch {
             try? fm.removeItem(at: staging)
@@ -400,6 +471,7 @@ final class Shelf: ObservableObject {
         if Player.shared.slug == slug { Player.shared.stop() }  // the narrator must not play a file that is gone
         try? fm.removeItem(at: Self.localDir(slug))
         copies[slug] = Copy.absent
+        localBytes[slug] = nil
     }
 
     /// The shared folder of one book: where its reading state lives.
