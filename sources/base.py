@@ -10,8 +10,8 @@ import urllib.request
 
 VOLUME_RE = re.compile(r"\b(?:т|том|кн|книга|ч|часть|vol|volume|part)\.?\s*(\d+|[IVXLC]+)\b", re.I)
 OPENS = frozenset(("html", "fb2", "epub", "pdf", "txt"))  # what the pipeline can turn into a book
-# priority when rows are sorted: the Russian catalogs first, then the open ones
-SOURCE_ORDER = ("fantasy-worlds", "flibusta", "coollib", "standard-ebooks", "gutenberg", "wikisource", "bia")
+# priority when rows are sorted: the search order, set from SOURCES by `sources/__init__.py`
+SOURCE_ORDER: tuple[str, ...] = ()
 # `over`: the running round's end, set by `sources.ask` in each request's thread
 ROUND = threading.local()
 

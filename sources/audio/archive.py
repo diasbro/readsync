@@ -4,25 +4,25 @@ metadata is too sparse to filter on: every word of the query must be in the titl
 
 from __future__ import annotations
 
-import json
 import re
-import threading
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 from .. import base
+from ..ia import BASE, fetch, joined, parse_search
+
+
+def safe_metadata(identifier: str) -> dict | None:
+    """An item's metadata, or None when it does not answer. Here and not in `ia`, so tests can replace `fetch`."""
+    try:
+        return fetch(f"{BASE}/metadata/{identifier}")
+    except Exception:  # noqa: BLE001 - a missing item, a broken answer, a dropped connection
+        return None
+
 
 NAME = "archive.org"
-BASE = "https://archive.org"
-ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", re.ASCII)
 ROWS = 8
-SLOTS = threading.BoundedSemaphore(2)
 FORMATS = ("VBR MP3", "128Kbps MP3", "64Kbps MP3", "MP3")  # one set of files per item, best first
-
-
-def fetch(url: str) -> dict:
-    with SLOTS:
-        return json.loads(base.get(url, timeout=20).decode("utf-8", "replace"))
 
 
 def lucene(query: str) -> str:
@@ -41,23 +41,6 @@ def search(query: str) -> list[dict]:
     with ThreadPoolExecutor(max_workers=2) as ex:  # the two request slots: metadata of each item
         metas = list(ex.map(lambda d: safe_metadata(d["identifier"]), docs))
     return [h for h in (to_hit(d, m) for d, m in zip(docs, metas, strict=True)) if h]
-
-
-def parse_search(data: dict) -> list[dict]:
-    return [
-        d for d in (data.get("response") or {}).get("docs") or [] if ID_RE.fullmatch(str(d.get("identifier") or ""))
-    ]
-
-
-def safe_metadata(identifier: str) -> dict | None:
-    try:
-        return fetch(f"{BASE}/metadata/{identifier}")
-    except Exception:  # noqa: BLE001 - one item that does not answer leaves the others in the list
-        return None
-
-
-def joined(v) -> str:
-    return ", ".join(str(x) for x in v) if isinstance(v, list) else str(v or "")
 
 
 def seconds(length) -> float | None:

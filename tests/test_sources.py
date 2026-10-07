@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
+from pathlib import Path
 
 import sources
 from sources import base
 from sources.flibusta import Flibusta
+
+ROOT = Path(__file__).resolve().parent.parent
 
 ENTRY = """<entry><title>Дао Дэ Цзин</title><author><name>Лао-цзы</name></author>
 <dc:language>ru</dc:language>
@@ -696,3 +700,175 @@ def test_a_catalog_that_declares_a_budget_declares_a_sane_one():
     for s in sources.SOURCES:
         assert 0 < getattr(s, "seconds", sources.ROUND_SECONDS) <= sources.ROUND_SECONDS, s.name
     assert Flibusta().seconds < sources.ROUND_SECONDS  # an OPDS shelf: several pages, and mirrors that go down
+
+
+# ---------------------------------------------------------------- one list of catalogs, one place to add one
+
+
+def test_the_priority_list_is_the_search_order():
+    """The order the catalogs are searched in is the order their rows are ranked in: written down twice
+    before, they drifted apart the moment a catalog was added to one of them."""
+    assert tuple(s.name for s in sources.SOURCES) == base.SOURCE_ORDER
+
+
+def test_the_reader_names_every_catalog():
+    """The reader labels a row from its own map and counts the catalogs from it: a source in SOURCES but
+    not in reader/library.js shows a raw id and a wrong «не нашлось ни в одном из N каталогов»."""
+    js = (ROOT / "reader" / "library.js").read_text(encoding="utf-8")
+    named = re.search(r"const SOURCE = \{(.*?)\};", js, re.S).group(1)
+    missing = [s.name for s in sources.SOURCES if f'"{s.name}"' not in named and f"{s.name}:" not in named]
+    assert not missing, f"нет подписи в reader/library.js: {missing}"
+
+
+# ---------------------------------------------------------------- archive.org, the texts
+
+
+IA_SEARCH = {
+    "response": {
+        "numFound": 2,
+        "docs": [
+            {
+                "identifier": "tao-te-king",
+                "title": "Tao Tê Ching: di Lao-Tze",
+                "creator": "Julius Evola",
+                "downloads": 553,
+            },
+            {"identifier": "lending-only", "title": "Tao Te Ching", "creator": "Laozi", "downloads": 9000},
+        ],
+    }
+}
+IA_FILES = [
+    {"name": "Tao Te King .pdf", "format": "Image Container PDF", "size": "28677288"},
+    {"name": "Tao Te King _text.pdf", "format": "Text PDF", "size": "3980227"},
+    {"name": "Tao Te King _djvu.txt", "format": "DjVuTXT", "size": "418366"},
+    {"name": "tao.epub", "format": "EPUB", "size": "1024", "source": "original"},
+]
+IA_META = {
+    "metadata": {"title": "Tao Tê Ching: di Lao-Tze", "creator": "Julius Evola", "language": "ita", "year": "1974"},
+    "files": IA_FILES,
+}
+IA_LENDING = {
+    "metadata": {"title": "Tao Te Ching", "creator": "Laozi", "year": "1999", "access-restricted-item": "true"},
+    "files": [{"name": "lending.epub", "format": "EPUB", "size": "10", "source": "original"}],
+}
+
+
+def test_internet_archive_search_asks_only_for_readable_texts():
+    from sources.internet_archive import InternetArchive
+
+    q = InternetArchive().lucene("Tao Te Ching")
+    assert q.startswith("mediatype:texts AND ")
+    assert "NOT access-restricted-item:true" in q  # the lending library's books answer 401
+    assert 'format:"DjVuTXT"' in q and "Image Container PDF" not in q
+    assert "(title:(ching) OR creator:(ching))" in q and "(title:(tao) OR creator:(tao))" in q
+    assert "NOT collection:deemphasize" in q and "NOT collection:no-preview" in q
+
+
+def test_internet_archive_reads_the_best_file_and_never_a_scan():
+    from sources.internet_archive import InternetArchive
+
+    ia = InternetArchive()
+    assert ia.file_of(IA_META) == ("tao.epub", "epub", 1024)  # an EPUB beats the OCR text
+    assert ia.file_of({"files": IA_FILES[:3]}) == ("Tao Te King _djvu.txt", "txt", 418366)  # then the text
+    assert ia.file_of({"files": IA_FILES[1:2]}) == ("Tao Te King _text.pdf", "pdf", 3980227)  # then an OCR'd PDF
+    assert ia.file_of({"files": IA_FILES[:1]}) is None  # a pile of page images is not a book
+    assert ia.file_of(IA_LENDING) is None  # held by the lending library, whatever its files are called
+    derived = {"name": "scan.epub", "format": "EPUB", "size": "428694396", "source": "derivative"}
+    assert ia.file_of({"files": [derived, *IA_FILES[:3]]})[0] == "Tao Te King _djvu.txt"  # a JPEG per page
+
+
+def test_internet_archive_skips_an_item_of_several_books():
+    """An item may hold several works or volumes: no telling which file is the one asked for."""
+    from sources.internet_archive import InternetArchive
+
+    ia = InternetArchive()
+    two_epubs = [{"name": f"{n}.epub", "format": "EPUB", "source": "original"} for n in ("A Raw Youth", "Demian")]
+    assert ia.file_of({"files": two_epubs}) is None
+    two_txts = [{"name": f"{n}_djvu.txt", "format": "DjVuTXT", "source": "derivative"} for n in ("a", "b")]
+    assert ia.file_of({"files": two_txts}) is None
+
+
+def test_internet_archive_names_the_volume_and_the_language():
+    from sources.internet_archive import InternetArchive, lang_of
+
+    meta = {
+        "metadata": {"title": "The novels of Fyodor Dostoevsky", "volume": "4", "language": "eng"},
+        "files": IA_FILES,
+    }
+    h = InternetArchive().to_hit({"identifier": "novels04"}, meta)
+    assert h["title"] == "The novels of Fyodor Dostoevsky, т. 4" and h["lang"] == "en"
+    langs = {"Russian": "ru", "deu": "de", "FRE": "fr", "zho": "zh", "ces": "cs", "nld": "nl", "ell": "el"}
+    assert {k: lang_of(k) for k in langs} == langs and lang_of(["rus", "German"]) == "ru"
+
+
+def test_internet_archive_survives_an_answer_that_is_not_as_described():
+    from sources.ia import parse_search
+    from sources.internet_archive import InternetArchive
+
+    assert parse_search({"response": {"docs": ["x", None, {"identifier": "ok"}]}}) == [{"identifier": "ok"}]
+    assert parse_search([]) == [] and parse_search({"response": []}) == []
+    assert InternetArchive().to_hit({"identifier": "x"}, ["files"]) is None
+
+
+def test_internet_archive_stops_reading_metadata_when_the_round_is_over(monkeypatch):
+    from sources import internet_archive
+    from sources.internet_archive import InternetArchive
+
+    docs = [{"identifier": f"tao-{i}", "title": "Tao Te Ching", "creator": "Laozi"} for i in range(8)]
+    over = threading.Event()
+    asked = []
+
+    def fake_fetch(url):
+        if "advancedsearch" in url:
+            return {"response": {"docs": docs}}
+        asked.append(url)
+        over.set()  # the round ends while the first items are read
+        return IA_META
+
+    monkeypatch.setattr(internet_archive, "fetch", fake_fetch)
+    monkeypatch.setattr(base.ROUND, "over", over, raising=False)
+    InternetArchive().search("Tao Te Ching")
+    assert 1 <= len(asked) <= 2, asked  # what was already in flight on the two slots, nothing after
+
+
+def test_internet_archive_rows_are_direct_files(monkeypatch):
+    from sources import internet_archive
+    from sources.internet_archive import InternetArchive
+
+    asked = []
+
+    def fake_fetch(url):
+        asked.append(url)
+        if "advancedsearch" in url:
+            return IA_SEARCH
+        return {"tao-te-king": IA_META, "lending-only": IA_LENDING}[url.rsplit("/", 1)[-1]]
+
+    monkeypatch.setattr(internet_archive, "fetch", fake_fetch)
+    hits = InternetArchive().search("Tao Te Ching")
+    assert len(hits) == 1  # the lending copy has no file to read and is not a row
+    h = hits[0]
+    assert h["url"] == "https://archive.org/download/tao-te-king/tao.epub" and h["kind"] == "epub"
+    assert (h["author"], h["year"], h["lang"], h["size_kb"]) == ("Julius Evola", "1974", "it", 1)
+    assert "sort[]=downloads+desc" in asked[0] and "output=json" in asked[0]
+    assert asked[1] == "https://archive.org/metadata/tao-te-king"
+
+
+def test_internet_archive_keeps_only_the_rows_that_name_the_query():
+    from sources.internet_archive import InternetArchive
+
+    ia = InternetArchive()
+    assert ia.names_query("Tao Te Ching", {"title": "Tao Tê Ching: di Lao-Tze", "creator": "Julius Evola"})
+    assert not ia.names_query("Tao Te Ching", {"title": "Основы даосизма", "creator": "Кто-то"})
+    assert not ia.names_query("Tao Te Ching", {"title": "", "creator": ""})
+
+
+def test_internet_archive_ignores_a_file_entry_with_no_name():
+    """An entry without a name would send the reader to the item's directory listing, and `files` is not
+    always a list: neither is a book."""
+    from sources.internet_archive import InternetArchive
+
+    ia = InternetArchive()
+    assert ia.file_of({"files": [{"format": "DjVuTXT", "size": "10"}]}) is None
+    assert ia.file_of({"files": {"DjVuTXT": "x"}}) is None
+    assert ia.file_of({"files": ["DjVuTXT"]}) is None
+    assert ia.file_of({"files": [{"format": "DjVuTXT", "name": "b.txt", "size": "12"}]}) == ("b.txt", "txt", 12)

@@ -89,7 +89,7 @@
   // open: id of the card opened in place; confirmDel / confirmStop: the card asking "delete?" / "call the load off?"
   let books = [], wishes = [], jobs = {}, open = null, confirmDel = null, confirmStop = null, loaded = false;
   const SOURCE = { "fantasy-worlds": "Fantasy Worlds", flibusta: "Flibusta", coollib: "Coollib", "standard-ebooks": "Standard Ebooks",
-    gutenberg: "Gutenberg", wikisource: "Wikisource", bia: "Buddhadasa Archives" };
+    gutenberg: "Gutenberg", wikisource: "Wikisource", bia: "Buddhadasa Archives", "archive.org": "Internet Archive" };
   const SOURCES_LABEL = Object.values(SOURCE).join(", ");
   const SOURCES_N = Object.keys(SOURCE).length;
   const LOADABLE = new Set(["fb2", "epub", "pdf", "txt", "html"]);
@@ -102,7 +102,8 @@
   const statusOf = (b) => b.state?.status || "none";
   let showDone = store.get("rs:showDone", false);  // «Прочитанные» unfolded: this browser's convenience, not state
   const REF_SOURCE = { knigavuhe: "knigavuhe", yt: "YouTube", ia: "archive.org" };  // a recording loaded by its ref
-  const sourceOf = (url) => { const h = (url || "").split("|")[0].trim(); const ref = /^(knigavuhe|yt|ia):/.exec(h); if (ref) return REF_SOURCE[ref[1]]; for (const k in SOURCE) if (h.includes(k.replace("-", "-"))) return SOURCE[k]; return h && !isUrl(h) ? "файл" : h ? new URL(h).hostname.replace(/^www\./, "") : ""; };
+  // a catalog by the labels of the link's host, hyphens aside (standardebooks.org, main.bia.or.th)
+  const sourceOf = (url) => { const h = (url || "").split("|")[0].trim(); const ref = /^(knigavuhe|yt|ia):/.exec(h); if (ref) return REF_SOURCE[ref[1]]; if (!h) return ""; if (!isUrl(h)) return "файл"; const host = new URL(h).hostname.replace(/^www\./, ""); const labels = `.${host.replace(/-/g, "")}.`; for (const k in SOURCE) if (labels.includes(`.${k.replace(/-/g, "")}.`)) return SOURCE[k]; return host; };
   const kb = (n) => (n == null ? "" : n >= 1000 ? (n / 1024).toFixed(1).replace(".", ",") + " МБ" : n + " КБ");
   const facts = (b) => [b.author, b.translator ? "пер. " + b.translator : null, b.year, b.has_audio ? (b.narrator ? "читает " + b.narrator : "с аудио") : null].filter(Boolean).join(" · ");
 

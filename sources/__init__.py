@@ -17,11 +17,22 @@ from .coollib import Coollib
 from .fantasy_worlds import FantasyWorlds
 from .flibusta import Flibusta
 from .gutenberg import Gutenberg
+from .internet_archive import InternetArchive
 from .standard_ebooks import StandardEbooks
 from .wikisource import Wikisource
 
 # the Russian catalogs first; then libraries whose books are free by law or by their owners' gift
-SOURCES = [FantasyWorlds(), Flibusta(), Coollib(), StandardEbooks(), Gutenberg(), Wikisource(), Bia()]
+SOURCES = [
+    FantasyWorlds(),
+    Flibusta(),
+    Coollib(),
+    StandardEbooks(),
+    Gutenberg(),
+    Wikisource(),
+    Bia(),
+    InternetArchive(),
+]
+base.SOURCE_ORDER = tuple(s.name for s in SOURCES)  # the priority order is the search order
 SHORTER_TRIES = 3  # how many shorter searches follow a phrase that found nothing
 ROUND_SECONDS = 60  # one deadline for a whole round of requests, retries included; the reader can cancel sooner
 TRIES = 5  # a mirror that answers 502 or times out is often fine a moment later: this many attempts per request
