@@ -132,6 +132,13 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .btn:disabled { opacity: .4; cursor: default; filter: none; }
 .btn.sm { padding: 6px 11px; font-size: 13px; border-radius: 8px; }
 .lib-grid { display: grid; gap: 12px; }
+/* an empty library: no heading, one block with the two ways in; a file dragged over the page lights it */
+#library-section.empty .sec-head { display: none; }
+.lib-empty { padding: 44px 24px 40px; border: 1px dashed color-mix(in srgb, var(--muted) 40%, transparent); border-radius: 14px; text-align: center; transition: border-color .15s; }
+body.dropping .lib-empty { border-color: var(--accent); }
+.lib-empty p { margin: 0; }
+.lib-empty .le-t { font-family: var(--serif); font-size: 24px; line-height: 1.3; margin-bottom: 10px; }
+.lib-empty .btn { margin-top: 22px; cursor: pointer; }
 .card { display: grid; grid-template-columns: 64px 1fr auto; gap: 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px;
   background: var(--panel); color: inherit; text-decoration: none; transition: border-color .15s, transform .15s; }
 .card:hover { border-color: var(--accent); transform: translateY(-1px); }
@@ -259,7 +266,7 @@ html[data-theme="night"] .card .ask .yes, html[data-theme="night"] .card .foot.c
 /* covers: a grid of 2:3 covers with the title and one line of state; an opened cover's card spans the row
    under it (dense flow fills the row it leaves) */
 #library-list.covers { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); column-gap: 24px; row-gap: 28px; grid-auto-flow: row dense; align-items: start; }
-#library-list.covers > .panel, #library-list.covers > .card.add, #library-list.covers > p { grid-column: 1 / -1; }
+#library-list.covers > .panel, #library-list.covers > .card.add, #library-list.covers > .lib-empty { grid-column: 1 / -1; }
 .card.tile { display: flex; flex-direction: column; min-width: 0; padding: 0; border: 0; border-radius: 0; background: none; gap: 0; }
 .card.tile:hover { transform: none; }
 .card.tile .cover-link { display: block; position: relative; }
@@ -280,6 +287,7 @@ html[data-theme="night"] .card .ask .yes, html[data-theme="night"] .card .foot.c
 .card.tile.shell .t { cursor: pointer; }
 .card.tile .tl { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 22px; margin-top: 3px; }
 .card.tile .tl .m { flex: 1; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.card.tile .tl .m.ask { white-space: normal; overflow: visible; }  /* a narrow tile wraps «да · нет» rather than cutting it */
 .card.tile .tl .au svg { width: 12px; height: 12px; vertical-align: -2px; margin-right: 4px; }
 .card.tile .tl .m.warn::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d0902e; margin-right: 5px; vertical-align: 1px; }
 .card.tile .tl .spin { display: inline-block; width: 8px; height: 8px; margin-right: 5px; vertical-align: -1px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
@@ -312,6 +320,7 @@ html[data-theme="night"] .card .ask .yes, html[data-theme="night"] .card .foot.c
 .ctl.big svg { width: 24px; height: 24px; }
 /* the way back to the library: inside the iPhone app only, where the library is a screen of its own */
 .back-lib { display: none; color: var(--fg); }
+#btn-focus-top { display: none; }
 .in-app .back-lib { display: inline-flex; margin-right: -6px; }
 .in-app .back-lib svg { width: 24px; height: 24px; }
 /* the top bar in the camera island's ears (the app hides the status bar): as tall as the inset, the
@@ -319,15 +328,23 @@ html[data-theme="night"] .card .ask .yes, html[data-theme="night"] .card .foot.c
 .ears { --topbar-h: max(52px, var(--safe-t)); }
 .ears .topbar { padding-top: 0; background: var(--bg); backdrop-filter: none; border-bottom-color: transparent; }
 .ears .topbar-title { visibility: hidden; }
+/* three buttons fit the ear right of the island (about 118 pt on a 402 pt screen): a little narrower there */
+.ears .topbar { gap: 4px; }
+.ears .topbar .icon { width: 36px; height: 36px; }
 /* the lines scrolling up fade into the bar instead of being cut at its edge */
-.ears .topbar::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 16px; pointer-events: none;
+.ears .topbar::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 28px; pointer-events: none;
   background: linear-gradient(var(--bg), transparent); }
 /* leaving the page there is locking the phone, and the narrator plays on: this switch means nothing */
 .in-app label:has(#set-pause-hidden) { display: none; }
 @media (hover: hover) { .icon:hover { background: var(--line); } }
 .badge { font-variant-numeric: tabular-nums; font-size: 13px; padding: 4px 10px; border-radius: 999px;
   background: var(--accent); color: var(--on-accent); }
-.badge.ending { animation: pulse 1s infinite alternate; }
+.badge.ending, .ears .ctl.ending { animation: pulse 1s infinite alternate; }
+/* beside the camera island the bar has no room for the badge: the sprint button wears the time instead */
+.ears #sprint-badge { display: none; }
+.ears .ctl[data-left] { width: auto; min-width: 44px; padding: 0 10px; border-radius: 999px; }
+.ears .ctl[data-left] svg { display: none; }
+.ears .ctl[data-left]::after { content: attr(data-left); font: 600 13px var(--ui); font-variant-numeric: tabular-nums; }
 @keyframes pulse { to { opacity: .55; } }
 
 /* hyphens break what they can; a url or a formula has nothing to break on, and in a column half a
@@ -337,15 +354,31 @@ html[data-theme="night"] .card .ask .yes, html[data-theme="night"] .card .foot.c
   font-family: var(--family); font-size: var(--font-size); line-height: var(--lh); font-weight: var(--weight);
   touch-action: manipulation; }  /* a double tap seeks to the sentence, it does not zoom */
 #text p { margin: 0 0 0.9em; text-indent: 1.4em; }
+/* a book's page: both edges straight, the hyphens above doing the spacing's work. Only the paragraphs whose
+   alignment is open: titles stay centred, verse and signatures where they are, and a book that sets its own
+   alignment (an inline style from book.json's `st`) keeps it */
+body.justify #text :is(.k-p, .k-epigraph, .k-cite, .k-annotation) { text-align: justify; }
 #text .k-title { font-size: 1.35em; font-weight: 500; text-indent: 0; margin: 2.2em 0 1em; line-height: 1.25; text-align: center; }
 #text .k-title.lvl1 { font-size: 1.7em; margin-top: 3em; }
 #text .k-subtitle { text-indent: 0; text-align: center; font-style: italic; margin: 1.4em 0 1em; }
 #text .k-epigraph, #text .k-cite { text-indent: 0; margin-left: 2.5em; font-style: italic; }
-#text .k-author { text-indent: 0; text-align: right; font-style: italic; margin-left: 2.5em; }
+/* an epigraph stands to the right, as books set it */
+#text .k-epigraph { margin-left: min(35%, 12em); }
+#text :is(.k-author, .k-date) { text-indent: 0; text-align: right; font-style: italic; margin-left: 2.5em; }
 #text .k-annotation { text-indent: 0; color: var(--muted); font-size: .92em; }
 #text .k-verse { text-indent: 0; margin: 0 0 0 2.5em; white-space: pre-wrap; }
 #text .k-verse.stanza-end { margin-bottom: 1em; }
-#text .em { font-style: italic; }
+/* inline marks, in the text and in a note; a raised or lowered mark keeps the line's height */
+:is(#text, #note-pop) .em { font-style: italic; }
+:is(#text, #note-pop) .strong { font-weight: calc(var(--weight) + 300); }
+:is(#text, #note-pop) :is(.sup, .sub) { font-size: .75em; line-height: 0; }
+:is(#text, #note-pop) .sup { vertical-align: super; }
+:is(#text, #note-pop) .sub { vertical-align: sub; }
+/* a table keeps to its column and scrolls sideways inside its own box when wider; a cell's text is not justified */
+#text .k-table { margin: 1.2em 0; max-width: 100%; overflow-x: auto; overflow-y: hidden; text-indent: 0; }
+#text .k-table table { border-collapse: collapse; font-size: .85em; line-height: 1.4; }
+#text .k-table :is(td, th) { border: 1px solid var(--line); padding: .3em .6em; vertical-align: top; text-align: left; hyphens: manual; -webkit-hyphens: manual; }
+#text .k-table th { font-weight: calc(var(--weight) + 200); background: color-mix(in srgb, var(--line) 45%, transparent); }
 #text .w { border-radius: 3px; transition: background-color .12s; }
 #text .s { border-radius: 4px; box-decoration-break: clone; -webkit-box-decoration-break: clone;
   transition: background-color .15s; }
@@ -361,10 +394,19 @@ body.dim-para:not(.pages) #text .blk.cur, body.dim-sent:not(.pages) #text .s.cur
 /* the column is the window less the two bars and the padding: 60vh alone overflows a short window */
 body.pages #text .fig img { max-height: max(80px, min(60vh, calc(100vh - var(--topbar-h) - var(--pager-h) - 140px))); }
 html[data-theme="dark"] #text .fig img, html[data-theme="night"] #text .fig img { filter: brightness(.85); }
-#text .nref { font-size: .7em; color: var(--accent); cursor: pointer; margin-left: 1px; }
+/* a picture set in the line (a glyph drawn as an image) is as tall as the text; a larger one keeps its size,
+   within the column. Dark glyphs on a clear ground turn light in the dark themes */
+:is(#text, #note-pop) .pic { height: 1.1em; width: auto; vertical-align: -.2em; margin: 0 .1em; }
+:is(#text, #note-pop) .pic.big { height: auto; max-width: 100%; max-height: 70vh; vertical-align: baseline; }
+#note-pop .pic.big { max-height: 40vh; }
+body.pages #text .pic.big { max-height: max(80px, min(60vh, calc(100vh - var(--topbar-h) - var(--pager-h) - 140px))); }
+html:is([data-theme="dark"], [data-theme="night"]) :is(#text, #note-pop) .pic:not(.big) { filter: invert(.85); }
+html:is([data-theme="dark"], [data-theme="night"]) :is(#text, #note-pop) .pic.big { filter: brightness(.85); }
+#text .nref { font-size: .7em; color: var(--accent); cursor: pointer; padding: .3em .35em; margin: 0 -.35em 0 calc(1px - .35em); }
 #text .s { cursor: pointer; }
 
-.center-msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+/* a message over the text, not a lid on it: after an audio error the text still takes taps */
+.center-msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); pointer-events: none; }
 
 /* ---------- page mode: two-column spread, turned like a book ---------- */
 body.pages { overflow: hidden; overscroll-behavior: none; }
@@ -379,6 +421,8 @@ body.pages #text { position: fixed; top: var(--topbar-h); bottom: var(--pager-h)
   body.pages #text { columns: auto; column-width: 3000px; column-rule: none;
     width: min(100vw - 40px - var(--safe-l) - var(--safe-r), var(--width)); }
 }
+/* an odd count of columns gets an empty one after the text (app.js pagesLayout), so the last spread can be reached */
+body.pages #text.pad-col::after { content: ""; display: block; height: 1px; -webkit-column-break-before: always; break-before: column; }
 body.pages #text .s { cursor: default; }
 /* the outer thirds turn a page, the middle one selects text: the cursor is what says so */
 body.pages #text.turn-prev { cursor: w-resize; }
@@ -387,6 +431,10 @@ body.pages #text .s.cur, body.pages #text .w.cur { background: none; box-shadow:
 body.pages #text .k-title { break-after: avoid; }
 body.pages #text .k-title.lvl1 { margin-top: 1.2em; }
 body.pages #text p { break-inside: auto; orphans: 2; widows: 2; }
+/* a table taller than a column (app.js splitTables): no scroll box, so the columns can split it, and as wide as the column */
+body.pages #text .k-table.split { overflow: visible; }
+body.pages #text .k-table.split table { max-width: 100%; }
+body.pages #text .k-table.split :is(td, th) { overflow-wrap: anywhere; }
 /* the page bar floats like the player: a capsule of glass over the page, three tracks of equal weight so
    the arrows and the page number never move whatever the sides say */
 .pager { position: fixed; z-index: 20; left: 0; right: 0; bottom: calc(10px + var(--safe-b)); margin: 0 auto;
@@ -421,7 +469,7 @@ body.pages [data-mode="audio"], body:not(.pages) [data-mode="pages"] { display: 
 :root { --foot-b: max(10px, calc(var(--safe-b) - 12px)); --page-t: calc(var(--safe-t) + 14px); --page-b: calc(var(--foot-b) + 30px); }
 @media (min-width: 901px) { :root { --page-t: calc(var(--safe-t) + 40px); --page-b: calc(var(--foot-b) + 44px); } }
 body.pages.immersive #text { top: var(--page-t); bottom: var(--page-b); padding: 0; }
-body.pages.immersive #text .fig img { max-height: max(80px, min(60vh, calc(100vh - var(--page-t) - var(--page-b) - 60px))); }
+body.pages.immersive #text .fig img, body.pages.immersive #text .pic.big { max-height: max(80px, min(60vh, calc(100vh - var(--page-t) - var(--page-b) - 60px))); }
 body.pages.immersive .topbar { border-bottom-color: var(--glass-edge); }
 body.pages.immersive .topbar, body.pages.immersive .pager { transition: opacity .25s ease, transform .3s ease; }
 body.pages.immersive.bare .topbar { opacity: 0; transform: translateY(-100%); pointer-events: none; }
@@ -443,6 +491,7 @@ body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
 body.hide-player:not(:has(.player.peek)) .pill { bottom: calc(14px + var(--safe-b)); }
 /* «Книга прочитана · отменить»: the same glass, quieter; over the pager in page mode */
 #done-pill { color: var(--muted); }
+body:has(#done-pill:not([hidden])) #return-pill { transform: translate(-50%, calc(-100% - 8px)); }
 #done-pill .link-btn { font-size: inherit; color: var(--accent); margin-left: 2px; }
 body.pages #done-pill { bottom: calc(var(--pager-h) + 14px); }
 body.pages.immersive.bare #done-pill { bottom: calc(var(--foot-b) + 26px); }
@@ -538,7 +587,7 @@ body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { o
   font: 12px/1 var(--ui); color: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none;
   opacity: 0; transition: opacity .25s ease; }
 .ears #ears-info span { max-width: calc(50% - 82px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ears body.pages.immersive.bare #ears-info, .ears body:not(.pages).playing.idle #ears-info { opacity: .9; }
+.ears body.pages.immersive.bare #ears-info, .ears body:not(.pages).playing.idle #ears-info { opacity: .9; pointer-events: auto; }
 .ears body.pages.immersive .pg-foot { display: none; }
 .ears { --page-b: max(16px, calc(var(--safe-b) - 4px)); }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
@@ -554,6 +603,7 @@ body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { o
 .drawer h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .drawer label { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 8px 0; font-size: 14px; }
 .drawer label input[type=range] { width: 150px; accent-color: var(--accent); }
+.drawer label select { flex: none; width: min(190px, 48%); }  /* a narrow drawer keeps its labels on one line */
 /* on/off settings read as switches: the words first, the switch at the edge, as a phone lays them out */
 .drawer label.row { flex-direction: row-reverse; justify-content: space-between; line-height: 1.35; }
 .drawer label.row input[type=checkbox] { appearance: none; -webkit-appearance: none; flex: none; margin: 0;
@@ -568,18 +618,25 @@ body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { o
 .seg button { min-width: 30%; }
 .seg button { flex: 1; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 8px 6px; font-size: 14px; }
 .seg button.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+#set-theme button { white-space: nowrap; padding-left: 2px; padding-right: 2px; }
 #toc-list { list-style: none; margin: 0; padding: 8px 0; }
 #toc-list li { padding: 8px 16px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
 #toc-list li.l1 { font-weight: 600; margin-top: 6px; }
 #toc-list li.l2 { padding-left: 28px; }
+#toc-list li.l3 { padding-left: 40px; font-size: 13.5px; }
+#toc-list li.l4 { padding-left: 52px; font-size: 13px; }
 #toc-list li:hover { background: var(--line); }
 #toc-list li.cur { color: var(--accent); }
 #toc-list li.done { color: var(--muted); }
 #toc-list .tt { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; }
+body.pages #toc-list .tt { display: none; }
+/* the app has its own way back, in the ear */
+.in-app #toc-list li.lib { display: none; }
 .stats { font-size: 14px; line-height: 1.7; }
 .bars { display: flex; gap: 5px; align-items: flex-end; height: 44px; margin: 8px 0 2px; }
 .bars div { flex: 1; background: var(--accent); opacity: .35; border-radius: 3px 3px 0 0; min-height: 2px; }
 .bars div.today { opacity: 1; }
+.bars div.zero { height: 2px !important; background: var(--line); opacity: 1; }
 .bars-labels { display: flex; gap: 5px; font-size: 11px; color: var(--muted); }
 .bars-labels span { flex: 1; text-align: center; }
 .drawer label output { min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
@@ -590,14 +647,23 @@ body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { o
 .popup { position: fixed; z-index: 45; background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
   padding: 12px 14px; box-shadow: 0 10px 30px rgba(0,0,0,.2); max-width: 340px; font-size: 14px; line-height: 1.5; }
 .popup-title { font-weight: 600; margin-bottom: 8px; }
+#note-pop { max-height: min(60vh, 480px); overflow: auto; overscroll-behavior: contain; }  /* a long note scrolls, the page stays */
+/* a note's paragraphs, verse, quotes and signatures, set as in the text but smaller */
+#note-pop p { margin: 0; }
+#note-pop p + p { margin-top: .6em; }
+#note-pop .k-verse { margin-left: 1.2em; white-space: pre-wrap; }
+#note-pop .k-cite { margin-left: 1.2em; font-style: italic; }
+#note-pop .k-subtitle { text-align: center; font-style: italic; }
+#note-pop .k-author { text-align: right; font-style: italic; }
 #sprint-menu { right: 14px; bottom: calc(var(--player-h) + 10px); }
 #sprint-menu .seg button { padding: 8px 10px; min-width: 0; flex: 1 1 0; }
 .link { background: none; border: 0; color: var(--accent); padding: 8px 0 0; }
 .modal { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; }
 .modal-box { background: var(--panel); border-radius: 14px; padding: 22px 24px; width: min(420px, 90vw); font-size: 15px; line-height: 1.6; }
 .modal-box h3 { margin: 0 0 8px; }
-.row-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-.row-btns button { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 8px 14px; }
+.row-btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.row-btns button { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 8px 14px; white-space: nowrap; }
+@media (max-width: 600px) { .modal-box { width: calc(100vw - 32px); padding: 20px 18px; } .row-btns button { padding: 8px 10px; font-size: 14px; } }
 .row-btns .primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 
 /* a phone: the same card, edge to edge less a thumb's margin; the focus button leaves the row, since
@@ -612,6 +678,9 @@ body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { o
   .ctl { width: 42px; }
   .ctl.big { width: 56px; height: 56px; margin: 0 6px; }
   .controls-right #btn-focus { display: none; }
+  body:not(.pages) #btn-focus-top { display: inline-flex; }  /* the player has no room: focus sits in the top bar */
+  /* and an ear too narrow for it beside the cutout (app.js fitEarButtons): «Приглушать» in the settings */
+  .ears-tight body:not(.pages) #btn-focus-top { display: none; }
   .icon { width: 40px; height: 40px; }
 }
 /* the smallest phones: speed, five controls and the timer need 48 + 4×36 + 50 + 2×4 + 36 = 286px; on a

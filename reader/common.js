@@ -55,7 +55,7 @@ function send(method, path, body, keepalive) {
 // ---------------- settings ----------------
 const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", sent: true, word: true, wordStyle: "bg",
   dimMode: "off", offset: 0, scroll: "zone", clickWord: false, speed: 1, hideUi: null, immersive: null, pauseHidden: true, rewind: true,
-  audioSearch: true, autoDone: true, libView: "list" };
+  audioSearch: true, libView: "list", lockText: false, justify: true };
 // A finger has no hover. Settings left at null follow the device: on for a touch screen, off for a mouse,
 // until the reader sets them; a value the reader saved is never replaced.
 const touchUI = matchMedia("(hover: none)").matches;
@@ -93,6 +93,7 @@ function applySettings() {
   document.body.classList.toggle("sent-hl", !!settings.sent);
   document.body.classList.toggle("word-hl", !!settings.word);
   document.body.classList.toggle("word-underline", settings.wordStyle === "underline");
+  document.body.classList.toggle("justify", settings.justify !== false);
   document.body.classList.toggle("immersive", byDevice("immersive"));
   onApplied();
   document.body.classList.toggle("dim-para", settings.dimMode === "para");
@@ -104,7 +105,8 @@ applySettings();
 // same two functions: pull the newer copy from the server, push local changes after a short delay.
 let settingsTimer = 0, onSettingsSynced = () => {};
 function persistSettings() {
-  const at = Date.now(); store.set("rs:settingsAt", at);
+  // the cache goes with its stamp: a setting that does not pass through applySettings (the shelf view) survives a reload
+  const at = Date.now(); store.set("rs:settings", settings); store.set("rs:settingsAt", at);
   clearTimeout(settingsTimer);
   settingsTimer = setTimeout(() => send("PUT", "/api/settings", { settings, settingsAt: at }).catch(() => {}), 400);
 }
