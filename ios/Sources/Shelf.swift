@@ -435,6 +435,18 @@ final class Shelf: ObservableObject {
         syncing = true
         defer { syncing = false }
         var tried = Set<String>()  // a failing book is tried once a round, not over and over
+        // iCloud is asked for every file still to come, all at once: it downloads them on its own, also while
+        // this app is suspended under a locked screen, and the copies that follow take seconds, not minutes
+        if let root = booksRoot {
+            let busy = Set([Player.shared.slug, Player.shared.pageSlug].compactMap { $0 })
+            for book in Self.toSync(books, copies: copies, skip: all ? [] : skip, busy: busy) {
+                let textOnly = Self.localCopy(book.slug).map { $0.audioName == nil } ?? false
+                for part in Self.parts(of: book, textOnly: textOnly) {
+                    let url = root.appendingPathComponent(book.slug, isDirectory: true).appendingPathComponent(part.name)
+                    try? fm.startDownloadingUbiquitousItem(at: url)
+                }
+            }
+        }
         while all || defaults.bool(forKey: Self.syncKey) {
             let busy = Set([Player.shared.slug, Player.shared.pageSlug].compactMap { $0 })
             guard let book = Self.toSync(books, copies: copies, skip: all ? [] : skip, busy: busy)
