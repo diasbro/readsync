@@ -330,10 +330,33 @@ body.pages #text p { break-inside: auto; orphans: 2; widows: 2; }
   .pg-word { display: none; }
 }
 body.pages [data-mode="audio"], body:not(.pages) [data-mode="pages"] { display: none; }
+/* ---------- full-screen pages ----------
+   The page is the screen less the safe areas and a margin, and it stays that size: the bars float over
+   it and slide away (`bare`) instead of making room, so showing them never moves a line. While they are
+   away a quiet page count sits in the bottom margin. */
+:root { --foot-b: max(10px, calc(var(--safe-b) - 12px)); --page-t: calc(var(--safe-t) + 14px); --page-b: calc(var(--foot-b) + 30px); }
+@media (min-width: 901px) { :root { --page-t: calc(var(--safe-t) + 40px); --page-b: calc(var(--foot-b) + 44px); } }
+body.pages.immersive #text { top: var(--page-t); bottom: var(--page-b); padding: 0; }
+body.pages.immersive #text .fig img { max-height: max(80px, min(60vh, calc(100vh - var(--page-t) - var(--page-b) - 60px))); }
+body.pages.immersive .topbar { border-bottom-color: var(--glass-edge); }
+body.pages.immersive .topbar, body.pages.immersive .pager { transition: opacity .25s ease, transform .3s ease; }
+body.pages.immersive.bare .topbar { opacity: 0; transform: translateY(-100%); pointer-events: none; }
+body.pages.immersive.bare .pager { opacity: 0; transform: translateY(16px); pointer-events: none; }
+.pg-foot { display: none; position: fixed; z-index: 15; left: 0; right: 0; bottom: var(--foot-b); text-align: center;
+  font-size: 11px; line-height: 16px; letter-spacing: .04em; color: var(--muted); font-variant-numeric: tabular-nums;
+  pointer-events: none; opacity: 0; transition: opacity .25s ease; }
+body.pages.immersive .pg-foot { display: block; }
+body.pages.immersive.bare .pg-foot { opacity: .85; }
+@media (prefers-reduced-motion: reduce) {
+  .topbar, .pager, .pill, .pg-foot { transition: none !important; }
+}
 body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
+/* the way back to the narrator: the same glass as the player, right above it, or at the bottom when it is away */
 .pill { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--player-h) + 16px); z-index: 25;
-  border: 0; border-radius: 999px; padding: 10px 18px; background: var(--fg); color: var(--bg);
-  box-shadow: 0 6px 20px rgba(0,0,0,.25); font-size: 14px; }
+  border: 1px solid var(--glass-edge); border-radius: 999px; padding: 9px 16px; background: var(--glass); color: var(--fg);
+  -webkit-backdrop-filter: saturate(1.5) blur(24px); backdrop-filter: saturate(1.5) blur(24px);
+  box-shadow: var(--float-shadow); font-size: 13.5px; white-space: nowrap; transition: bottom .35s ease; }
+body.hide-player:not(:has(.player.peek)) .pill { bottom: calc(14px + var(--safe-b)); }
 
 /* ---------- player: a card of glass floating over the page ----------
    One clean bar with the chapters as gaps in it (a row of tick marks read as a radio dial), the times
@@ -399,13 +422,20 @@ body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
 }
 /* distraction-free: the top bar fades when the pointer is idle; the player slides away while
    playing and comes back on pause or when the pointer reaches the bottom edge */
-.topbar { transition: opacity .3s; }
 body.playing.idle .topbar { opacity: .12; }
 body.playing.idle .topbar:hover { opacity: 1; }
 body.playing.idle { cursor: none; }
 .player { transition: opacity .35s ease, transform .35s ease; }
 body.hide-player .player { opacity: 0; transform: translateY(18px); pointer-events: none; }
 body.hide-player .player.peek { opacity: 1; transform: none; pointer-events: auto; }
+/* a finger: the top bar does not linger half-seen, it slides away with the player and comes back with it */
+.topbar { transition: opacity .3s, transform .35s ease; }
+@media (hover: none) {
+  body.playing.idle .topbar { opacity: 0; transform: translateY(-100%); pointer-events: none; }
+}
+/* the strip under the clock and the notch stays the page's colour, so the text scrolls out of sight
+   there and not under the status bar; nothing in a desktop browser, where the strip has no height */
+#app::before { content: ""; position: fixed; z-index: 19; left: 0; right: 0; top: 0; height: var(--safe-t); background: var(--bg); pointer-events: none; }
 /* the text fades out under the card instead of running on beneath it */
 #app::after { content: ""; position: fixed; z-index: 19; left: 0; right: 0; bottom: 0; pointer-events: none;
   height: calc(var(--player-h) + 28px); background: linear-gradient(transparent, var(--bg) 55%); transition: opacity .35s; }

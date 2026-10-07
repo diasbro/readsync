@@ -47,7 +47,11 @@ function send(method, path, body, keepalive) {
 
 // ---------------- settings ----------------
 const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", sent: true, word: true, wordStyle: "bg",
-  dimMode: "off", offset: 0, scroll: "zone", clickWord: false, speed: 1, hideUi: true, pauseHidden: true, rewind: true };
+  dimMode: "off", offset: 0, scroll: "zone", clickWord: false, speed: 1, hideUi: null, immersive: null, pauseHidden: true, rewind: true };
+// A finger has no hover. Settings left at null follow the device: on for a touch screen, off for a mouse,
+// until the reader sets them; a value the reader saved is never replaced.
+const touchUI = matchMedia("(hover: none)").matches;
+const byDevice = (key) => (settings[key] ?? touchUI) === true;
 const FAMILIES = {
   literata: '"Literata", "Iowan Old Style", Georgia, serif', ptserif: '"PT Serif", Georgia, serif', merriweather: '"Merriweather", Georgia, serif',
   iowan: '"Iowan Old Style", "Palatino Linotype", Georgia, serif', charter: '"Charter", "Iowan Old Style", Georgia, serif', georgia: 'Georgia, "Times New Roman", serif',
@@ -55,12 +59,19 @@ const FAMILIES = {
 };
 const darkMedia = matchMedia("(prefers-color-scheme: dark)");
 darkMedia.addEventListener("change", () => applySettings());
-const settings = Object.assign({}, DEFAULTS, store.get("rs:settings", {}));
-// migrate settings from earlier versions
-if (settings.family === "serif") settings.family = "iowan";
-if (settings.family === "sans") settings.family = "inter";
-if (settings.dim === true) settings.dimMode = "para";
-delete settings.dim;
+const settings = Object.assign({}, DEFAULTS, migrateSettings(store.get("rs:settings", {})));
+// migrate settings from earlier versions (hoisted: the line above uses it)
+function migrateSettings(s) {
+  if (s.family === "serif") s.family = "iowan";
+  if (s.family === "sans") s.family = "inter";
+  if (s.dim === true) s.dimMode = "para";
+  delete s.dim;
+  // before `immersive` existed, an unset "hide the bars" was saved as false: that was the old default, not a
+  // choice, so it follows the device now. A true (the desktop's own choice) stays
+  if (!("immersive" in s) && s.hideUi === false) s.hideUi = null;
+  if (!("immersive" in s)) s.immersive = null;
+  return s;
+}
 let onApplied = () => {};  // the reader re-lays out its pages after a settings change
 function applySettings() {
   const r = document.documentElement.style;
@@ -74,6 +85,7 @@ function applySettings() {
   document.body.classList.toggle("sent-hl", !!settings.sent);
   document.body.classList.toggle("word-hl", !!settings.word);
   document.body.classList.toggle("word-underline", settings.wordStyle === "underline");
+  document.body.classList.toggle("immersive", byDevice("immersive"));
   onApplied();
   document.body.classList.toggle("dim-para", settings.dimMode === "para");
   document.body.classList.toggle("dim-sent", settings.dimMode === "sent");
@@ -90,7 +102,7 @@ function persistSettings() {
 }
 function adoptSettings(remoteSettings) {
   if (remoteSettings && remoteSettings.settings && (remoteSettings.settingsAt || 0) > store.get("rs:settingsAt", 0)) {
-    Object.assign(settings, remoteSettings.settings); store.set("rs:settingsAt", remoteSettings.settingsAt); applySettings(); onSettingsSynced();
+    Object.assign(settings, migrateSettings(remoteSettings.settings)); store.set("rs:settingsAt", remoteSettings.settingsAt); applySettings(); onSettingsSynced();
     return true;
   }
   if (store.get("rs:settingsAt", 0) > ((remoteSettings && remoteSettings.settingsAt) || 0)) persistSettings();

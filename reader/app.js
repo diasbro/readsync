@@ -11,7 +11,8 @@
   // laying out a long book again costs seconds, so those skip it.
   let metricsKey = "";
   onApplied = () => {
-    const key = [settings.font, settings.lh, settings.width, settings.family, settings.weight].join("|");
+    // full-screen pages give the columns another box, so the switch counts as a metric
+    const key = [settings.font, settings.lh, settings.width, settings.family, settings.weight, byDevice("immersive")].join("|");
     if (key === metricsKey) return;
     metricsKey = key;
     scheduleRelayout();
@@ -187,7 +188,7 @@
       const li = e.target.closest("li"); if (!li) return;
       if (li.dataset.lib) { flushSent(true); session.stop(); location.href = "/"; return; }
       const i = +li.dataset.ch;
-      if (pages.on) goToSentence(firstSentOfChapter(i));
+      if (pages.on) { goToSentence(firstSentOfChapter(i)); setBare(true); }
       else if (isFinite(chapStartTime[i])) seek(chapStartTime[i]);
       closeDrawers();
     });
@@ -295,32 +296,43 @@
   let tick = 0;
   audio.addEventListener("play", () => { settling = false; clearInterval(tick); tick = setInterval(() => update(false), 100); setIcon($("#btn-play"), "pause"); if (!native) session.start(); document.body.classList.add("playing"); armIdle(); armHidePlayer(); });
   audio.addEventListener("pause", () => { clearInterval(tick); update(true); setIcon($("#btn-play"), "play"); if (!native && !pages.on) session.stop(); savePos(); document.body.classList.remove("playing", "idle"); showPlayer(); pausedAt = Date.now(); });
-  // distraction-free chrome: the top bar fades after 4 s without pointer/keyboard activity while
-  // playing; the player bar hides 1.5 s after play starts (scrolling does not bring it back) and
-  // returns on pause or when the pointer reaches the bottom edge
+  // distraction-free chrome while the narrator plays. With a mouse the top bar fades after 4 s without
+  // pointer or keyboard activity, and the player hides 1.5 s after play starts (scrolling does not bring
+  // it back) and returns on pause or when the pointer reaches the bottom edge. A finger has no idle
+  // pointer and no edge to reach: both bars slide away together after 3 s, come back with a tap on the
+  // text or on pause, and stay while a finger is on them.
   let idleTimer = 0, hideTimer = 0;
   function armIdle() {
+    if (touchUI) return;  // a tap fires mouse events too; on a touch screen the bars go with the player
     clearTimeout(idleTimer);
     document.body.classList.remove("idle");
-    if (settings.hideUi) idleTimer = setTimeout(() => { if (!audio.paused && $("#toc").hidden && $("#settings").hidden) document.body.classList.add("idle"); }, 4000);
+    if (byDevice("hideUi")) idleTimer = setTimeout(() => { if (!audio.paused && $("#toc").hidden && $("#settings").hidden) document.body.classList.add("idle"); }, 4000);
   }
-  ["mousemove", "mousedown", "keydown", "touchstart"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
-  function armHidePlayer(ms = 1500) {
+  ["mousemove", "mousedown", "keydown"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
+  function armHidePlayer(ms = touchUI ? 3000 : 1500) {
     clearTimeout(hideTimer);
-    if (settings.hideUi && !pages.on) hideTimer = setTimeout(() => {
+    if (byDevice("hideUi") && !pages.on) hideTimer = setTimeout(() => {
       if (audio.paused) return;
-      // a hand still on the card (a held button, the bar dragged, the speed list open): wait until it lets go
-      if (playerTouch || $(".player").matches(":active") || document.activeElement === $("#speed")) return armHidePlayer(ms);
+      // a hand still on a bar (a held button, the bar dragged, the speed list open) or a drawer open: wait
+      const busy = chromeTouch || $(".player").matches(":active") || document.activeElement === $("#speed")
+        || !$("#sprint-menu").hidden || (touchUI && !($("#toc").hidden && $("#settings").hidden));
+      if (busy) return armHidePlayer(ms);
       document.body.classList.add("hide-player");
+      if (touchUI) document.body.classList.add("idle");
     }, ms);
   }
-  // a finger has no hover: the bars put away come back with a tap, stay while they are used, and go again
-  const touchUI = matchMedia("(hover: none)").matches;
-  if (touchUI) $(".player").addEventListener("touchstart", () => armHidePlayer(4000), { passive: true });
-  let playerTouch = false;  // a touch that began on the card and has not ended yet
-  $(".player").addEventListener("touchstart", () => { playerTouch = true; }, { passive: true });
-  ["touchend", "touchcancel"].forEach((ev) => $(".player").addEventListener(ev, () => { playerTouch = false; }, { passive: true }));
-  function showPlayer() { clearTimeout(hideTimer); document.body.classList.remove("hide-player"); $(".player").classList.remove("peek"); }
+  let chromeTouch = false;  // a touch that began on a bar and has not ended yet
+  document.querySelectorAll(".player, .topbar").forEach((bar) => {
+    bar.addEventListener("touchstart", () => { chromeTouch = true; clearTimeout(hideTimer); }, { passive: true });
+    ["touchend", "touchcancel"].forEach((ev) => bar.addEventListener(ev, () => {
+      chromeTouch = false;
+      if (!audio.paused && !document.body.classList.contains("hide-player")) armHidePlayer(4000);
+    }, { passive: true }));
+  });
+  function showPlayer() {
+    clearTimeout(hideTimer); document.body.classList.remove("hide-player"); $(".player").classList.remove("peek");
+    if (touchUI) document.body.classList.remove("idle");
+  }
   addEventListener("mousemove", (e) => {
     if (!document.body.classList.contains("hide-player")) return;
     const player = $(".player"), peek = player.classList.contains("peek");
@@ -428,12 +440,18 @@
   // Turn a page. The columns are rebuilt the moment the window changes but measured only after the
   // reader's hand stops, so the numbers are checked first: a turn in that gap would use last
   // window's pitch and land between columns.
-  function turn(delta) {
+  // A turn from the page itself (a tap, a swipe, a key, the wheel) puts the bars away; a turn from the
+  // pager's own arrows leaves them where the hand is.
+  function turn(delta, fromPager = false) {
     if (!pages.on) return;
     const gap = parseFloat(getComputedStyle(textEl).columnGap) || 0;
     if (Math.abs(contentWidth() + gap - pages.spreadW) > 0.5) { clearTimeout(relayoutTimer); relayout(); }
     goSpread(pages.cur + delta, true, null, true);
+    if (!fromPager) setBare(true);
   }
+  // Full-screen pages: the text box is the whole screen whether the bars are up or not (they float over
+  // it), so showing them never lays the book out again. `bare` only means anything with `immersive` on.
+  function setBare(on) { document.body.classList.toggle("bare", on); }
   // The columns were rebuilt (window resized, font or width changed, a webfont arrived): the reader
   // keeps their sentence and only the page number under it changes.
   function relayout() {
@@ -456,21 +474,21 @@
     if (hasAudio && !audio.paused) audio.pause();
     if (native) window.webkit.messageHandlers.audio.postMessage({ cmd: "pages", on: true });  // the lock screen must not start the narrator under a page
     pages.on = true; document.body.classList.add("pages"); $("#pager").hidden = false; setIcon($("#btn-mode"), "audio"); $("#btn-mode").title = "Вернуться к аудио (m)";
-    closeDrawers(); pagesLayout(); goToSentence(si ?? pages.sent, false);
+    setBare(true); closeDrawers(); pagesLayout(); goToSentence(si ?? pages.sent, false);
     if (save) saveMode("pages");
     session.start();
   }
   function exitPages() {
     if (native) window.webkit.messageHandlers.audio.postMessage({ cmd: "pages", on: false });
-    pages.on = false; document.body.classList.remove("pages"); $("#pager").hidden = true; setIcon($("#btn-mode"), "book"); $("#btn-mode").title = "Режим книги без аудио (m)";
+    pages.on = false; document.body.classList.remove("pages"); setBare(false); $("#pager").hidden = true; setIcon($("#btn-mode"), "book"); $("#btn-mode").title = "Режим книги без аудио (m)";
     session.stop(); saveMode("audio"); drawTicks();  // the bar had no width while the pages covered it
     const st = sentStart(pages.sent);
     if (st != null) seek(st); else update(true);
   }
   function toggleMode() { if (!hasAudio) return; pages.on ? exitPages() : enterPages(curSent >= 0 ? curSent : pages.sent); }
   $("#btn-mode").onclick = toggleMode;
-  $("#pg-prev").onclick = () => turn(-1);
-  $("#pg-next").onclick = () => turn(1);
+  $("#pg-prev").onclick = () => turn(-1, true);
+  $("#pg-next").onclick = () => turn(1, true);
   addEventListener("resize", scheduleRelayout);
   addEventListener("resize", () => { if (hasAudio && duration && !pages.on) drawTicks(); });
   document.fonts.addEventListener("loadingdone", scheduleRelayout);
@@ -479,6 +497,7 @@
   let pgTyping = false;  // while the reader is typing, a page turn must not overwrite what they wrote
   function paintPager() {
     pgTotal.textContent = pages.total;
+    $("#pg-foot").textContent = `${pages.cur + 1} / ${pages.total}`;
     pgCur.style.width = String(pages.total).length + 2 + "ch";
     if (!pgTyping) pgCur.value = pages.cur + 1;
     $("#pg-prev").disabled = pages.cur <= 0; $("#pg-next").disabled = pages.cur >= pages.total - 1;  // the ends say so
@@ -505,7 +524,7 @@
     else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       // the field stays in hand: it keeps the focus, so it writes the new page itself
       e.preventDefault();
-      turn(e.key === "ArrowUp" ? -1 : 1);
+      turn(e.key === "ArrowUp" ? -1 : 1, true);
       pgCur.value = pages.cur + 1; pgCur.select();
     }
   });
@@ -563,15 +582,19 @@
   prog.addEventListener("change", () => { seekingUI = false; seek(+prog.value); });
 
   const turnZone = (e) => { const r = textEl.getBoundingClientRect(); return (e.clientX - r.left) / r.width; };
+  // the outer thirds turn a page; with full-screen pages the middle one shows or puts away the bars
+  function tapPage(e) {
+    if (getSelection().toString() || Date.now() - swiped < 400) return;
+    const x = turnZone(e);
+    if (x < 0.3) turn(-1); else if (x > 0.7) turn(1);
+    else if (byDevice("immersive")) setBare(!document.body.classList.contains("bare"));
+  }
+  // the margins round the columns are part of the page: a thumb at the screen's edge still turns it
+  addEventListener("click", (e) => { if (pages.on && [document.documentElement, document.body, app].includes(e.target)) tapPage(e); });
   textEl.addEventListener("click", (e) => {
     const nref = e.target.closest(".nref");
     if (nref) { showNote(nref); e.stopPropagation(); return; }
-    if (pages.on) {
-      if (getSelection().toString() || Date.now() - swiped < 400) return;
-      const x = turnZone(e);
-      if (x < 0.3) turn(-1); else if (x > 0.7) turn(1);
-      return;
-    }
+    if (pages.on) { tapPage(e); return; }
     if (!hasAudio) return;  // a book without audio is read in page mode, and its columns are not up yet
     if (touchUI && (document.body.classList.contains("hide-player") || document.body.classList.contains("idle"))) {
       showPlayer(); armIdle(); armHidePlayer(4000);  // this tap only brings the bars back; the next one may seek
@@ -595,11 +618,13 @@
 
   // A finger turns pages the way a book's pages turn: a horizontal swipe, either way. Only a swipe
   // that is clearly sideways counts, so a tap or a slip of the thumb does nothing.
+  // The margins round the columns count too; a swipe that starts on a bar or a drawer is that control's.
   let swipe = null;
-  textEl.addEventListener("touchstart", (e) => {
-    swipe = pages.on && e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, at: Date.now() } : null;
+  addEventListener("touchstart", (e) => {
+    const onControl = e.target instanceof Element && e.target.closest(".topbar, .pager, .drawer, .popup, .modal, #scrim");
+    swipe = pages.on && !onControl && e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, at: Date.now() } : null;
   }, { passive: true });
-  textEl.addEventListener("touchend", (e) => {
+  addEventListener("touchend", (e) => {
     if (!swipe || !pages.on) return;
     const t = e.changedTouches[0], dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
     const quick = Date.now() - swipe.at < 600;
@@ -648,8 +673,8 @@
     if (pages.on) {
       if (k === "ArrowRight" || k === "PageDown" || (k === " " && !e.shiftKey)) { e.preventDefault(); turn(1); }
       else if (k === "ArrowLeft" || k === "PageUp" || (k === " " && e.shiftKey)) { e.preventDefault(); turn(-1); }
-      else if (k === "Home") goSpread(0);
-      else if (k === "End") goSpread(pages.total - 1);
+      else if (k === "Home") { goSpread(0); setBare(true); }
+      else if (k === "End") { goSpread(pages.total - 1); setBare(true); }
       else if (k === "t") toggleDrawer("#toc");
       else if (k === "Escape") { closeDrawers(); $("#note-pop").hidden = true; $("#sprint-menu").hidden = true; }
       return;
@@ -693,7 +718,7 @@
     $("#set-ui").value = settings.ui; $("#set-weight").value = settings.weight; $("#set-rewind").checked = !!settings.rewind;
     $("#set-offset").value = Math.round(settings.offset * 1000); $("#offset-out").textContent = (settings.offset > 0 ? "+" : "") + Math.round(settings.offset * 1000) + " мс";
     $("#set-scroll").value = settings.scroll; $("#set-click-word").checked = !!settings.clickWord;
-    $("#set-word-style").value = settings.wordStyle; $("#set-hide-ui").checked = !!settings.hideUi; $("#set-pause-hidden").checked = !!settings.pauseHidden;
+    $("#set-word-style").value = settings.wordStyle; $("#set-hide-ui").checked = byDevice("hideUi"); $("#set-immersive").checked = byDevice("immersive"); $("#set-pause-hidden").checked = !!settings.pauseHidden;
     document.querySelectorAll("#set-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
     $("#btn-focus").classList.toggle("on", settings.dimMode !== "off");
   }
@@ -703,7 +728,9 @@
   bind("#set-ui", "ui"); bind("#set-weight", "weight", Number); bind("#set-rewind", "rewind"); bind("#set-offset", "offset", (v) => Number(v) / 1000);
   $("#set-dim").addEventListener("input", () => { if (settings.dimMode !== "off") settings.lastDim = settings.dimMode; });
   $("#set-offset").addEventListener("input", () => update(true));
-  bind("#set-word-style", "wordStyle"); bind("#set-hide-ui", "hideUi"); bind("#set-pause-hidden", "pauseHidden");
+  bind("#set-word-style", "wordStyle"); bind("#set-hide-ui", "hideUi"); bind("#set-pause-hidden", "pauseHidden"); bind("#set-immersive", "immersive");
+  // switched off while playing: the bars come back now, not at the next pause
+  $("#set-hide-ui").addEventListener("input", () => { if (!byDevice("hideUi")) { showPlayer(); document.body.classList.remove("idle"); } });
   $("#set-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); syncSettingsUI(); persistSettings(); });
   syncSettingsUI();
 

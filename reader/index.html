@@ -84,6 +84,7 @@
       <button class="ctl" id="pg-sprint" title="Спринт-таймер" data-icon="timer"></button>
     </div>
   </footer>
+  <div id="pg-foot" class="pg-foot" aria-hidden="true"></div>
   <div id="loading" class="center-msg">Загрузка…</div>
 
   <footer class="player">
@@ -185,11 +186,12 @@
         </select></label>
       <label class="row"><input type="checkbox" id="set-click-word"> Клик по слову = перемотка на слово</label>
     </section>
-    <section data-mode="audio">
+    <section>
       <h4>Фокус</h4>
-      <label class="row"><input type="checkbox" id="set-hide-ui"> Прятать панели во время чтения (плеер вернётся на паузе или при наведении снизу)</label>
-      <label class="row"><input type="checkbox" id="set-pause-hidden"> Пауза при уходе из вкладки</label>
-      <label class="row"><input type="checkbox" id="set-rewind"> После паузы начинать с начала предложения</label>
+      <label class="row" data-mode="pages"><input type="checkbox" id="set-immersive"> Полноэкранное чтение (панели — по нажатию в середине страницы)</label>
+      <label class="row" data-mode="audio"><input type="checkbox" id="set-hide-ui"> Прятать панели во время чтения (вернутся на паузе, касанием текста или при наведении снизу)</label>
+      <label class="row" data-mode="audio"><input type="checkbox" id="set-pause-hidden"> Пауза при уходе из вкладки</label>
+      <label class="row" data-mode="audio"><input type="checkbox" id="set-rewind"> После паузы начинать с начала предложения</label>
     </section>
     <section>
       <h4>Статистика</h4>
