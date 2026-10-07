@@ -184,8 +184,10 @@ EXTRACTORS = {
 }
 
 
-def build_text(sources: list[str], d: Path, title: str, author: str) -> None:
-    parts_dir = d / "parts"
+def build_text(sources: list[str], d: Path, title: str, author: str, w: Path) -> None:
+    """Download, extract and merge the text in the work dir `w`, then move the book in. A folder made
+    and deleted inside the library while iCloud uploads it comes back as an empty placeholder."""
+    parts_dir = w / "parts"
     if parts_dir.exists():
         shutil.rmtree(parts_dir)
     for i, src in enumerate(sources, 1):
@@ -194,13 +196,14 @@ def build_text(sources: list[str], d: Path, title: str, author: str) -> None:
         run([PY, str(PIPE / EXTRACTORS[kind]), str(part)])
         check_real_book(json.loads((part / "book.json").read_text(encoding="utf-8")), len(sources))
     # merge parts (a single part is copied through), then gather images into the book's images/
-    cmd = [PY, str(PIPE / "merge_books.py"), str(d), "--title", title, "--author", author]
+    cmd = [PY, str(PIPE / "merge_books.py"), str(w), "--title", title, "--author", author]
     run(cmd)
     (d / "images").mkdir(exist_ok=True)
     for part in sorted(parts_dir.iterdir()):
         if (part / "images").is_dir():
             for f in (part / "images").iterdir():
                 shutil.copy(f, d / "images" / f.name)
+    land(w / "book.json", d / "book.json")
     shutil.rmtree(parts_dir)  # the downloads served their purpose: the merged book is all that is read
 
 
@@ -408,7 +411,7 @@ def main() -> None:
 
 def build(args: argparse.Namespace, d: Path, w: Path) -> None:
     if args.text:
-        build_text(args.text, d, args.title, args.author)
+        build_text(args.text, d, args.title, args.author, w)
     elif not (d / "book.json").exists():
         raise SystemExit("no text: pass --text, or use an existing book slug to attach audio")
     book = json.loads((d / "book.json").read_text(encoding="utf-8"))

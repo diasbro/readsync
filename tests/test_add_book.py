@@ -42,7 +42,7 @@ def finished_book(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(add_book, "tidy", lambda d: None)
     monkeypatch.setattr(add_book, "build_audio", lambda src, w, lang: (w / "audio.m4a").write_bytes(b"a" * 10))
     monkeypatch.setattr(
-        add_book, "build_text", lambda src, d, t, a: (d / "book.json").write_text(json.dumps({"blocks": []}))
+        add_book, "build_text", lambda src, d, t, a, w: (d / "book.json").write_text(json.dumps({"blocks": []}))
     )
     d = tmp_path / "b"
     d.mkdir()
@@ -71,8 +71,8 @@ def test_a_failed_text_leaves_no_downloads(tmp_path, monkeypatch):
     """A site that serves a stub instead of the book stops the run early: its downloads go anyway."""
     monkeypatch.setattr(add_book, "BOOKS", tmp_path)
 
-    def stub(src, d, t, a):
-        (d / "parts").mkdir()
+    def stub(src, d, t, a, w):
+        (d / "parts").mkdir()  # as an older version left them
         (d / "parts" / "1.fb2").write_text("Книга заблокирована.", encoding="utf-8")
         raise SystemExit("на сайте вместо книги заглушка")
 
