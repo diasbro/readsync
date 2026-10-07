@@ -63,28 +63,27 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .lib-title-row { position: relative; display: flex; align-items: center; justify-content: space-between; }
 .lib-tools { display: flex; gap: 4px; align-items: center; }
 .lib-title-row .icon { color: var(--muted); }
-/* finding and adding: at rest only a sign next to the section heading; the line opens as the first row
-   of the list, right above the cards it filters. */
-.sec-head { display: flex; align-items: baseline; gap: 9px; margin: 0 0 14px; }
-.sec-head h2 { margin: 0; }
-.sec-head .glyph { background: none; border: 0; padding: 0; font-size: 13px; line-height: 1; color: var(--muted); opacity: .6; transition: opacity .15s, color .15s; }
-.sec-head:hover .glyph { opacity: 1; }
-.sec-head .glyph:hover { color: var(--accent); }
-.sec-head:has(+ .omni:not([hidden])) { margin-bottom: 8px; }  /* the open line belongs to the heading, not to the cards */
-.omni { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; padding: 10px 17px; border: 1px dashed var(--line); border-radius: 14px; transition: border-color .15s; }
+/* finding and adding: one line under the header, above every shelf, always there */
+.omni { display: flex; align-items: center; gap: 12px; margin: -12px 0 0; padding: 10px 17px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); transition: border-color .15s; }
 .omni:focus-within, body.dropping .omni { border-color: var(--accent); }
 .omni .glyph { color: var(--muted); font-size: 15px; line-height: 1; opacity: .8; transition: color .15s; }
 .omni:focus-within .glyph { color: var(--accent); opacity: 1; }
 .omni input { flex: 1; min-width: 0; border: 0; background: none; padding: 0; font-size: 14px; color: var(--fg); outline: none; }
 .omni input::placeholder { color: var(--muted); opacity: .9; }
 .omni kbd { font-family: var(--ui); font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+.omni .k-on, .omni:focus-within .k-rest { display: none; }
+.omni:focus-within .k-on { display: inline; }
+/* the card ↵ opens while a query is typed (↑/↓ move it) */
+.card.sel { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.card.add:focus-visible { border-color: var(--accent); }
 .card.add { border-style: dashed; grid-template-columns: 1fr; background: none; cursor: pointer; padding: 14px 18px; }
 .card.add:hover { border-color: var(--accent); transform: none; }
 .card.add .t { font-size: 16px; font-family: var(--ui); }
 .card.add .t b { color: var(--accent); font-weight: 500; margin-right: 8px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .lib-title-row .icon:hover { color: var(--fg); }
-.prefs { position: absolute; right: 0; top: 46px; width: 380px; z-index: 30; }
+.prefs { position: absolute; right: 0; top: calc(50% + 24px); width: 380px; z-index: 30; }
+.popup.prefs { position: absolute; max-width: calc(100vw - 32px); }  /* under its ⚙, not pinned to the window like the reader's popups */
 .prefs .switch { margin-top: 2px; }
 .prefs .bm { display: inline-block; padding: 1px 9px; border: 1px dashed var(--accent); border-radius: 999px; color: var(--accent); text-decoration: none; cursor: grab; }
 .prefs code { font-size: 12px; }
@@ -103,8 +102,8 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .demo-line { font-family: var(--family); font-size: 19px; color: var(--muted); line-height: 1.5; }
 .demo-line .w { border-radius: 3px; padding: 0 1px; transition: background-color .25s, color .25s; }
 .demo-line .w.cur { background: var(--word-bg); color: var(--fg); }
-.demo-line.link { cursor: pointer; }
-.demo-line.link:hover .w { color: var(--fg); }
+.demo-line.go { cursor: pointer; }
+.demo-line.go:hover .w { color: var(--fg); }
 .demo-line .src { font-family: var(--ui); font-size: 12px; color: var(--muted); white-space: nowrap; }
 /* page look: a still line with a thin page edge on the left; random look: a quotation mark */
 .demo[data-look="pages"] .demo-line { padding-left: 14px; border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); color: var(--fg); }
@@ -139,7 +138,8 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .card .cover { width: 64px; height: 96px; border-radius: 6px; background: var(--line); object-fit: cover; display: block; }
 .card .cover.empty { display: flex; align-items: center; justify-content: center; font-family: var(--serif); font-size: 26px; color: var(--muted); }
 .card .body { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
-.card .t { font-family: var(--serif); font-size: 21px; line-height: 1.2; }
+.card .t { font-family: var(--serif); font-size: 21px; line-height: 1.2; overflow-wrap: anywhere; }
+.card:not(.open) .t { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .card .m { color: var(--muted); font-size: 13px; }
 .card .bar { height: 4px; background: var(--line); border-radius: 2px; margin-top: 6px; overflow: hidden; }
 .card .bar.empty, .card .m.empty { display: none; }
@@ -147,6 +147,19 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .card .cover-link, .card .tlink { color: inherit; text-decoration: none; }
 .card .tlink:hover .t { color: var(--accent); }
 .card .acts { display: flex; align-items: center; justify-content: flex-end; gap: 2px; align-self: center; }
+.card .acts > .link-btn { margin: 0 6px; }
+.card .acts > .spin { display: block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
+a.ic { text-decoration: none; }
+/* the open card: «Читать» and the shelf under the name; deleting, in words, at its foot */
+.card.open .lead { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.card.open .lead .btn { text-decoration: none; }
+.card.open .lead .link-btn { margin-left: auto; }
+.card.open .foot { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 16px; font-size: 12px; color: var(--muted); }
+.card .foot.confirm button, .card .ask button { background: none; border: 0; padding: 0; font-size: 12px; color: var(--fg); cursor: pointer; }
+.card .ask { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.card .ask .yes, .card .foot.confirm .danger { color: #b8402a; font-weight: 600; }
+html[data-theme="dark"] .card .ask .yes, html[data-theme="dark"] .card .foot.confirm .danger,
+html[data-theme="night"] .card .ask .yes, html[data-theme="night"] .card .foot.confirm .danger { color: #ef8a74; }
 /* every icon button in a card looks the same, wherever it sits: no browser chrome, no border */
 .card .ic { background: none; border: 0; width: 30px; height: 30px; border-radius: 8px; font-size: 15px; line-height: 1; color: var(--muted); display: flex; align-items: center; justify-content: center; padding: 0; transition: background-color .15s, color .15s; }
 .card .ic:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--fg); }
@@ -189,13 +202,8 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .card .status { display: flex; align-items: center; gap: 6px; }
 .card .status.warn::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #d0902e; flex: none; }
 .card .status .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
-/* a book being fetched: a quiet ring that becomes a cross under the pointer */
-.card .ic.loading .spin { display: block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
-.card .ic.loading .x { display: none; font-size: 14px; color: var(--accent); }
-.card .ic.loading:hover .spin { display: none; }
-.card .ic.loading:hover .x { display: block; }
 .card .status .link-btn { margin-left: 8px; }
-.card.shell .cover.empty { background: none; border: 1px dashed var(--line); }
+.card.shell .cover.empty { background: none; border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent); }
 .card.shell .body, .card.shell .cover { cursor: pointer; }  /* nothing to read yet: the card opens its panel */
 .card .cands { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .card .cands .hd { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
@@ -211,15 +219,82 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .card details.eds .cand { background: color-mix(in srgb, var(--bg) 60%, transparent); }
 .card details.more { margin-top: 2px; }
 .card details.more summary { font-size: 12px; color: var(--muted); cursor: pointer; }
-.card .tag { display: inline-block; white-space: nowrap; font-size: 11px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 999px; margin-left: 6px; vertical-align: middle; color: var(--muted); font-family: var(--ui); letter-spacing: .02em; }
+.card .tag { display: inline-block; white-space: nowrap; font-size: 11px; padding: 1px 7px; border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 999px; margin-left: 6px; vertical-align: middle; color: var(--muted); font-family: var(--ui); letter-spacing: .02em; }
+/* recordings: the query line sits under the heading; a row being listened to carries a quiet player under it */
+.card.open .sec h5 .link-btn + .link-btn { margin-left: 0; }
+.card.open .own.afind { margin: 0 0 2px; }
+.card .cand .ic { flex: none; }
+.card .cand.on { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.card .lplay { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 0 10px 4px; font-size: 12px; color: var(--muted); }
+.card .lplay .ic { width: 26px; height: 26px; color: var(--fg); }
+.card .lplay .ic svg { width: 15px; height: 15px; }
+.card .lplay select { padding: 1px 6px; font-size: 12px; }
+.card .lplay .ltime { margin-left: auto; white-space: nowrap; }
+.card .lplay .lbar { flex: 1 0 100%; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; cursor: pointer; }
+.card .lplay .lbar i { display: block; width: 0; height: 100%; background: var(--accent); }
 /* controls and labels are never part of the text: selecting a name must not drag them along.
    Deliberately global, the reader's own buttons are controls too. */
-.card .tag, .ic, .icon, .sec-head .glyph, .omni kbd, .card.add .t b { user-select: none; -webkit-user-select: none; }
+.card .tag, .ic, .icon, .omni .glyph, .omni kbd, .card.add .t b { user-select: none; -webkit-user-select: none; }
+/* a section heading with its tools on the right; «Прочитанные» folds by its heading */
+.sec-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 24px; margin: 0 0 14px; }
+.lib-section .sec-head h2 { margin: 0; }
+.sec-note { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.lib-section h2 .fold { background: none; border: 0; padding: 0; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; cursor: pointer; }
+.lib-section h2 .fold:hover { color: var(--fg); }
+.lib-section h2 .fold::after { content: ""; display: inline-block; vertical-align: 2px; width: 5px; height: 5px; margin-left: 10px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+.lib-section h2 .fold[aria-expanded="true"]::after { transform: rotate(45deg); }
+.view-seg { display: inline-flex; }
+.view-seg button { width: 28px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.view-seg button svg { width: 16px; height: 16px; }
+.view-seg button:hover { color: var(--fg); }
+.view-seg button[aria-pressed="true"] { color: var(--fg); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* the status of a book, three words in its open card; a read book's bar is full and quiet */
+.card.open .lead { flex-wrap: wrap; row-gap: 6px; }
+.stat-seg { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+.stat-seg button { background: none; border: 0; padding: 2px 0; font: inherit; color: var(--muted); cursor: pointer; }
+.stat-seg button:hover { color: var(--accent); }
+.stat-seg button[aria-checked="true"] { color: var(--fg); box-shadow: inset 0 -1.5px 0 var(--accent); }
+.card.open .lead .stat-seg ~ .link-btn { margin-left: 4px; }
+.card .bar.done i { background: color-mix(in srgb, var(--muted) 50%, transparent); }
+/* covers: a grid of 2:3 covers with the title and one line of state; an opened cover's card spans the row
+   under it (dense flow fills the row it leaves) */
+#library-list.covers { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); column-gap: 24px; row-gap: 28px; grid-auto-flow: row dense; align-items: start; }
+#library-list.covers > .panel, #library-list.covers > .card.add, #library-list.covers > p { grid-column: 1 / -1; }
+.card.tile { display: flex; flex-direction: column; min-width: 0; padding: 0; border: 0; border-radius: 0; background: none; gap: 0; }
+.card.tile:hover { transform: none; }
+.card.tile .cover-link { display: block; position: relative; }
+.card.tile .cover { width: 100%; height: auto; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 6px; box-sizing: border-box;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--fg) 8%, transparent), 0 6px 16px -6px rgb(0 0 0 / .25); transition: transform .15s, box-shadow .15s; }
+.card.tile:hover .cover { transform: translateY(-2px); box-shadow: 0 0 0 1px color-mix(in srgb, var(--fg) 10%, transparent), 0 12px 22px -8px rgb(0 0 0 / .35); }
+.card.tile.on .cover, .card.tile.sel .cover { outline: 2px solid var(--accent); outline-offset: 3px; }
+.card.tile .plate { display: flex; flex-direction: column; justify-content: space-between; align-items: stretch; gap: 8px; padding: 10px; overflow: hidden; text-align: left;
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel)); border: 1px solid var(--line); }
+.card.tile .plate .pt { font-family: var(--serif); font-size: 15px; line-height: 1.2; color: var(--fg); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+.card.tile .plate .pa { font-family: var(--ui); font-size: 11px; color: var(--muted); }
+.card.tile .plate.empty { background: none; border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent); box-shadow: none; }
+.card.tile.loading .cover { opacity: .45; }
+.card.tile .cover-link > .spin { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -11px 0 0 -11px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
+.card.tile .tlink, .card.tile > .t { margin-top: 8px; }
+.card.tile .t { font-family: var(--serif); font-size: 15px; line-height: 1.25; -webkit-line-clamp: 2; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.card.tile.shell .t { cursor: pointer; }
+.card.tile .tl { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 22px; margin-top: 3px; }
+.card.tile .tl .m { flex: 1; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.card.tile .tl .au svg { width: 12px; height: 12px; vertical-align: -2px; margin-right: 4px; }
+.card.tile .tl .m.warn::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d0902e; margin-right: 5px; vertical-align: 1px; }
+.card.tile .tl .spin { display: inline-block; width: 8px; height: 8px; margin-right: 5px; vertical-align: -1px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
+.card.tile .tl .ic { flex: none; width: 24px; height: 24px; opacity: 0; transition: opacity .15s, background-color .15s, color .15s; }
+.card.tile .tl .ic svg { width: 16px; height: 16px; }
+.card.tile:hover .tl .ic, .card.tile:focus-within .tl .ic, .card.tile.on .tl .ic, .card.tile.loading .tl .ic { opacity: 1; }
+@media (hover: none) { .card.tile .tl .ic { opacity: 1; } }
 .toast { position: fixed; left: 50%; top: 18px; transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 999px; font-size: 14px; z-index: 60; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
 @media (max-width: 560px) {
   .card { grid-template-columns: 52px 1fr; } .card .cover { width: 52px; height: 78px; }
   .card .acts { grid-column: 1 / -1; justify-content: flex-start; }
   .card.open .own { flex-wrap: wrap; }
+  #library-list.covers { grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 16px; row-gap: 22px; }
+  .card.tile .t { font-size: 13px; }
+  .stat-seg { margin-left: 0; }
 }
 
 /* ---------- layout ---------- */
@@ -239,6 +314,14 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .back-lib { display: none; color: var(--fg); }
 .in-app .back-lib { display: inline-flex; margin-right: -6px; }
 .in-app .back-lib svg { width: 24px; height: 24px; }
+/* the top bar in the camera island's ears (the app hides the status bar): as tall as the inset, the
+   buttons left and right of the island, no title in between, no rule under it */
+.ears { --topbar-h: max(52px, var(--safe-t)); }
+.ears .topbar { padding-top: 0; background: var(--bg); backdrop-filter: none; border-bottom-color: transparent; }
+.ears .topbar-title { visibility: hidden; }
+/* the lines scrolling up fade into the bar instead of being cut at its edge */
+.ears .topbar::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 16px; pointer-events: none;
+  background: linear-gradient(var(--bg), transparent); }
 /* leaving the page there is locking the phone, and the narrator plays on: this switch means nothing */
 .in-app label:has(#set-pause-hidden) { display: none; }
 @media (hover: hover) { .icon:hover { background: var(--line); } }
@@ -251,7 +334,8 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
    window wide it would run over the gutter and get clipped, so it is broken anywhere as a last resort */
 #text { max-width: var(--width); margin: 0 auto; hyphens: auto; -webkit-hyphens: auto; overflow-wrap: break-word;
   padding: calc(var(--topbar-h) + 40vh) 24px calc(var(--player-h) + 55vh);
-  font-family: var(--family); font-size: var(--font-size); line-height: var(--lh); font-weight: var(--weight); }
+  font-family: var(--family); font-size: var(--font-size); line-height: var(--lh); font-weight: var(--weight);
+  touch-action: manipulation; }  /* a double tap seeks to the sentence, it does not zoom */
 #text p { margin: 0 0 0.9em; text-indent: 1.4em; }
 #text .k-title { font-size: 1.35em; font-weight: 500; text-indent: 0; margin: 2.2em 0 1em; line-height: 1.25; text-align: center; }
 #text .k-title.lvl1 { font-size: 1.7em; margin-top: 3em; }
@@ -330,10 +414,38 @@ body.pages #text p { break-inside: auto; orphans: 2; widows: 2; }
   .pg-word { display: none; }
 }
 body.pages [data-mode="audio"], body:not(.pages) [data-mode="pages"] { display: none; }
+/* ---------- full-screen pages ----------
+   The page is the screen less the safe areas and a margin, and it stays that size: the bars float over
+   it and slide away (`bare`) instead of making room, so showing them never moves a line. While they are
+   away a quiet page count sits in the bottom margin. */
+:root { --foot-b: max(10px, calc(var(--safe-b) - 12px)); --page-t: calc(var(--safe-t) + 14px); --page-b: calc(var(--foot-b) + 30px); }
+@media (min-width: 901px) { :root { --page-t: calc(var(--safe-t) + 40px); --page-b: calc(var(--foot-b) + 44px); } }
+body.pages.immersive #text { top: var(--page-t); bottom: var(--page-b); padding: 0; }
+body.pages.immersive #text .fig img { max-height: max(80px, min(60vh, calc(100vh - var(--page-t) - var(--page-b) - 60px))); }
+body.pages.immersive .topbar { border-bottom-color: var(--glass-edge); }
+body.pages.immersive .topbar, body.pages.immersive .pager { transition: opacity .25s ease, transform .3s ease; }
+body.pages.immersive.bare .topbar { opacity: 0; transform: translateY(-100%); pointer-events: none; }
+body.pages.immersive.bare .pager { opacity: 0; transform: translateY(16px); pointer-events: none; }
+.pg-foot { display: none; position: fixed; z-index: 15; left: 0; right: 0; bottom: var(--foot-b); text-align: center;
+  font-size: 11px; line-height: 16px; letter-spacing: .04em; color: var(--muted); font-variant-numeric: tabular-nums;
+  padding: 0 28px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; opacity: 0; transition: opacity .25s ease; }
+body.pages.immersive .pg-foot { display: block; }
+body.pages.immersive.bare .pg-foot { opacity: .85; }
+@media (prefers-reduced-motion: reduce) {
+  .topbar, .pager, .pill, .pg-foot { transition: none !important; }
+}
 body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
+/* the way back to the narrator: the same glass as the player, right above it, or at the bottom when it is away */
 .pill { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--player-h) + 16px); z-index: 25;
-  border: 0; border-radius: 999px; padding: 10px 18px; background: var(--fg); color: var(--bg);
-  box-shadow: 0 6px 20px rgba(0,0,0,.25); font-size: 14px; }
+  border: 1px solid var(--glass-edge); border-radius: 999px; padding: 9px 16px; background: var(--glass); color: var(--fg);
+  -webkit-backdrop-filter: saturate(1.5) blur(24px); backdrop-filter: saturate(1.5) blur(24px);
+  box-shadow: var(--float-shadow); font-size: 13.5px; white-space: nowrap; transition: bottom .35s ease; }
+body.hide-player:not(:has(.player.peek)) .pill { bottom: calc(14px + var(--safe-b)); }
+/* «Книга прочитана · отменить»: the same glass, quieter; over the pager in page mode */
+#done-pill { color: var(--muted); }
+#done-pill .link-btn { font-size: inherit; color: var(--accent); margin-left: 2px; }
+body.pages #done-pill { bottom: calc(var(--pager-h) + 14px); }
+body.pages.immersive.bare #done-pill { bottom: calc(var(--foot-b) + 26px); }
 
 /* ---------- player: a card of glass floating over the page ----------
    One clean bar with the chapters as gaps in it (a row of tick marks read as a radio dial), the times
@@ -399,17 +511,36 @@ body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
 }
 /* distraction-free: the top bar fades when the pointer is idle; the player slides away while
    playing and comes back on pause or when the pointer reaches the bottom edge */
-.topbar { transition: opacity .3s; }
 body.playing.idle .topbar { opacity: .12; }
 body.playing.idle .topbar:hover { opacity: 1; }
 body.playing.idle { cursor: none; }
 .player { transition: opacity .35s ease, transform .35s ease; }
 body.hide-player .player { opacity: 0; transform: translateY(18px); pointer-events: none; }
 body.hide-player .player.peek { opacity: 1; transform: none; pointer-events: auto; }
+/* a finger: the top bar does not linger half-seen, it slides away with the player and comes back with it */
+.topbar { transition: opacity .3s, transform .35s ease; }
+@media (hover: none) {
+  body.playing.idle .topbar { opacity: 0; transform: translateY(-100%); pointer-events: none; }
+}
+/* the strip under the clock and the notch stays the page's colour, so the text scrolls out of sight
+   there and not under the status bar; nothing in a desktop browser, where the strip has no height */
+#app::before { content: ""; position: fixed; z-index: 19; left: 0; right: 0; top: 0; height: var(--safe-t); background: var(--bg); pointer-events: none; }
 /* the text fades out under the card instead of running on beneath it */
 #app::after { content: ""; position: fixed; z-index: 19; left: 0; right: 0; bottom: 0; pointer-events: none;
   height: calc(var(--player-h) + 28px); background: linear-gradient(transparent, var(--bg) 55%); transition: opacity .35s; }
 body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { opacity: 0; }
+/* With the bars put away, the island's ears say where the reader is: the chapter on the left, the page
+   (or what is left of the chapter, listening) on the right. The page number leaves the foot, and the
+   text takes that margin too. */
+#ears-info { display: none; }
+.ears #ears-info { display: flex; position: fixed; z-index: 21; top: 0; left: 0; right: 0; height: var(--safe-t);
+  align-items: center; justify-content: space-between; padding: 0 max(24px, var(--safe-r)) 0 max(24px, var(--safe-l));
+  font: 12px/1 var(--ui); color: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none;
+  opacity: 0; transition: opacity .25s ease; }
+.ears #ears-info span { max-width: calc(50% - 82px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ears body.pages.immersive.bare #ears-info, .ears body:not(.pages).playing.idle #ears-info { opacity: .9; }
+.ears body.pages.immersive .pg-foot { display: none; }
+.ears { --page-b: max(16px, calc(var(--safe-b) - 4px)); }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 /* ---------- drawers ---------- */
@@ -418,7 +549,7 @@ body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { o
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .drawer.left { left: 0; } .drawer.right { right: 0; border-left: 1px solid var(--line); border-right: 0; }
 .drawer-head { display: flex; justify-content: space-between; align-items: center; padding: calc(12px + var(--safe-t)) 16px 12px;
-  border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; background: var(--panel); }  /* over the switches, which are positioned */
 .drawer section { padding: 12px 16px; border-bottom: 1px solid var(--line); }
 .drawer h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .drawer label { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 8px 0; font-size: 14px; }

@@ -5,8 +5,13 @@
 import Foundation
 import Security
 
+/// A book's place in the reader's life: `shelf` as written, or derived when none is.
+enum BookStatus: String, Sendable {
+    case none, reading, paused, done
+}
+
 enum ReadingState {
-    static let lww = ["pos", "sent", "mode", "opened", "shelf"]
+    static let lww = ["pos", "sent", "mode", "opened", "shelf", "finished"]
     private static let queue = DispatchQueue(label: "readsync.state")  // one writer for this phone's file
     nonisolated(unsafe) private static var lastGood: [URL: [String: Any]] = [:]
     private static let cacheLock = NSLock()  // apart from `queue`: reads happen inside a write
@@ -46,6 +51,32 @@ enum ReadingState {
         }
         if !days.isEmpty { out["stats"] = ["days": days] }
         return out
+    }
+
+    /// The status a merged state stands for, as library.py derives it (tests/status_vectors.json). `audio`: the
+    /// book has a narration; `atEnd`: its position is at the end, the sign of a book finished before statuses.
+    static func status(_ st: [String: Any], audio: Bool, atEnd: Bool)
+        -> (status: BookStatus, rereading: Bool, finishedOn: String?)
+    {
+        let finished = st["finished"] as? [String] ?? []
+        let days = ((st["stats"] as? [String: Any])?["days"] as? [String: Any]) ?? [:]
+        let seconds = days.values.reduce(0) { $0 + num(($1 as? [String: Any])?["sec"]) }
+        let status: BookStatus
+        switch st["shelf"] as? String ?? "" {
+        case "done": status = .done
+        case "reading": status = .reading
+        case "paused", "library":
+            // a paused book read again is being read: its current mode's position is newer than the pause
+            let key = audio && st["mode"] as? String != "pages" ? "posAt" : "sentAt"
+            status = num(st[key]) > num(st["shelfAt"]) ? .reading : .paused
+        case "":
+            status = atEnd ? .done : seconds > 600 ? .reading : .none
+        default:
+            status = .none
+        }
+        // the day it was finished; one finished before the dates were kept: the last day it was read
+        let on = finished.max() ?? (status == .done ? days.keys.max() : nil)
+        return (status, status == .reading && !finished.isEmpty, on)
     }
 
     static func num(_ v: Any?) -> Double {

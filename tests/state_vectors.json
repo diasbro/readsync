@@ -49,5 +49,32 @@
       {"pos": 900, "posAt": 10, "shelf": "done", "shelfAt": 7}
     ],
     "merged": {"pos": 100, "posAt": 10, "shelf": "reading", "shelfAt": 7}
+  },
+  {
+    "name": "the finished list wins whole by finishedAt: the phone's newer list replaces the Mac's",
+    "edition": "",
+    "files": [
+      {"finished": ["2026-03-12"], "finishedAt": 10},
+      {"finished": ["2026-03-12", "2026-10-07"], "finishedAt": 20}
+    ],
+    "merged": {"finished": ["2026-03-12", "2026-10-07"], "finishedAt": 20}
+  },
+  {
+    "name": "an undo: a newer shorter finished list replaces an older longer one",
+    "edition": "",
+    "files": [
+      {"finished": ["2026-03-12", "2026-10-07"], "finishedAt": 20, "shelf": "done", "shelfAt": 20},
+      {"finished": ["2026-03-12"], "finishedAt": 30, "shelf": "reading", "shelfAt": 30}
+    ],
+    "merged": {"finished": ["2026-03-12"], "finishedAt": 30, "shelf": "reading", "shelfAt": 30}
+  },
+  {
+    "name": "a shelf done older than a shelf reading loses to it",
+    "edition": "",
+    "files": [
+      {"shelf": "reading", "shelfAt": 40},
+      {"shelf": "done", "shelfAt": 30, "finished": ["2026-10-07"], "finishedAt": 30}
+    ],
+    "merged": {"shelf": "reading", "shelfAt": 40, "finished": ["2026-10-07"], "finishedAt": 30}
   }
 ]

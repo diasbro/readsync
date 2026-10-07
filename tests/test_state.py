@@ -179,3 +179,21 @@ def test_a_device_id_that_is_not_one_is_replaced(tmp_path, monkeypatch):
     monkeypatch.setenv("READSYNC_DEVICE", "c" * 32)
     assert state.device_id() == "c" * 32
     assert sorted(p.name for p in f.parent.iterdir()) == ["device-id"]
+
+
+STATUS_VECTORS = json.loads((Path(__file__).parent / "status_vectors.json").read_text(encoding="utf-8"))
+
+
+def test_shared_status_vectors():
+    for v in STATUS_VECTORS:
+        assert state.status(v["state"], v["audio"], v["atEnd"]) == v["expect"], v["name"]
+
+
+def test_a_done_patch_writes_both_keys_and_an_older_one_does_not_overwrite(tmp_path, monkeypatch):
+    monkeypatch.setenv("READSYNC_DEVICE", "a" * 32)
+    d = book(tmp_path)
+    state.put(d, {"shelf": "done", "shelfAt": 50, "finished": ["2026-10-07"], "finishedAt": 50})
+    on_disk = json.loads(own(d).read_text(encoding="utf-8"))
+    assert on_disk["shelf"] == "done" and on_disk["finished"] == ["2026-10-07"] and on_disk["finishedAt"] == 50
+    merged = state.put(d, {"shelf": "reading", "shelfAt": 40, "finished": [], "finishedAt": 40})
+    assert merged["shelf"] == "done" and merged["finished"] == ["2026-10-07"]

@@ -10,6 +10,8 @@ audio a second time.
 
 from __future__ import annotations
 
+import errno
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -32,7 +34,7 @@ def tidy(d: Path) -> list[str]:
         else:
             continue
         gone.append(name)
-    for p in [*d.glob("part[0-9][0-9].*"), *d.glob("upload_*"), *d.glob("*.part")]:
+    for p in [*d.glob("part[0-9][0-9].*"), *d.glob("upload_*"), *d.glob("*.part"), *d.glob("*.tmp")]:
         p.unlink()
         gone.append(p.name)
     # the downloaded original goes once a playable copy exists; it is never the only audio deleted
@@ -41,6 +43,49 @@ def tidy(d: Path) -> list[str]:
             p.unlink()
             gone.append(p.name)
     return gone
+
+
+def work_root() -> Path:
+    """Where jobs build: outside the library, which may be in iCloud Drive and would upload every
+    intermediate file. Read on each call so a test (or a run) can point it elsewhere."""
+    return Path(os.environ.get("READSYNC_WORK") or Path.home() / "Library" / "Caches" / "readsync" / "jobs")
+
+
+def work_dir(name: str) -> Path:
+    return work_root() / name
+
+
+def claim(w: Path) -> Path:
+    """A fresh work dir for this process: what an earlier, dead run left is not trusted."""
+    shutil.rmtree(w, ignore_errors=True)
+    w.mkdir(parents=True)
+    (w / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    return w
+
+
+def held(w: Path) -> bool:
+    """True while the process that claimed this work dir is alive."""
+    try:
+        os.kill(int((w / "pid").read_text(encoding="utf-8")), 0)
+    except PermissionError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def land(src: Path, dst: Path) -> None:
+    """Move a finished file into the book in one step. Across volumes it is copied next to its place
+    first (a *.tmp, swept by tidy if the copy is cut short) and renamed from there."""
+    try:
+        os.replace(src, dst)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        tmp = dst.with_name(dst.name + ".tmp")
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+        src.unlink()
 
 
 def main() -> None:

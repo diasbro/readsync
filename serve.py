@@ -11,6 +11,8 @@ import mimetypes
 import os
 import re
 import sys
+import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from email.parser import BytesParser
@@ -45,12 +47,33 @@ from library import (
     wishlist_delete,
     wishlist_update,
 )
-from sources import search_text
+from sources import Cancelled, audio, search_text
 from state import StateUnavailable
+
+# searches in flight by the id the page gave them, so «отменить» can call one off on the server too
+SEARCHES: dict[str, threading.Event] = {}
+SEARCHES_LOCK = threading.Lock()
 
 mimetypes.add_type("audio/mp4", ".m4a")
 mimetypes.add_type("audio/webm", ".webm")
 mimetypes.add_type("application/json", ".json")
+
+RANGE_RE = re.compile(r"bytes=[0-9]*-[0-9]*")
+# the one live listen stream: a request for another recording ends the streams of the one before
+LISTEN_LOCK = threading.Lock()
+LISTEN = {"gen": 0, "ref": "", "since": 0}
+
+
+class HttpsRedirects(urllib.request.HTTPRedirectHandler):
+    """An upstream may redirect (archive.org to its data nodes), but only to another https address."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            raise urllib.error.HTTPError(newurl, code, "redirect off https", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+UPSTREAM = urllib.request.build_opener(HttpsRedirects)
 
 
 def parse_multipart(content_type: str, body: bytes) -> dict[str, dict]:
@@ -168,13 +191,27 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 return self.send_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         if self.path.startswith("/api/search"):
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0].strip()
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = params.get("q", [""])[0].strip()
+            sid = params.get("id", [""])[0][:64]
             if not q:
                 return self.send_json([])
+            cancel = threading.Event()
+            if sid:
+                with SEARCHES_LOCK:
+                    SEARCHES[sid] = cancel
             try:
-                return self.send_json(search_text(q))
+                return self.send_json(search_text(q, cancel))
+            except Cancelled:
+                return self.send_json({"error": "поиск отменён", "cancelled": True})
             except Exception as e:  # noqa: BLE001 - upstream site down or changed: report, don't crash
                 return self.send_json({"error": f"поиск недоступен: {e}"}, HTTPStatus.BAD_GATEWAY)
+            finally:
+                if sid:
+                    with SEARCHES_LOCK:
+                        SEARCHES.pop(sid, None)
+        if self.path.startswith("/api/audio/"):
+            return self.send_audio()
         path = self.translate_path(self.path)
         if os.path.isfile(path) and "Range" in self.headers:
             return self.send_range(path)
@@ -225,6 +262,12 @@ class Handler(SimpleHTTPRequestHandler):
             delta = self.read_json()
         except ValueError as e:
             return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+        if self.path.startswith("/api/search/cancel"):
+            with SEARCHES_LOCK:
+                cancel = SEARCHES.get(str(delta.get("id", "")))
+            if cancel:
+                cancel.set()
+            return self.send_json({"ok": bool(cancel)})
         if self.path.startswith("/api/align/"):
             with STATE_LOCK:
                 job, err = start_align(self.path.rsplit("/", 1)[-1])
@@ -265,6 +308,76 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path.endswith((".json", ".html", ".js", ".css")):
             self.send_header("Cache-Control", "no-cache")
         super().end_headers()
+
+    def send_audio(self):
+        """Audio search, the parts of a recording, and listening to one. Nothing here touches the disk."""
+        u = urllib.parse.urlparse(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        ref = q.get("ref", [""])[0]
+        try:
+            if u.path == "/api/audio/search":
+                text = q.get("q", [""])[0].strip()
+                return self.send_json(audio.search(text) if text else {"hits": [], "errors": []})
+            if u.path == "/api/audio/parts":
+                return self.send_json([{"title": p["title"], "duration": p["duration"]} for p in audio.parts(ref)])
+            if u.path == "/api/audio/listen":
+                part = q.get("part", ["0"])[0]
+                if not re.fullmatch(r"[0-9]{1,4}", part):
+                    raise audio.BadRef("нет такой части")
+                return self.send_listen(ref, int(part))
+        except audio.BadRef as e:
+            return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+        except Exception as e:  # noqa: BLE001 - upstream site down or changed: report, don't crash
+            return self.send_json({"error": f"источник недоступен: {e}"}, HTTPStatus.BAD_GATEWAY)
+        return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def send_listen(self, ref: str, part: int) -> None:
+        """Stream one part of a recording through to the browser, Range passed on both ways. Nothing is
+        written to disk and the browser is told not to cache; when the browser goes away (a seek, a
+        stop, a closed card) the upstream connection closes with it."""
+        url, extra = audio.stream_url(ref, part)  # from the ref alone: the client never names a host
+        headers = {"User-Agent": "Mozilla/5.0", **extra}  # no Referer: some hosts refuse 127.0.0.1
+        if RANGE_RE.fullmatch(self.headers.get("Range", "")):
+            headers["Range"] = self.headers["Range"]
+        with LISTEN_LOCK:
+            LISTEN["gen"] += 1
+            gen = LISTEN["gen"]
+            if LISTEN["ref"] != ref:
+                LISTEN["ref"], LISTEN["since"] = ref, gen
+        try:
+            up = UPSTREAM.open(urllib.request.Request(url, headers=headers), timeout=20)
+        except urllib.error.HTTPError as e:
+            e.close()
+            if e.code == 416:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                if e.headers and e.headers.get("Content-Range"):
+                    self.send_header("Content-Range", e.headers["Content-Range"])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            return self.send_json({"error": f"источник ответил {e.code}"}, HTTPStatus.BAD_GATEWAY)
+        except (OSError, ValueError) as e:
+            return self.send_json({"error": f"источник недоступен: {e}"}, HTTPStatus.BAD_GATEWAY)
+        with up:
+            if not (up.headers.get("Content-Type") or "").lower().startswith("audio/"):  # a captcha page, say
+                return self.send_json({"error": "источник не отдаёт звук"}, HTTPStatus.BAD_GATEWAY)
+            self.send_response(up.status)
+            for h in ("Content-Type", "Content-Length", "Content-Range"):
+                if up.headers.get(h):
+                    self.send_header(h, up.headers[h])
+            if not up.headers.get("Content-Length"):
+                self.close_connection = True  # the end of the body is the end of the connection
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            while LISTEN["since"] <= gen:  # another recording started: this one is over
+                try:
+                    chunk = up.read(1 << 16)
+                    if not chunk:
+                        return
+                    self.wfile.write(chunk)
+                except OSError:  # the browser left (BrokenPipe, reset) or the source stalled
+                    break
+            self.close_connection = True
 
     def send_range(self, path: str):
         size = os.path.getsize(path)

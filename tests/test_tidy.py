@@ -38,6 +38,8 @@ def test_leftovers_go_and_the_book_stays(tmp_path):
         "book.html",
         "align.log",
         "ffmpeg.log",
+        "whisper.json3.tmp",
+        "audio.m4a.tmp",
     )
     touch(tmp_path, *keep, *junk)
     tidy(tmp_path)

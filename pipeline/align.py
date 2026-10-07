@@ -1,7 +1,8 @@
 """Precise word alignment with the MMS CTC forced aligner (ONNX), windowed between caption anchors.
 
-Reads  book.json, anchors.json, audio16k.wav
+Reads  book.json, anchors.json, audio16k.wav (the last two from the work dir, rebuilt there if missing)
 Writes timing.json  {"source": "mms", "duration": float, "words": [[block, cs, ce, t0, t1], ...]}
+       (built in the work dir, then moved into the book)
 
 Strategy: cut the audio into windows of ~WINDOW_SEC bounded by confident anchor words, run the
 aligner on each window with the book words that fall inside it, and take the resulting word
@@ -15,6 +16,8 @@ import argparse
 import json
 import logging
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -26,7 +29,7 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from manifest import stamp  # noqa: E402
-from tidy import tidy  # noqa: E402
+from tidy import claim, land, tidy, work_dir  # noqa: E402
 from timing_from_anchors import interpolate  # noqa: E402
 
 SR = 16000
@@ -69,7 +72,19 @@ def main() -> None:
         "--threads", type=int, default=4, help="CPU threads for the model (default 4 keeps the laptop cool)"
     )
     ap.add_argument("--fast", action="store_true", help="use all cores at normal priority")
+    ap.add_argument("--work", type=Path, help="a job's work dir to reuse (add_book's); default: a fresh one")
     args = ap.parse_args()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # a stop unwinds, so the work dir goes
+    w = args.work or claim(work_dir(args.book_dir.name))
+    w.mkdir(parents=True, exist_ok=True)
+    try:
+        align(args, w)
+    finally:
+        shutil.rmtree(w, ignore_errors=True)
+    os._exit(0)  # onnxruntime CoreML teardown can crash at interpreter exit
+
+
+def align(args: argparse.Namespace, w: Path) -> None:
     if not args.fast:
         os.nice(15)
         if sys.platform == "darwin":  # run on efficiency cores: cool and quiet, roughly 2x slower
@@ -79,9 +94,10 @@ def main() -> None:
     import ctc_forced_aligner as cfa
 
     book = json.loads((d / "book.json").read_text(encoding="utf-8"))
-    if not (d / "anchors.json").exists():  # derived file, removed after every run: rebuilt from the captions
-        subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "anchors.py"), str(d)], check=True)
-    anc = json.loads((d / "anchors.json").read_text(encoding="utf-8"))
+    if not (w / "anchors.json").exists():  # derived file, removed after every run: rebuilt from the captions
+        anchors_py = str(Path(__file__).resolve().parent / "anchors.py")
+        subprocess.run([sys.executable, anchors_py, str(d), "--work", str(w)], check=True)
+    anc = json.loads((w / "anchors.json").read_text(encoding="utf-8"))
     words, anchors, duration = anc["words"], anc["anchors"], anc["duration"]
     base = interpolate(words, anchors, duration)  # fallback timing
     t0 = np.array([w[3] for w in base])
@@ -95,7 +111,7 @@ def main() -> None:
         so.intra_op_num_threads = args.threads
     session = ort.InferenceSession(model_path, sess_options=so, providers=args.providers.split(","))
     tokenizer = al.alignment_tokenizer
-    wav_path = d / "audio16k.wav"
+    wav_path = w / "audio16k.wav"
     if not wav_path.exists():  # derived file; rebuild it from whatever playable audio the book has
         src = next(f for f in (d / "audio.m4a", d / "audio.mp3", d / "yt.webm") if f.exists())
         subprocess.run(
@@ -171,15 +187,15 @@ def main() -> None:
         nxt = t0[i + 1] if i + 1 < len(words) else duration
         t1[i] = min(max(t1[i], t0[i] + 0.05), nxt, t0[i] + MAX_WORD_SEC)
     out = [[w[0], w[1], w[2], round(float(t0[i]), 3), round(float(t1[i]), 3)] for i, w in enumerate(words)]
-    (d / "timing.json").write_text(json.dumps({"source": "mms", "duration": duration, "words": out}), encoding="utf-8")
-    tidy(d)  # the 16 kHz copy and the anchors were only for this pass
+    (w / "timing.json").write_text(json.dumps({"source": "mms", "duration": duration, "words": out}), encoding="utf-8")
+    land(w / "timing.json", d / "timing.json")
+    tidy(d)  # leftovers of older versions that kept these files in the book
     stamp(d)  # same edition, new timing.json size
     print(
         f"done: aligned {good.mean():.1%} of words by MMS, bad windows={bad_windows}, "
         f"{(time.time() - started) / 60:.1f} min",
         flush=True,
     )
-    os._exit(0)  # onnxruntime CoreML teardown can crash at interpreter exit
 
 
 if __name__ == "__main__":

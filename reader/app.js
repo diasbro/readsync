@@ -11,7 +11,8 @@
   // laying out a long book again costs seconds, so those skip it.
   let metricsKey = "";
   onApplied = () => {
-    const key = [settings.font, settings.lh, settings.width, settings.family, settings.weight].join("|");
+    // full-screen pages give the columns another box, so the switch counts as a metric
+    const key = [settings.font, settings.lh, settings.width, settings.family, settings.weight, byDevice("immersive")].join("|");
     if (key === metricsKey) return;
     metricsKey = key;
     scheduleRelayout();
@@ -22,6 +23,15 @@
   // interface as <audio>, but the app owns the position, the sessions and the lock-screen controls.
   const native = !!window.nativeAudio;
   if (native) document.documentElement.classList.add("in-app");  // the page sits inside the iPhone app
+  // The app hides the status bar, so the band beside the camera island is free: the top bar moves up into
+  // it, its buttons in the two ears, and the text starts right under the island. Portrait only: turned on
+  // its side the phone has no inset at the top.
+  const insetProbe = document.body.appendChild(Object.assign(document.createElement("div"), { style: "position:fixed;top:0;height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none" }));
+  const fitEars = () => document.documentElement.classList.toggle("ears", native && insetProbe.offsetHeight >= 24);
+  // the web view learns its insets after the first paint: the bars move then, so the scrolling text is put
+  // back under the new top bar (pages are laid out again by the text box's own observer below)
+  fitEars(); new ResizeObserver(() => { fitEars(); reanchor(); }).observe(insetProbe);
+  const earsInfo = (left, right) => { $("#ears-info .ear-l").textContent = left; $("#ears-info .ear-r").textContent = right; };
   const audio = window.nativeAudio || $("#audio"), textEl = $("#text");
   const pgCur = $("#pg-cur"), pgTotal = $("#pg-total"), pgRead = $("#pg-read");
   let book, wB, wT0, wT1, wS, sFirst, sLast, sBlock, sWordsCum = [], chapStartWord = [], chapStartTime = [], duration = 0, hasAudio = false;
@@ -55,6 +65,7 @@
     else if (remote.stats) store.set("rs:stats:" + slug, remote.stats);
     if (!meta) throw new Error("книга не найдена");
     hasAudio = !!(timingJ && meta.audio);
+    bookMeta = meta;
     book = bookJ; duration = hasAudio ? timingJ.duration : 0;
     { const now = Date.now(); putState({ opened: now, openedAt: now }); }  // library sorts by last opened
     document.title = book.title + " — readsync";
@@ -187,7 +198,7 @@
       const li = e.target.closest("li"); if (!li) return;
       if (li.dataset.lib) { flushSent(true); session.stop(); location.href = "/"; return; }
       const i = +li.dataset.ch;
-      if (pages.on) goToSentence(firstSentOfChapter(i));
+      if (pages.on) { goToSentence(firstSentOfChapter(i)); setBare(true); }
       else if (isFinite(chapStartTime[i])) seek(chapStartTime[i]);
       closeDrawers();
     });
@@ -219,6 +230,7 @@
     const t = audio.currentTime + settings.offset;
     const i = wordAt(t);
     if (!audio.paused && lastCounted >= 0 && i > lastCounted && i - lastCounted < 40) session.words += i - lastCounted;
+    if (!native && !audio.paused) heard(audio.currentTime);
     lastCounted = i;
     if (i !== curWord || force) {
       if (curWord >= 0 && wordEls[curWord]) wordEls[curWord].classList.remove("cur");
@@ -242,7 +254,7 @@
         if ("mediaSession" in navigator && "MediaMetadata" in window && !native) {
           navigator.mediaSession.metadata = new MediaMetadata({ title: book.chapters[ci]?.title || book.title, artist: book.author, album: book.title });
         }
-        document.querySelectorAll("#toc-list li").forEach((li) => { const k = +li.dataset.ch; li.classList.toggle("cur", k === ci); li.classList.toggle("done", k < ci); });
+        markToc(ci);
       }
     }
     const sec = Math.floor(t);
@@ -253,10 +265,12 @@
       const chEnd = chapStartTime.find((x, i) => i > curChap && !book.chapters[i].hidden && isFinite(x)) ?? duration;
       const rate = audio.playbackRate || 1;
       $("#time-chap").textContent = "глава −" + fmt((chEnd - t) / rate);
+      earsInfo($("#chapter-title").textContent, "−" + fmt((chEnd - t) / rate));
       $("#time-left").textContent = "−" + fmt((duration - t) / rate);
     }
   }
   let lastSec = -1;
+  function markToc(ci) { document.querySelectorAll("#toc-list li").forEach((li) => { const k = +li.dataset.ch; li.classList.toggle("cur", k === ci); li.classList.toggle("done", k < ci); }); }
   function chapterAt(t) { let c = 0; for (let i = 0; i < chapStartTime.length; i++) if (chapStartTime[i] <= t && !book.chapters[i].hidden) c = i; return c; }
 
   function onSentenceChange(prevSent) {
@@ -285,42 +299,53 @@
   }
   function settle() {
     // fonts and images arrive after the first layout and move the text; re-anchor until the user takes over
-    const again = () => { if (settling && !userScrolled && !pages.on) scrollToCurrent(true, true); };
-    document.fonts.ready.then(again);
-    addEventListener("load", again, { once: true });
-    [400, 1200, 2500].forEach((ms) => setTimeout(again, ms));
+    document.fonts.ready.then(reanchor);
+    addEventListener("load", reanchor, { once: true });
+    [400, 1200, 2500].forEach((ms) => setTimeout(reanchor, ms));
   }
+  function reanchor() { if (settling && !userScrolled && !pages.on) scrollToCurrent(true, true); }
 
   // 10 Hz sync loop while playing (cheap: one binary search + a few class toggles per tick)
   let tick = 0;
   audio.addEventListener("play", () => { settling = false; clearInterval(tick); tick = setInterval(() => update(false), 100); setIcon($("#btn-play"), "pause"); if (!native) session.start(); document.body.classList.add("playing"); armIdle(); armHidePlayer(); });
   audio.addEventListener("pause", () => { clearInterval(tick); update(true); setIcon($("#btn-play"), "play"); if (!native && !pages.on) session.stop(); savePos(); document.body.classList.remove("playing", "idle"); showPlayer(); pausedAt = Date.now(); });
-  // distraction-free chrome: the top bar fades after 4 s without pointer/keyboard activity while
-  // playing; the player bar hides 1.5 s after play starts (scrolling does not bring it back) and
-  // returns on pause or when the pointer reaches the bottom edge
+  // distraction-free chrome while the narrator plays. With a mouse the top bar fades after 4 s without
+  // pointer or keyboard activity, and the player hides 1.5 s after play starts (scrolling does not bring
+  // it back) and returns on pause or when the pointer reaches the bottom edge. A finger has no idle
+  // pointer and no edge to reach: both bars slide away together after 3 s, come back with a tap on the
+  // text or on pause, and stay while a finger is on them.
   let idleTimer = 0, hideTimer = 0;
   function armIdle() {
+    if (touchUI) return;  // a tap fires mouse events too; on a touch screen the bars go with the player
     clearTimeout(idleTimer);
     document.body.classList.remove("idle");
-    if (settings.hideUi) idleTimer = setTimeout(() => { if (!audio.paused && $("#toc").hidden && $("#settings").hidden) document.body.classList.add("idle"); }, 4000);
+    if (byDevice("hideUi")) idleTimer = setTimeout(() => { if (!audio.paused && $("#toc").hidden && $("#settings").hidden) document.body.classList.add("idle"); }, 4000);
   }
-  ["mousemove", "mousedown", "keydown", "touchstart"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
-  function armHidePlayer(ms = 1500) {
+  ["mousemove", "mousedown", "keydown"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
+  function armHidePlayer(ms = touchUI ? 3000 : 1500) {
     clearTimeout(hideTimer);
-    if (settings.hideUi && !pages.on) hideTimer = setTimeout(() => {
+    if (byDevice("hideUi") && !pages.on) hideTimer = setTimeout(() => {
       if (audio.paused) return;
-      // a hand still on the card (a held button, the bar dragged, the speed list open): wait until it lets go
-      if (playerTouch || $(".player").matches(":active") || document.activeElement === $("#speed")) return armHidePlayer(ms);
+      // a hand still on a bar (a held button, the bar dragged, the speed list open) or a drawer open: wait
+      const busy = chromeTouch || $(".player").matches(":active") || document.activeElement === $("#speed")
+        || !$("#sprint-menu").hidden || (touchUI && !($("#toc").hidden && $("#settings").hidden));
+      if (busy) return armHidePlayer(ms);
       document.body.classList.add("hide-player");
+      if (touchUI) document.body.classList.add("idle");
     }, ms);
   }
-  // a finger has no hover: the bars put away come back with a tap, stay while they are used, and go again
-  const touchUI = matchMedia("(hover: none)").matches;
-  if (touchUI) $(".player").addEventListener("touchstart", () => armHidePlayer(4000), { passive: true });
-  let playerTouch = false;  // a touch that began on the card and has not ended yet
-  $(".player").addEventListener("touchstart", () => { playerTouch = true; }, { passive: true });
-  ["touchend", "touchcancel"].forEach((ev) => $(".player").addEventListener(ev, () => { playerTouch = false; }, { passive: true }));
-  function showPlayer() { clearTimeout(hideTimer); document.body.classList.remove("hide-player"); $(".player").classList.remove("peek"); }
+  let chromeTouch = false;  // a touch that began on a bar and has not ended yet
+  document.querySelectorAll(".player, .topbar").forEach((bar) => {
+    bar.addEventListener("touchstart", () => { chromeTouch = true; clearTimeout(hideTimer); }, { passive: true });
+    ["touchend", "touchcancel"].forEach((ev) => bar.addEventListener(ev, () => {
+      chromeTouch = false;
+      if (!audio.paused && !document.body.classList.contains("hide-player")) armHidePlayer(4000);
+    }, { passive: true }));
+  });
+  function showPlayer() {
+    clearTimeout(hideTimer); document.body.classList.remove("hide-player"); $(".player").classList.remove("peek");
+    if (touchUI) document.body.classList.remove("idle");
+  }
   addEventListener("mousemove", (e) => {
     if (!document.body.classList.contains("hide-player")) return;
     const player = $(".player"), peek = player.classList.contains("peek");
@@ -331,7 +356,10 @@
   // the app keeps playing on a locked screen: leaving the page is the phone being locked, not the reader leaving
   const onLeave = () => { if (!native && settings.pauseHidden && !audio.paused) audio.pause(); };
   document.addEventListener("visibilitychange", () => { if (document.hidden) { onLeave(); if (pages.on) session.stop(); } else if (pages.on) session.start(); });
-  audio.addEventListener("seeked", () => update(true));
+  audio.addEventListener("seeked", () => { heardAt = -1; update(true); });
+  // played to the end of the file: read to the end, whatever came before. In the app the player says so itself
+  audio.addEventListener("ended", () => { if (!native) markDone(); });
+  if (native) audio.addEventListener("finished", () => loadRemote().then(() => showDone(today())));
   // a paused narrator that moved anyway (the app's lock screen): repaint. While playing the tick does it
   audio.addEventListener("timeupdate", () => { if (audio.paused) update(true); });
   audio.addEventListener("ratechange", () => update(true));
@@ -401,21 +429,24 @@
     while (lo <= hi) { const mid = (lo + hi) >> 1; if (flowX(mid) >= x0) { ans = mid; hi = mid - 1; } else lo = mid + 1; }
     return ans;
   }
+  // how far the book is read: the last spread shown is the end, however many sentences start before it
+  const pagesPct = () => (pages.cur >= pages.total - 1 ? 100 : Math.round((pages.sent / Math.max(1, sFirst.length)) * 100));
   let sentTimer = 0, sentPatch = null;
   // Show spread `n`. `anchor` is the sentence the reader is on when the caller already knows it: a
   // relayout must keep the sentence it started from, or every resize event nudges the place a little.
   function goSpread(n, save = true, anchor = null, step = false) {
     n = Math.max(0, Math.min(pages.total - 1, n));
-    const prevSent = pages.sent;
+    const prevSent = pages.sent, prevCur = pages.cur;
     pages.cur = n; textEl.scrollLeft = n * pages.spreadW;
     pages.sent = anchor != null ? Math.max(0, Math.min(sFirst.length - 1, anchor)) : sentAtSpread(n);
     // words read, not words skipped past: a jump to a page or a chapter is not reading
     if (save && step && pages.sent > prevSent && pages.sent - prevSent < 400) session.words += sWordsCum[pages.sent] - sWordsCum[prevSent];
     paintPager();
+    if (save && step && n > prevCur) turnedOnto(prevCur, n);
     $("#chapter-title").textContent = book.chapters[chapterOfSent(pages.sent)]?.title || "";
     if (save) {
       const at = Date.now(); store.set("rs:sent:" + slug, pages.sent); store.set("rs:sentAt:" + slug, at);
-      sentPatch = { sent: pages.sent, sentAt: at, sentPct: Math.round((pages.sent / sFirst.length) * 100) };
+      sentPatch = { sent: pages.sent, sentAt: at, sentPct: pagesPct() };
       clearTimeout(sentTimer); sentTimer = setTimeout(flushSent, 300);
     }
   }
@@ -428,15 +459,34 @@
   // Turn a page. The columns are rebuilt the moment the window changes but measured only after the
   // reader's hand stops, so the numbers are checked first: a turn in that gap would use last
   // window's pitch and land between columns.
-  function turn(delta) {
+  // A turn from the page itself (a tap, a swipe, a key, the wheel) puts the bars away; a turn from the
+  // pager's own arrows leaves them where the hand is.
+  function turn(delta, fromPager = false) {
     if (!pages.on) return;
     const gap = parseFloat(getComputedStyle(textEl).columnGap) || 0;
-    if (Math.abs(contentWidth() + gap - pages.spreadW) > 0.5) { clearTimeout(relayoutTimer); relayout(); }
+    if (relayoutTimer || Math.abs(contentWidth() + gap - pages.spreadW) > 0.5) { clearTimeout(relayoutTimer); relayout(); }
     goSpread(pages.cur + delta, true, null, true);
+    if (!fromPager) setBare(true);
+  }
+  // Full-screen pages: the text box is the whole screen whether the bars are up or not (they float over
+  // it), so showing them never lays the book out again. `bare` only means anything with `immersive` on.
+  // Any change from the reader ends the bars' first showing.
+  let bareTimer = 0;
+  function setBare(on) { clearTimeout(bareTimer); document.body.classList.toggle("bare", on); }
+  // Opened in full-screen pages, the bars show for a moment first, so the reader sees where they are
+  // and how to get out; an open drawer or a page number being typed keeps them up.
+  function peekBars(ms = 2500) {
+    setBare(false);
+    if (!byDevice("immersive")) return;
+    bareTimer = setTimeout(function hide() {
+      const busy = !($("#toc").hidden && $("#settings").hidden && $("#sprint-menu").hidden) || pgTyping;
+      if (busy) bareTimer = setTimeout(hide, ms); else setBare(true);
+    }, ms);
   }
   // The columns were rebuilt (window resized, font or width changed, a webfont arrived): the reader
   // keeps their sentence and only the page number under it changes.
   function relayout() {
+    relayoutTimer = 0;
     if (!pages.on) return;
     pagesLayout();
     goToSentence(pages.sent, false);
@@ -456,22 +506,25 @@
     if (hasAudio && !audio.paused) audio.pause();
     if (native) window.webkit.messageHandlers.audio.postMessage({ cmd: "pages", on: true });  // the lock screen must not start the narrator under a page
     pages.on = true; document.body.classList.add("pages"); $("#pager").hidden = false; setIcon($("#btn-mode"), "audio"); $("#btn-mode").title = "Вернуться к аудио (m)";
-    closeDrawers(); pagesLayout(); goToSentence(si ?? pages.sent, false);
+    closeDrawers(); peekBars(); pagesLayout(); goToSentence(si ?? pages.sent, false);
     if (save) saveMode("pages");
     session.start();
   }
   function exitPages() {
     if (native) window.webkit.messageHandlers.audio.postMessage({ cmd: "pages", on: false });
-    pages.on = false; document.body.classList.remove("pages"); $("#pager").hidden = true; setIcon($("#btn-mode"), "book"); $("#btn-mode").title = "Режим книги без аудио (m)";
+    pages.on = false; document.body.classList.remove("pages"); setBare(false); $("#pager").hidden = true; setIcon($("#btn-mode"), "book"); $("#btn-mode").title = "Режим книги без аудио (m)";
     session.stop(); saveMode("audio"); drawTicks();  // the bar had no width while the pages covered it
     const st = sentStart(pages.sent);
     if (st != null) seek(st); else update(true);
   }
   function toggleMode() { if (!hasAudio) return; pages.on ? exitPages() : enterPages(curSent >= 0 ? curSent : pages.sent); }
   $("#btn-mode").onclick = toggleMode;
-  $("#pg-prev").onclick = () => turn(-1);
-  $("#pg-next").onclick = () => turn(1);
+  $("#pg-prev").onclick = () => turn(-1, true);
+  $("#pg-next").onclick = () => turn(1, true);
   addEventListener("resize", scheduleRelayout);
+  // the page's box changes without the window too: the insets arrive after the first paint (the top of
+  // the page moves down by the island), the ears take the bar. Taller or shorter columns hold other text
+  new ResizeObserver(scheduleRelayout).observe(textEl);
   addEventListener("resize", () => { if (hasAudio && duration && !pages.on) drawTicks(); });
   document.fonts.addEventListener("loadingdone", scheduleRelayout);
 
@@ -479,10 +532,13 @@
   let pgTyping = false;  // while the reader is typing, a page turn must not overwrite what they wrote
   function paintPager() {
     pgTotal.textContent = pages.total;
+    // with the top bar in the island's ears there is no room for the chapter up there: it reads at the foot
+    $("#pg-foot").textContent = `${pages.cur + 1} / ${pages.total}`;
+    earsInfo($("#chapter-title").textContent, `${pages.cur + 1} / ${pages.total}`);
     pgCur.style.width = String(pages.total).length + 2 + "ch";
     if (!pgTyping) pgCur.value = pages.cur + 1;
     $("#pg-prev").disabled = pages.cur <= 0; $("#pg-next").disabled = pages.cur >= pages.total - 1;  // the ends say so
-    const pct = Math.round((pages.sent / Math.max(1, sFirst.length)) * 100);
+    const pct = pagesPct();
     pgRead.innerHTML = pages.capped ? "книга не помещается целиком" : `<span class="pg-word">прочитано </span>${pct}%`;
     pgRead.classList.toggle("warn", !!pages.capped);
     pgRead.title = pages.capped
@@ -505,7 +561,7 @@
     else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       // the field stays in hand: it keeps the focus, so it writes the new page itself
       e.preventDefault();
-      turn(e.key === "ArrowUp" ? -1 : 1);
+      turn(e.key === "ArrowUp" ? -1 : 1, true);
       pgCur.value = pages.cur + 1; pgCur.select();
     }
   });
@@ -523,7 +579,7 @@
       $("#loading").textContent = "Не запускается: " + e.message + ". Обнови страницу.";
     });
   }
-  function seek(t) { settling = false; audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); posDirty = true; userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
+  function seek(t) { heardAt = -1; settling = false; audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); posDirty = true; userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
   // coming back to a paused tab: adopt a newer position/settings written by another browser
   document.addEventListener("visibilitychange", () => {
     if (document.hidden || !audio.paused || native) return;  // in the app the player catches up itself
@@ -563,24 +619,46 @@
   prog.addEventListener("change", () => { seekingUI = false; seek(+prog.value); });
 
   const turnZone = (e) => { const r = textEl.getBoundingClientRect(); return (e.clientX - r.left) / r.width; };
+  // the outer thirds turn a page; with full-screen pages the middle one shows or puts away the bars
+  function tapPage(e) {
+    if (getSelection().toString() || Date.now() - swiped < 400) return;
+    const x = turnZone(e);
+    if (x < 0.3) turn(-1); else if (x > 0.7) turn(1);
+    else if (byDevice("immersive")) setBare(!document.body.classList.contains("bare"));
+  }
+  // the margins round the columns are part of the page: a thumb at the screen's edge still turns it
+  addEventListener("click", (e) => { if (pages.on && [document.documentElement, document.body, app].includes(e.target)) tapPage(e); });
   textEl.addEventListener("click", (e) => {
     const nref = e.target.closest(".nref");
     if (nref) { showNote(nref); e.stopPropagation(); return; }
-    if (pages.on) {
-      if (getSelection().toString() || Date.now() - swiped < 400) return;
-      const x = turnZone(e);
-      if (x < 0.3) turn(-1); else if (x > 0.7) turn(1);
-      return;
-    }
+    if (pages.on) { tapPage(e); return; }
     if (!hasAudio) return;  // a book without audio is read in page mode, and its columns are not up yet
-    if (touchUI && (document.body.classList.contains("hide-player") || document.body.classList.contains("idle"))) {
-      showPlayer(); armIdle(); armHidePlayer(4000);  // this tap only brings the bars back; the next one may seek
+    // A finger taps the text to see the bars or put them away, and again to keep them: a tap must not move
+    // the narrator. Seeking takes a double tap; the single tap waits that long to know which it is.
+    if (touchUI) {
+      const twice = tapTimer && Math.hypot(e.clientX - tapAt.x, e.clientY - tapAt.y) < 40;
+      clearTimeout(tapTimer); tapTimer = 0;
+      if (twice) return seekToText(e.target);
+      tapAt = { x: e.clientX, y: e.clientY };
+      tapTimer = setTimeout(() => { tapTimer = 0; toggleBars(); }, 300);
       return;
     }
-    const w = e.target.closest(".w"), s = e.target.closest(".s");
+    seekToText(e.target);
+  });
+  let tapTimer = 0, tapAt = { x: 0, y: 0 };
+  function seekToText(target) {
+    const w = target.closest(".w"), s = target.closest(".s");
     if (settings.clickWord && w) return seek(wT0[+w.dataset.w]);
     if (s) { const st = sentStart(+s.dataset.s); if (st != null) seek(st); }
-  });
+  }
+  // the bars that slide away while the narrator plays: back for a while, or away now
+  function toggleBars() {
+    if (document.body.classList.contains("hide-player") || document.body.classList.contains("idle")) {
+      showPlayer(); armIdle(); armHidePlayer(4000);
+    } else if (byDevice("hideUi") && !audio.paused) {
+      clearTimeout(hideTimer); document.body.classList.add("hide-player", "idle");
+    }
+  }
 
   // which third the pointer is over, so the cursor can say which way a click turns. Kept to a class
   // change on the way in and out of a third: this fires on every pointer move.
@@ -595,11 +673,13 @@
 
   // A finger turns pages the way a book's pages turn: a horizontal swipe, either way. Only a swipe
   // that is clearly sideways counts, so a tap or a slip of the thumb does nothing.
+  // The margins round the columns count too; a swipe that starts on a bar or a drawer is that control's.
   let swipe = null;
-  textEl.addEventListener("touchstart", (e) => {
-    swipe = pages.on && e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, at: Date.now() } : null;
+  addEventListener("touchstart", (e) => {
+    const onControl = e.target instanceof Element && e.target.closest(".topbar, .pager, .drawer, .popup, .modal, #scrim");
+    swipe = pages.on && !onControl && e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, at: Date.now() } : null;
   }, { passive: true });
-  textEl.addEventListener("touchend", (e) => {
+  addEventListener("touchend", (e) => {
     if (!swipe || !pages.on) return;
     const t = e.changedTouches[0], dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
     const quick = Date.now() - swipe.at < 600;
@@ -612,7 +692,12 @@
   let swiped = 0;
 
   // user scroll detection
-  const onUserScroll = () => { if (settings.scroll === "off" || pages.on) return; userScrolled = true; $("#return-pill").hidden = false; };
+  // only the text counts: scrolling a drawer or dragging the bar does not take the page from the narrator
+  const onUserScroll = (e) => {
+    if (settings.scroll === "off" || pages.on) return;
+    if (e.target instanceof Element && e.target.closest(".drawer, .popup, .modal, .player, .topbar, #scrim")) return;
+    userScrolled = true; $("#return-pill").hidden = false;
+  };
   addEventListener("touchmove", onUserScroll, { passive: true });
   addEventListener("wheel", onUserScroll, { passive: true });  // audio mode: the browser scrolls, we only notice
   // The columns do not scroll, so in page mode a trackpad flick would do nothing at all. A wheel with
@@ -648,8 +733,8 @@
     if (pages.on) {
       if (k === "ArrowRight" || k === "PageDown" || (k === " " && !e.shiftKey)) { e.preventDefault(); turn(1); }
       else if (k === "ArrowLeft" || k === "PageUp" || (k === " " && e.shiftKey)) { e.preventDefault(); turn(-1); }
-      else if (k === "Home") goSpread(0);
-      else if (k === "End") goSpread(pages.total - 1);
+      else if (k === "Home") { goSpread(0); setBare(true); }
+      else if (k === "End") { goSpread(pages.total - 1); setBare(true); }
       else if (k === "t") toggleDrawer("#toc");
       else if (k === "Escape") { closeDrawers(); $("#note-pop").hidden = true; $("#sprint-menu").hidden = true; }
       return;
@@ -679,6 +764,13 @@
     const el = $(sel); const open = el.hidden; closeDrawers();
     if (open) {
       el.hidden = false; $("#scrim").hidden = false;
+      // the contents open where the reader is: the current chapter marked, in the middle of the list
+      if (sel === "#toc") {
+        const ci = pages.on || !hasAudio ? chapterOfSent(pages.sent) : curChap;
+        markToc(ci);
+        const li = $(`#toc-list li[data-ch="${ci}"]`);
+        if (li) el.scrollTop = li.offsetTop - (el.clientHeight - li.offsetHeight) / 2;
+      }
       if (sel === "#settings") { renderStats(); loadRemote().then(() => { if (remote.stats) { store.set("rs:stats:" + slug, remote.stats); renderStats(); } }); }
     }
   }
@@ -693,7 +785,8 @@
     $("#set-ui").value = settings.ui; $("#set-weight").value = settings.weight; $("#set-rewind").checked = !!settings.rewind;
     $("#set-offset").value = Math.round(settings.offset * 1000); $("#offset-out").textContent = (settings.offset > 0 ? "+" : "") + Math.round(settings.offset * 1000) + " мс";
     $("#set-scroll").value = settings.scroll; $("#set-click-word").checked = !!settings.clickWord;
-    $("#set-word-style").value = settings.wordStyle; $("#set-hide-ui").checked = !!settings.hideUi; $("#set-pause-hidden").checked = !!settings.pauseHidden;
+    $("#set-auto-done").checked = settings.autoDone !== false;
+    $("#set-word-style").value = settings.wordStyle; $("#set-hide-ui").checked = byDevice("hideUi"); $("#set-immersive").checked = byDevice("immersive"); $("#set-pause-hidden").checked = !!settings.pauseHidden;
     document.querySelectorAll("#set-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
     $("#btn-focus").classList.toggle("on", settings.dimMode !== "off");
   }
@@ -703,7 +796,10 @@
   bind("#set-ui", "ui"); bind("#set-weight", "weight", Number); bind("#set-rewind", "rewind"); bind("#set-offset", "offset", (v) => Number(v) / 1000);
   $("#set-dim").addEventListener("input", () => { if (settings.dimMode !== "off") settings.lastDim = settings.dimMode; });
   $("#set-offset").addEventListener("input", () => update(true));
-  bind("#set-word-style", "wordStyle"); bind("#set-hide-ui", "hideUi"); bind("#set-pause-hidden", "pauseHidden");
+  bind("#set-auto-done", "autoDone");
+  bind("#set-word-style", "wordStyle"); bind("#set-hide-ui", "hideUi"); bind("#set-pause-hidden", "pauseHidden"); bind("#set-immersive", "immersive");
+  // switched off while playing: the bars come back now, not at the next pause
+  $("#set-hide-ui").addEventListener("input", () => { if (!byDevice("hideUi")) { showPlayer(); document.body.classList.remove("idle"); } });
   $("#set-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); syncSettingsUI(); persistSettings(); });
   syncSettingsUI();
 
@@ -717,6 +813,58 @@
     pop.style.top = (r.bottom + 8) + "px";
   }
   addEventListener("click", (e) => { if (!e.target.closest("#note-pop, .nref")) $("#note-pop").hidden = true; if (!e.target.closest("#sprint-menu, #btn-sprint, #pg-sprint")) $("#sprint-menu").hidden = true; });
+
+  // ---------------- finished: reading to the end of the main text marks the book read ----------------
+  // The end is where the back matter (bibliography, indexes, «Об авторе») begins: its sentence and the last
+  // word before it, stamped by the pipeline (text_end, audio_end; 30 s of slack for the timing). A copy
+  // stamped before that ends at the last spread and the last minute. Only reading crosses it, a page turned
+  // forward or the narrator playing on, never a jump; and the very end of the book is a second line, for a
+  // reader who said «not yet» at the first. In the app the narrator is the player's: it marks the book itself
+  // and tells the page («finished»). A book already read is never marked again.
+  let bookMeta = {};
+  const isDone = () => (remote.shelf ? remote.shelf === "done" : bookMeta.state?.status === "done");
+  function markDone() {
+    if (settings.autoDone === false || isDone()) return;
+    const day = today(), was = Array.isArray(remote.finished) ? remote.finished : [];
+    const finished = was.includes(day) ? was : [...was, day], at = Date.now();
+    Object.assign(remote, { shelf: "done", shelfAt: at, finished, finishedAt: at });
+    putState({ shelf: "done", shelfAt: at, finished, finishedAt: at });
+    showDone(was.includes(day) ? null : day);
+  }
+  // the quiet line: no sound, no dialog, the narrator plays on; «отменить» puts the book back to «Читаю»
+  let doneTimer = 0, doneDay = null;
+  function showDone(day) {
+    doneDay = day; $("#done-pill").hidden = false;
+    clearTimeout(doneTimer); doneTimer = setTimeout(() => { $("#done-pill").hidden = true; }, 10000);
+  }
+  $("#done-undo").onclick = () => {
+    clearTimeout(doneTimer); $("#done-pill").hidden = true;
+    const at = Date.now(), finished = (Array.isArray(remote.finished) ? remote.finished : []).filter((d) => d !== doneDay);
+    Object.assign(remote, { shelf: "reading", shelfAt: at, finished, finishedAt: at });
+    putState({ shelf: "reading", shelfAt: at, finished, finishedAt: at });
+  };
+  // a page turned forward from before a line onto or past it
+  function turnedOnto(from, to) {
+    const last = pages.total - 1, te = Number(bookMeta.text_end) || 0;
+    const end = te > 0 && te <= sentEls.length ? Math.min(last, spreadOfSent(te - 1)) : last;
+    if ((from < end && to >= end) || (from < last && to >= last)) markDone();
+  }
+  // the narrator played across the line: two ticks less than 5 s apart, so a seek over it does not count
+  let heardAt = -1;
+  function heard(t) {
+    const ae = Number(bookMeta.audio_end) || 0, end = ae ? ae - 30 : duration - 60;
+    if (heardAt >= 0 && t > heardAt && t - heardAt < 5 && heardAt < end && t >= end) markDone();
+    heardAt = t;
+  }
+  // «Прочитана 7 октября», or how many times and the last
+  function doneLine() {
+    const days = (Array.isArray(remote.finished) ? remote.finished : []).filter((d) => typeof d === "string").sort();
+    const n = days.length, times = n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? "раза" : "раз";
+    if (n > 1) return `Прочитана ${n} ${times}, последний — ${dayName(days[n - 1])}<br>`;
+    if (n === 1) return `Прочитана ${dayName(days[0])}<br>`;
+    if (!isDone()) return "";
+    return `Прочитана${bookMeta.state?.finishedOn ? " " + dayName(bookMeta.state.finishedOn) : ""}<br>`;
+  }
 
   // ---------------- sessions & stats ----------------
   const session = {
@@ -742,13 +890,13 @@
     const td = st.days[today()] || { sec: 0, words: 0 };
     let streak = 0; const dt = new Date();
     for (;;) { const k = dt.toISOString().slice(0, 10); if (st.days[k]?.sec > 60) { streak++; dt.setDate(dt.getDate() - 1); } else break; }
-    const pct = hasAudio && duration ? Math.round((audio.currentTime / duration) * 100) : Math.round((pages.sent / Math.max(1, sFirst.length)) * 100);
+    const pct = hasAudio && duration ? Math.round((audio.currentTime / duration) * 100) : pagesPct();
     const week = []; const d2 = new Date();
     for (let i = 6; i >= 0; i--) { const x = new Date(d2); x.setDate(d2.getDate() - i); const k = x.toISOString().slice(0, 10); week.push({ k, sec: st.days[k]?.sec || 0, wd: ["вс", "пн", "вт", "ср", "чт", "пт", "сб"][x.getDay()] }); }
     const max = Math.max(60, ...week.map((w) => w.sec));
     const bars = `<div class="bars">${week.map((w) => `<div class="${w.k === today() ? "today" : ""}" style="height:${Math.max(4, (w.sec / max) * 100)}%" title="${fmt(w.sec)}"></div>`).join("")}</div>
       <div class="bars-labels">${week.map((w) => `<span>${w.wd}</span>`).join("")}</div>`;
-    $("#stats").innerHTML = `Сегодня: <b>${fmt(td.sec)}</b>, ${Math.round(td.words)} слов<br>Всего: <b>${fmt(tot)}</b>, ${Math.round(totW)} слов<br>Серия: <b>${streak}</b> дн.<br>Прогресс книги: <b>${pct}%</b>${hasAudio ? " · осталось " + fmt((duration - audio.currentTime) / audio.playbackRate) : ""}${bars}`;
+    $("#stats").innerHTML = `${doneLine()}Сегодня: <b>${fmt(td.sec)}</b>, ${Math.round(td.words)} слов<br>Всего: <b>${fmt(tot)}</b>, ${Math.round(totW)} слов<br>Серия: <b>${streak}</b> дн.<br>Прогресс книги: <b>${pct}%</b>${hasAudio ? " · осталось " + fmt((duration - audio.currentTime) / audio.playbackRate) : ""}${bars}`;
   }
 
   // ---------------- sprint timer ----------------

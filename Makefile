@@ -4,7 +4,7 @@ PY := .venv/bin/python
 APP_BOOKS := $(HOME)/Library/Application Support/readsync/books
 BOOKS ?= $(or $(READSYNC_BOOKS),$(shell [ -e "$(APP_BOOKS)" ] && echo "$(APP_BOOKS)" || echo books))
 
-.PHONY: setup serve test lint fmt add-book align app dmg ios-sim
+.PHONY: setup serve test lint fmt add-book align compact app dmg ios-sim ios-device ios-autoinstall
 
 setup:
 	$(PYTHON) -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -e ".[dev]"
@@ -39,6 +39,10 @@ dmg:
 align:
 	$(PY) pipeline/align.py "$(BOOKS)/$(slug)"
 
+# make compact slug=my-book   (re-encode the audio to AAC-LC mono 48 kbit/s once the timing is checked to hold)
+compact:
+	$(PY) pipeline/compact.py "$(BOOKS)/$(slug)"
+
 # the iPhone app in the simulator: build, install, launch (needs Xcode, xcodegen and the iOS simulator)
 SIM ?= iPhone 17
 ios-sim:
@@ -47,3 +51,24 @@ ios-sim:
 	xcrun simctl boot '$(SIM)' 2>/dev/null || true
 	xcrun simctl install '$(SIM)' ios/build/Build/Products/Debug-iphonesimulator/Readsync.app
 	xcrun simctl launch '$(SIM)' io.github.diasbro.readsync
+
+# the connected iPhone, signed with the Apple ID signed in to Xcode (a free one signs for 7 days)
+ios-device:
+	ios/reinstall.sh --now
+
+# reinstall on the iPhone every 3 days while it is reachable, so a free signature never runs out
+AGENT := $(HOME)/Library/LaunchAgents/io.github.diasbro.readsync.ios.plist
+ios-autoinstall:
+	mkdir -p "$(dir $(AGENT))"
+	printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+	  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+	  '<plist version="1.0"><dict>' \
+	  '<key>Label</key><string>io.github.diasbro.readsync.ios</string>' \
+	  '<key>ProgramArguments</key><array><string>$(CURDIR)/ios/reinstall.sh</string></array>' \
+	  '<key>StartInterval</key><integer>3600</integer>' \
+	  '<key>RunAtLoad</key><true/>' \
+	  '<key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer>' \
+	  '</dict></plist>' > "$(AGENT)"
+	launchctl bootout gui/$$(id -u) "$(AGENT)" 2>/dev/null || true
+	launchctl bootstrap gui/$$(id -u) "$(AGENT)"
+	@echo "каждый час проверка, раз в 3 дня переустановка; журнал: ~/Library/Logs/readsync-ios.log"

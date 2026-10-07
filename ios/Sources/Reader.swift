@@ -35,7 +35,7 @@ struct ReaderView: UIViewRepresentable {
         #if DEBUG
             web.isInspectable = true
         #endif
-        Player.shared.web = web
+        Player.shared.attach(web, slug: slug)
         context.coordinator.web = web
         #if DEBUG
             context.coordinator.watchDebugScript()
@@ -49,8 +49,8 @@ struct ReaderView: UIViewRepresentable {
     func updateUIView(_ web: WKWebView, context: Context) {}
 
     static func dismantleUIView(_ web: WKWebView, coordinator: Bridge) {
-        // closing the book stops its narrator (the place is saved), but not one another book has taken since
-        if Player.shared.slug == coordinator.slug { Player.shared.stop() }
+        // the narrator plays on without the page: the library's mini player has it now
+        Player.shared.detach(web)
         #if DEBUG
             coordinator.debugTimer?.invalidate()
         #endif
@@ -98,7 +98,7 @@ final class Bridge: NSObject, WKNavigationDelegate {
     // ---- messages ----
 
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
-        if message.name == "audio", let body = message.body as? [String: Any] { Player.shared.handle(body) }
+        if message.name == "audio", let body = message.body as? [String: Any] { Player.shared.handle(body, from: slug) }
     }
 
     func userContentController(
@@ -138,6 +138,8 @@ final class Bridge: NSObject, WKNavigationDelegate {
                 patch.removeValue(forKey: "posAt")
                 out = ReadingState.put(shared: dir, edition: book.edition, patch: patch)
             }
+            let merged = JSONBox(out)
+            await MainActor.run { Player.shared.stateChanged(book.slug, merged.value as? [String: Any] ?? [:]) }
             let sendable = JSONBox(out)
             await MainActor.run {
                 Bridge.writes[id] = nil
@@ -272,6 +274,9 @@ final class Files: NSObject, WKURLSchemeHandler {
             guard let local = Shelf.localCopy(b.slug) else { return nil }
             var out: [String: Any] = ["slug": local.slug, "title": local.title, "author": local.author, "ready": true]
             if let a = local.audioName, local.hasAudio { out["audio"] = a }
+            // where the main text ends: the reader marks the book read there
+            if let end = local.textEnd { out["text_end"] = end }
+            if let end = local.audioEnd { out["audio_end"] = end }
             return out
         }
     }
@@ -300,9 +305,30 @@ enum AppSettings {
         (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
     }
 
+    /// The reader's save: the app's own keys, which the page does not know, are kept.
     static func save(_ value: [String: Any]) {
+        var value = value
+        if value["lockText"] == nil, let keep = load()["lockText"] { value["lockText"] = keep }
+        write(value)
+    }
+
+    private static func write(_ value: [String: Any]) {
         if let data = try? JSONSerialization.data(withJSONObject: value) { try? data.write(to: file, options: .atomic) }
     }
 
     static var rewind: Bool { ((load()["settings"] as? [String: Any])?["rewind"] as? Bool) ?? true }
+
+    /// «Отмечать прочитанной в конце»: the reader's setting, saved by the page; on until switched off.
+    static let markReadKey = "autoDone"
+    static var markRead: Bool { ((load()["settings"] as? [String: Any])?[markReadKey] as? Bool) ?? true }
+
+    /// The sentence being spoken as the lock screen's title: the app's setting, set from the library.
+    static var lockText: Bool {
+        get { (load()["lockText"] as? Bool) ?? false }
+        set {
+            var all = load()
+            all["lockText"] = newValue
+            write(all)
+        }
+    }
 }

@@ -9,7 +9,8 @@ import urllib.request
 
 VOLUME_RE = re.compile(r"\b(?:т|том|кн|книга|ч|часть|vol|volume|part)\.?\s*(\d+|[IVXLC]+)\b", re.I)
 OPENS = frozenset(("html", "fb2", "epub", "pdf", "txt"))  # what the pipeline can turn into a book
-SOURCE_ORDER = ("fantasy-worlds", "flibusta", "coollib")  # priority when rows are sorted
+# priority when rows are sorted: the Russian catalogs first, then the open ones
+SOURCE_ORDER = ("fantasy-worlds", "flibusta", "coollib", "standard-ebooks", "gutenberg", "wikisource", "bia")
 
 
 def get(url: str, timeout: int = 40) -> bytes:
@@ -141,6 +142,27 @@ def hit(source: str, title: str, url: str, kind: str, **extra) -> dict:
         "audio_url": "",
         "narrator": "",
         "readable": True,
+    }
+    h.update(extra)
+    return h
+
+
+def audio_hit(source: str, ref: str, title: str, **extra) -> dict:
+    """A recording as an audio source reports it (see `sources/audio`). `ref` is all the server needs
+    to find it again; sizes are estimates from duration and bitrate where the source states no size."""
+    h = {
+        "source": source,
+        "ref": ref,
+        "title": title,
+        "author": "",
+        "narrator": "",
+        "duration_s": None,
+        "parts": None,
+        "size_bytes": None,
+        "bitrate_kbps": None,
+        "captions": False,
+        "page_url": "",
+        "licensed_trial": False,
     }
     h.update(extra)
     return h
