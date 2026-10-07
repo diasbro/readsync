@@ -413,12 +413,42 @@ class Shelf:
 
 
 def test_a_catalog_that_failed_is_not_asked_again_and_the_author_is_tried_at_both_ends(monkeypatch):
-    """A catalog that is down costs one round, not two; «Даосские практики Торчинов» names its author last."""
+    """A catalog that is down gets its tries in the first round and sits the second out; «Даосские практики
+    Торчинов» names its author last."""
     down, shelf = Down(), Shelf()
     monkeypatch.setattr(sources, "SOURCES", [down, shelf])
+    monkeypatch.setattr(sources, "PAUSE", 0)
     sources.CACHE.clear()
     out = sources.search_text("Даосские практики Торчинов")
-    assert down.asked == ["Даосские практики Торчинов"]
+    assert down.asked == ["Даосские практики Торчинов"] * sources.TRIES
     assert "торчинов" in shelf.authors and "даосские" in shelf.authors
     assert out["author"]["name"] == "Торчинов Евгений"
     assert [h["title"] for h in out["author"]["hits"]] == ["Даосские практики"]
+
+
+def test_a_search_called_off_stops_at_once(monkeypatch):
+    """«отменить» ends the search between tries and does not wait for a hanging mirror."""
+    import threading
+    import time
+
+    import pytest
+
+    class Hang:
+        name = "hang"
+
+        def search(self, query):
+            time.sleep(5)
+            return []
+
+        def author_books(self, query):
+            time.sleep(5)
+            return "", []
+
+    monkeypatch.setattr(sources, "SOURCES", [Hang()])
+    sources.CACHE.clear()
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    t0 = time.monotonic()
+    with pytest.raises(sources.Cancelled):
+        sources.search_text("что угодно", cancel)
+    assert time.monotonic() - t0 < 2

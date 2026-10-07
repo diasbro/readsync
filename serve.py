@@ -47,8 +47,12 @@ from library import (
     wishlist_delete,
     wishlist_update,
 )
-from sources import audio, search_text
+from sources import Cancelled, audio, search_text
 from state import StateUnavailable
+
+# searches in flight by the id the page gave them, so «отменить» can call one off on the server too
+SEARCHES: dict[str, threading.Event] = {}
+SEARCHES_LOCK = threading.Lock()
 
 mimetypes.add_type("audio/mp4", ".m4a")
 mimetypes.add_type("audio/webm", ".webm")
@@ -187,13 +191,25 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 return self.send_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         if self.path.startswith("/api/search"):
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0].strip()
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = params.get("q", [""])[0].strip()
+            sid = params.get("id", [""])[0][:64]
             if not q:
                 return self.send_json([])
+            cancel = threading.Event()
+            if sid:
+                with SEARCHES_LOCK:
+                    SEARCHES[sid] = cancel
             try:
-                return self.send_json(search_text(q))
+                return self.send_json(search_text(q, cancel))
+            except Cancelled:
+                return self.send_json({"error": "поиск отменён", "cancelled": True})
             except Exception as e:  # noqa: BLE001 - upstream site down or changed: report, don't crash
                 return self.send_json({"error": f"поиск недоступен: {e}"}, HTTPStatus.BAD_GATEWAY)
+            finally:
+                if sid:
+                    with SEARCHES_LOCK:
+                        SEARCHES.pop(sid, None)
         if self.path.startswith("/api/audio/"):
             return self.send_audio()
         path = self.translate_path(self.path)
@@ -246,6 +262,12 @@ class Handler(SimpleHTTPRequestHandler):
             delta = self.read_json()
         except ValueError as e:
             return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+        if self.path.startswith("/api/search/cancel"):
+            with SEARCHES_LOCK:
+                cancel = SEARCHES.get(str(delta.get("id", "")))
+            if cancel:
+                cancel.set()
+            return self.send_json({"ok": bool(cancel)})
         if self.path.startswith("/api/align/"):
             with STATE_LOCK:
                 job, err = start_align(self.path.rsplit("/", 1)[-1])

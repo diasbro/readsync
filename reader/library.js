@@ -451,6 +451,8 @@
     if (!s?.busy) return;
     s.stopped = true;
     s.ctrl.abort();
+    // the server keeps retrying the mirrors otherwise: tell it to stop as well
+    api("POST", "/api/search/cancel", { id: s.sid }).catch(() => {});
     searching.delete(idOf(x));
     paint();
   }
@@ -463,13 +465,14 @@
     if (!query) return;
     if (searching.get(id)?.busy) stopSearch(x);
     const t0 = Date.now();
-    const ctrl = new AbortController();
-    const state0 = { busy: true, t0, ctrl };
+    const ctrl = new AbortController(), sid = Math.random().toString(36).slice(2);
+    const state0 = { busy: true, t0, ctrl, sid };
     searching.set(id, state0); paint();
     const ticker = setInterval(() => { const el = document.querySelector(`.card[data-key="${CSS.escape(id)}"] .secs`); if (el) el.textContent = Math.round((Date.now() - t0) / 1000); }, 1000);
-    const killer = setTimeout(() => ctrl.abort(), 150000);  // two rounds of 45 s on the server, plus the reading
+    // two rounds of up to 60 s on the server (a mirror gets several tries), plus the reading
+    const killer = setTimeout(() => { ctrl.abort(); api("POST", "/api/search/cancel", { id: sid }).catch(() => {}); }, 140000);
     let res = null, state = null;
-    try { res = await fetch("/api/search?q=" + q(query), { signal: ctrl.signal }).then((r) => r.json()); if (res.error) throw new Error(res.error); }
+    try { res = await fetch(`/api/search?q=${q(query)}&id=${sid}`, { signal: ctrl.signal }).then((r) => r.json()); if (res.error) throw new Error(res.error); }
     catch (e) { res = null; state = state0.stopped ? null : { status: e.name === "AbortError" ? "библиотеки не ответили, попробуй позже" : "поиск не удался: " + esc(e.message) }; }
     finally { clearInterval(ticker); clearTimeout(killer); }
     if (res && !state0.stopped) {
