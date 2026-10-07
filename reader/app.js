@@ -222,6 +222,29 @@
   const picHtml = (pc) => `<img class="pic" src="/books/${slug}/${esc(pc.src)}" alt="">`;
   // a picture in the line is a glyph at text height unless it is drawn larger than one
   const sizePic = (im) => im.classList.toggle("big", im.naturalHeight > 64);
+  // ink (a heading set as SVG, a glyph, a line drawing, black on white): the dark themes turn it light, a
+  // photo is only dimmed. Told from a 24x24 copy: dark strokes on a clear ground (or a small all-dark mark),
+  // or dark strokes on white paper with hardly any half-tones.
+  function inkOf(im) {
+    try {
+      const c = document.createElement("canvas"); c.width = c.height = 24;
+      const g = c.getContext("2d", { willReadFrequently: true }); g.drawImage(im, 0, 0, 24, 24);
+      const d = g.getImageData(0, 0, 24, 24).data;
+      let clear = 0, drawn = 0, dark = 0, light = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] < 16) { clear++; continue; }
+        drawn++;
+        const y = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+        if (y < 100) dark++; else if (y > 200) light++;
+      }
+      if (!drawn) return;
+      const ink = dark / drawn, paper = light / drawn, mid = 1 - ink - paper;
+      const onClear = ink >= 0.6 && (clear >= 58 || (ink >= 0.9 && im.naturalHeight <= 64));
+      const onPaper = clear < 58 && paper >= 0.7 && ink >= 0.03 && mid <= 0.15;
+      im.classList.toggle("ink", onClear || onPaper);
+    } catch { /* not drawable here: left as a photo */ }
+  }
+  const whenLoaded = (im, fn) => (im.complete && im.naturalWidth ? fn() : im.addEventListener("load", fn, { once: true }));
 
   function render(words) {
     // group word indices by block
@@ -299,7 +322,8 @@
     textEl.querySelectorAll(".w").forEach((el) => (wordEls[+el.dataset.w] = el));
     textEl.querySelectorAll(".s").forEach((el) => (sentEls[+el.dataset.s] ??= el));  // a sentence across table cells: its first piece
     textEl.querySelectorAll(".blk").forEach((el) => (blockEls[+el.dataset.b] = el));
-    textEl.querySelectorAll("img.pic").forEach((im) => (im.complete ? sizePic(im) : im.addEventListener("load", () => sizePic(im), { once: true })));
+    textEl.querySelectorAll("img.pic").forEach((im) => whenLoaded(im, () => sizePic(im)));
+    textEl.querySelectorAll("img").forEach((im) => whenLoaded(im, () => inkOf(im)));
     // a picture decodes after the text is laid out and pushes every page along: measure again
     textEl.querySelectorAll("img").forEach((im) => im.addEventListener("load", scheduleRelayout, { once: true }));
   }
@@ -1110,7 +1134,7 @@
     };
     place();
     // a picture arrives after the note is placed and makes it taller
-    pop.querySelectorAll("img.pic").forEach((im) => (im.complete ? sizePic(im) : im.addEventListener("load", () => { sizePic(im); if (!pop.hidden) place(); }, { once: true })));
+    pop.querySelectorAll("img.pic").forEach((im) => whenLoaded(im, () => { sizePic(im); inkOf(im); if (!pop.hidden) place(); }));
   }
   addEventListener("click", (e) => { if (!e.target.closest("#note-pop, .nref")) $("#note-pop").hidden = true; if (!e.target.closest("#sprint-menu, #btn-sprint, #pg-sprint")) $("#sprint-menu").hidden = true; });
 
