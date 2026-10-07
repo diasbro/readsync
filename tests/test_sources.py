@@ -378,3 +378,47 @@ def test_open_libraries_follow_the_russian_catalogs():
     assert {"standard-ebooks", "gutenberg", "wikisource", "bia"} <= set(names[3:])
     for s in sources.SOURCES:
         assert callable(s.search) and callable(s.author_books)
+
+
+class Down:
+    name = "down"
+
+    def __init__(self):
+        self.asked = []
+
+    def search(self, query):
+        self.asked.append(query)
+        raise TimeoutError("The read operation timed out")
+
+    def author_books(self, query):
+        raise TimeoutError("The read operation timed out")
+
+
+class Shelf:
+    name = "shelf"
+
+    def __init__(self):
+        self.authors = []
+
+    def search(self, query):
+        return []
+
+    def author_books(self, query):
+        self.authors.append(query)
+        if query == "торчинов":
+            return "Торчинов Евгений", [
+                base.hit("shelf", "Даосские практики", "https://x/b/1/fb2", "fb2", author="Торчинов Евгений")
+            ]
+        return "", []
+
+
+def test_a_catalog_that_failed_is_not_asked_again_and_the_author_is_tried_at_both_ends(monkeypatch):
+    """A catalog that is down costs one round, not two; «Даосские практики Торчинов» names its author last."""
+    down, shelf = Down(), Shelf()
+    monkeypatch.setattr(sources, "SOURCES", [down, shelf])
+    sources.CACHE.clear()
+    out = sources.search_text("Даосские практики Торчинов")
+    assert down.asked == ["Даосские практики Торчинов"]
+    assert "торчинов" in shelf.authors and "даосские" in shelf.authors
+    assert out["author"]["name"] == "Торчинов Евгений"
+    assert [h["title"] for h in out["author"]["hits"]] == ["Даосские практики"]
