@@ -4,7 +4,12 @@
   if (slug) return;
   $("#library").hidden = false;
   fetchSettings().then(adoptSettings);
-  const toast = (msg) => { const el = document.createElement("div"); el.className = "toast"; el.textContent = msg; document.body.appendChild(el); setTimeout(() => el.remove(), 3000); };
+  // one toast at a time, in a live region: a new message replaces the last instead of stacking on it
+  const toastEl = Object.assign(document.createElement("div"), { className: "toast", hidden: true });
+  toastEl.setAttribute("role", "status");
+  document.body.appendChild(toastEl);
+  let toastTimer = 0;
+  const toast = (msg) => { toastEl.textContent = msg; toastEl.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { toastEl.hidden = true; }, 3000); };
   const q = (x) => encodeURIComponent(x);
   const norm = (x) => (x || "").toLowerCase().replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
   const isUrl = (x) => /^https?:\/\//i.test(x);
@@ -33,7 +38,7 @@
     const line = $("#demo-line"), demo = $(".demo");
     const words = text.split(/\s+/).filter(Boolean);
     line.innerHTML = words.map((w) => `<span class="w">${esc(w)}</span>`).join(" ") + (meta ? ` <span class="src">· ${esc(meta)}</span>` : "");
-    line.classList.toggle("link", !!href);
+    line.classList.toggle("go", !!href);
     line.onclick = href ? () => { location.href = href; } : null;
     demo.dataset.look = look || "plain";
     clearInterval(demoTimer);
@@ -50,7 +55,7 @@
     const line = $("#demo-line"), demo = $(".demo");
     clearInterval(demoTimer);
     line.innerHTML = [34, 62, 28, 88, 50, 40, 72, 46].map((w) => `<i style="width:${w}px"></i>`).join("");
-    line.classList.remove("link"); line.onclick = null;
+    line.classList.remove("go"); line.onclick = null;
     demo.dataset.look = "idle";
     const ws = line.querySelectorAll("i");
     let i = 0; ws[0].classList.add("cur");
@@ -79,16 +84,20 @@
   // Shelves: a book with more than 10 minutes of reading is "reading now" unless moved by hand; within a
   // shelf the most recent activity (opened, or added) comes first. A title saved without text is a "shell"
   // card that waits in the catalog. Every card opens in place (⚙) for its text and audio.
-  let books = [], wishes = [], jobs = {}, open = null, confirmDel = null;  // open: id of the card opened in place; confirmDel: awaiting "delete?"
+  // open: id of the card opened in place; confirmDel / confirmStop: the card asking "delete?" / "call the load off?"
+  let books = [], wishes = [], jobs = {}, open = null, confirmDel = null, confirmStop = null;
   const READING_SEC = 600;
-  const SOURCE = { "fantasy-worlds": "fantasy-worlds", flibusta: "Flibusta", coollib: "Coollib", "standard-ebooks": "Standard Ebooks",
+  const SOURCE = { "fantasy-worlds": "Fantasy Worlds", flibusta: "Flibusta", coollib: "Coollib", "standard-ebooks": "Standard Ebooks",
     gutenberg: "Gutenberg", wikisource: "Wikisource", bia: "Buddhadasa Archives" };
   const SOURCES_LABEL = Object.values(SOURCE).join(", ");
+  const SOURCES_N = Object.keys(SOURCE).length;
   const LOADABLE = new Set(["fb2", "epub", "pdf", "txt", "html"]);
   const searching = new Map();  // card id -> {busy, t0} | {status}: this session's search state
   const hitsCache = {};  // slug -> {hits, author_hits} from /api/hits, loaded when a book card opens
-  const idOf = (x) => x.slug || x.id;
-  const isShell = (x) => !x.slug;
+  // a book comes with its reading state; a saved title has none (its `slug`, once set, names the book it loads into)
+  const isShell = (x) => !x.state;
+  const idOf = (x) => (isShell(x) ? x.id : x.slug);
+  const nameOf = (b) => b.title || (b.building ? "Книга по ссылке" : b.slug);  // a link names its book only once loaded
   const shelfOf = (b) => (b.state.shelf ? b.state.shelf : b.state.finished ? "library" : b.state.seconds > READING_SEC ? "reading" : "library");
   const REF_SOURCE = { knigavuhe: "knigavuhe", yt: "YouTube", ia: "archive.org" };  // a recording loaded by its ref
   const sourceOf = (url) => { const h = (url || "").split("|")[0].trim(); const ref = /^(knigavuhe|yt|ia):/.exec(h); if (ref) return REF_SOURCE[ref[1]]; for (const k in SOURCE) if (h.includes(k.replace("-", "-"))) return SOURCE[k]; return h && !isUrl(h) ? "файл" : h ? new URL(h).hostname.replace(/^www\./, "") : ""; };
@@ -144,27 +153,51 @@
   const hm = (s) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h} ч${m ? ` ${m} мин` : ""}` : `${m || 1} мин`; };
   const bytes = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1).replace(".", ",") + " ГБ" : Math.max(1, Math.round(n / 1e6)) + " МБ");
   const oursOf = (h) => (h.duration_s ? (h.duration_s / 3600) * OURS_PER_H : 0);
-  const sizeOf = (h) => (oursOf(h) ? (h.size_bytes ? `~${bytes(h.size_bytes)} → ` : "") + `~${bytes(oursOf(h))} у нас` : "");
-  const audioMeta = (h) => [h.author, h.narrator ? "читает " + h.narrator : "", h.duration_s ? hm(h.duration_s) : "",
+  const sizeOf = (h) => (oursOf(h) ? `≈${bytes(oursOf(h))} на диске` : "");
+  const clean = (t) => (t || "").replace(/\p{Extended_Pictographic}/gu, "").replace(/\s+/g, " ").trim();  // 📖🎧 from video titles
+  const narratorOf = (h) => clean(h.narrator);
+  const audioMeta = (h) => [h.author, narratorOf(h) ? "читает " + narratorOf(h) : "", h.duration_s ? hm(h.duration_s) : "",
     h.parts > 1 ? plural(h.parts, "часть", "части", "частей") : "", sizeOf(h), AUDIO_SOURCE[h.source] || h.source].filter(Boolean).join(" · ");
+  // Is it this book? A catalog answers any words with something: a row whose title shares too few words with
+  // the book's title (two, or its only one) is another book, and a recording far shorter than the book (or than the other recordings
+  // of it) is a fragment. Neither is hidden, both are said, and another book goes under «ещё».
+  const STOP = new Set(["аудиокнига", "книга", "читает", "часть", "глава", "том", "the", "and"]);
+  const stem = (w) => (w.length > 5 ? w.slice(0, 5) : w);  // Russian endings: «чиновника» and «чиновник» are one word
+  const sig = (t) => new Set(norm(t).split(" ").filter((w) => (w.length > 2 || /\d/.test(w)) && !STOP.has(w)).map(stem));
+  function judge(hits, b) {
+    const want = sig(b.title);
+    const need = Math.min(2, want.size);  // one shared word of a longer title is a coincidence («Чья-то смерть»)
+    const related = (h) => [...sig(h.title)].filter((w) => want.has(w)).length >= need;
+    const mine = hits.filter(related), lens = mine.map((h) => h.duration_s).filter(Boolean).sort((x, y) => x - y);
+    const expect = (b.has_audio && b.state.duration) || lens[Math.floor(lens.length / 2)] || 0;
+    hits.forEach((h) => { h.other = !related(h); h.fragment = !h.other && !!expect && !!h.duration_s && h.duration_s < expect * 0.35; });
+    return { mine: [...mine.filter((h) => !h.fragment), ...mine.filter((h) => h.fragment)], other: hits.filter((h) => h.other) };
+  }
   function audioRowHtml(h, b) {
     audioHits.set(h.ref, h);
-    const r = esc(h.ref), ours = oursOf(h);
+    const r = esc(h.ref), ours = oursOf(h), now = b.audio_source === h.ref;
     const right = audioConfirm === h.ref
-      ? `<div class="acts confirm">${b.has_audio ? "заменить" : "загрузить"}${ours ? " ~" + bytes(ours) : ""}${h.captions ? "" : " и распознать речь"}? <button data-act="audioYes" data-ref="${r}">да</button> <button data-act="audioNo">нет</button></div>`
-      : `${icon("listen", "▶", "Послушать")}<button class="btn sm" data-act="audioPick">${b.has_audio ? "Заменить" : "Загрузить"}</button>`;
-    return `<div class="cand" data-ref="${r}"><div class="ct">${esc(h.title)}<div class="cm">${esc(audioMeta(h))}</div>
-      <div class="cm">${h.captions ? "с субтитрами — синхронизация быстрая" : "без субтитров — распознавание речи, долго"}</div></div>${right}</div>`;
+      ? `<div class="acts confirm">${b.has_audio ? "заменить" : "загрузить"}${ours ? " ≈" + bytes(ours) : ""}${h.captions ? "" : " и распознать речь"}? <button data-act="audioYes" data-ref="${r}">да</button> <button data-act="audioNo">нет</button></div>`
+      : `${icon("listen", "▶", "Послушать")}${now ? '<span class="now">сейчас</span>' : `<button class="btn sm" data-act="audioPick">${b.has_audio ? "Заменить" : "Загрузить"}</button>`}`;
+    const tags = (h.other ? '<span class="tag">другая книга?</span>' : "") + (h.fragment ? '<span class="tag" title="Намного короче книги">фрагмент?</span>' : "");
+    return `<div class="cand${now ? " cur" : ""}" data-ref="${r}"><div class="ct">${esc(clean(h.title))}${tags}<div class="cm">${esc(audioMeta(h))}</div>
+      ${h.captions ? "" : '<div class="cm">без субтитров: разметка распознаванием речи, долго</div>'}</div>${right}</div>`;
   }
   function audioRowsHtml(hits, b) {
     // one book read by several narrators folds into one line, as editions do
-    const groups = [];
-    hits.forEach((h) => { const key = norm(h.title) + "|" + norm(h.author); const g = groups.find((x) => x.key === key); if (g) g.rows.push(h); else groups.push({ key, rows: [h] }); });
-    const asking = (g) => g.rows.some((h) => h.ref === audioConfirm);
+    const fold = (list) => {
+      const groups = [];
+      list.forEach((h) => { const key = norm(h.title) + "|" + norm(h.author); const g = groups.find((x) => x.key === key); if (g) g.rows.push(h); else groups.push({ key, rows: [h] }); });
+      return groups;
+    };
+    const asking = (g) => g.rows.some((h) => h.ref === audioConfirm || h.ref === listening?.ref);
     const one = (g) => (g.rows.length === 1 ? audioRowHtml(g.rows[0], b)
       : `<details class="eds"${asking(g) ? " open" : ""}><summary><span class="ct">${esc(g.rows[0].title)}<div class="cm">${esc([g.rows[0].author, plural(g.rows.length, "озвучка", "озвучки", "озвучек")].filter(Boolean).join(" · "))}</div></span><span class="link-btn">озвучки</span></summary><div class="cands">${g.rows.map((h) => audioRowHtml(h, b)).join("")}</div></details>`);
-    const rest = groups.slice(SHOW);
-    return `<div class="cands">${groups.slice(0, SHOW).map(one).join("")}${rest.length ? `<details class="more"${rest.some(asking) ? " open" : ""}><summary>ещё ${rest.length}</summary><div class="cands">${rest.map(one).join("")}</div></details>` : ""}</div>`;
+    const { mine, other } = judge(hits, b);
+    const groups = fold(mine), rest = [...groups.slice(SHOW), ...fold(other)];
+    const head = groups.slice(0, SHOW);
+    const label = groups.length > SHOW ? `ещё ${rest.length}` : `другие книги? ${rest.length}`;
+    return `<div class="cands">${head.length ? head.map(one).join("") : '<div class="m">ничего похожего на эту книгу</div>'}${rest.length ? `<details class="more"${rest.some(asking) ? " open" : ""}><summary>${label}</summary><div class="cands">${rest.map(one).join("")}</div></details>` : ""}</div>`;
   }
   function audioFindHtml(b) {
     const s = audioOn() && audioFinding.get(b.slug);
@@ -251,117 +284,170 @@
   listenEl.addEventListener("ended", () => { if (listening && listening.part + 1 < listening.parts) playPart(listening.part + 1, 0); });
 
   // ---- the card: collapsed, or opened in place with its sections ----
+  // Collapsed, a card offers what is done daily: ▶ opens the book, ⚙ opens the card. Everything else —
+  // the shelf, the text and audio, deleting — is in the card opened in place, each said in words.
   let renaming = null;  // id of the card whose title is being edited
   let finding = null;  // id of the card whose search query is being typed
   const queryOf = (x) => (isShell(x) ? x.query : hitsCache[x.slug]?.query) || x.title || "";
-  const icon = (act, glyph, title) => `<button class="ic" data-act="${act}" title="${title}">${glyph}</button>`;
+  const icon = (act, glyph, title) => `<button class="ic" data-act="${act}" title="${title}" aria-label="${title}">${glyph}</button>`;
+  const jobOf = (b) => jobs[b.slug];
+  const failedJob = (b) => { const j = jobOf(b); return j && !j.running && j.exit !== 0 ? j : null; };
+  const shellOf = (b) => wishes.find((w) => w.slug === b.slug);  // the title this book is loading for
+  const openableCount = (found) => (found?.hits || []).filter(openable).length + (found?.author_hits?.hits || []).filter(openable).length;
   function actsHtml(x) {
-    if (confirmDel === idOf(x)) return `<div class="acts confirm">${isShell(x) ? "убрать" : "удалить"}${x.has_audio ? " с аудио" : ""}? <button data-act="delYes">да</button> <button data-act="delNo">нет</button></div>`;
-    // while the pipeline runs the only thing to offer is calling it off: the ring turns into a cross
-    if (x.building) return `<div class="acts"><button class="ic loading" data-act="stopJob" title="Идёт загрузка, нажми чтобы отменить"><span class="spin"></span><span class="x">✕</span></button></div>`;
-    const first = isShell(x) ? icon("find", "⌕", "Найти текст") : !x.ready ? "" : shelfOf(x) === "reading" ? icon("pause", "⏸", "Отложить") : icon("read", "▶", "Читать");
-    return `<div class="acts">${first}${icon("gear", "⚙", "Текст и аудио")}${icon("del", "✕", isShell(x) ? "Убрать" : "Удалить")}</div>`;
+    if (x.building) {
+      if (confirmStop === idOf(x)) return `<div class="acts confirm">отменить загрузку? <button data-act="stopYes">да, отменить</button> <button data-act="stopNo">нет</button></div>`;
+      return `<div class="acts"><span class="spin" aria-hidden="true"></span><button class="link-btn" data-act="stopJob">отменить</button></div>`;
+    }
+    if (isShell(x)) return `<div class="acts"><button class="link-btn" data-act="find">найти текст</button>${icon("gear", "⚙", "Издания, своя ссылка или файл")}</div>`;
+    const read = x.ready ? `<a class="ic" href="?book=${esc(x.slug)}" tabindex="-1" title="Читать" aria-label="Читать">▶</a>` : "";
+    return `<div class="acts">${read}${icon("gear", "⚙", "Текст, аудио, полка")}</div>`;
   }
   function statusHtml(x) {
     const s = searching.get(idOf(x)) || {};
-    if (s.busy) return `<div class="m status"><span class="spin"></span>ищу в ${SOURCES_LABEL}… <span class="secs">${Math.round((Date.now() - s.t0) / 1000)}</span> с<button class="link-btn" data-act="stop">отменить</button></div>`;
+    if (s.busy) return `<div class="m status"><span class="spin"></span><span title="${SOURCES_LABEL}">ищу в ${SOURCES_N} каталогах…</span> <span class="secs">${Math.round((Date.now() - s.t0) / 1000)}</span> с<button class="link-btn" data-act="stop">отменить</button></div>`;
     if (s.status) return `<div class="m status warn">${s.status}</div>`;
     if (s.note) return `<div class="m">${s.note}</div>`;  // found, but not by the name as typed
     const found = isShell(x) ? x : hitsCache[x.slug];
-    if (isShell(x) && x.searched && !found?.hits?.length && !found?.author_hits?.hits?.length) return `<div class="m status warn">не нашлось в ${SOURCES_LABEL}</div>`;
+    if (isShell(x) && x.searched && !openableCount(found) && !found?.unopenable) return `<div class="m status warn">не нашлось ни в одном из ${SOURCES_N} каталогов</div>`;
     return "";
+  }
+  // collapsed, a shell says what came of its search in a word; which catalog was down is for the open card
+  function briefHtml(w) {
+    const s = searching.get(w.id) || {}, n = openableCount(w);
+    if (s.busy || !n) return statusHtml(w);
+    return `<div class="m">нашлось ${plural(n, "издание", "издания", "изданий")} · открой и выбери</div>`;
+  }
+  function failHtml(b) {
+    const j = failedJob(b);
+    if (!j) return "";
+    const other = b.ready ? (hitsCache[b.slug]?.hits?.length || b.has_hits) : shellOf(b) || b.has_hits;
+    return `<div class="m status warn"><span>не загрузилось: ${esc(j.log[j.log.length - 1] || "код " + j.exit)}</span>${other ? '<button class="link-btn" data-act="otherEdition">другое издание</button>' : ""}${b.ready ? '<button class="link-btn" data-act="dismiss">скрыть</button>' : ""}</div>`;
+  }
+  function progressOf(b) {
+    const st = b.state, pos = st.pos || 0, dur = st.duration || store.get("rs:dur:" + b.slug, 0);
+    // read as pages, an audiobook counts its page (the phone does the same)
+    const pct = st.finished ? 100 : b.has_audio && st.mode !== "pages" ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
+    const where = !b.ready ? "" : st.finished ? "прочитано целиком" : b.has_audio ? (pct ? `прочитано ${pct}% · ${fmt(pos)}` : "не начато") : (st.sent ? `прочитано ${pct}%` : "не начато");
+    return { pct, where };
   }
   function textSection(x) {
     const found = isShell(x) ? x : hitsCache[x.slug] || {};
+    const swap = !isShell(x) && x.ready;  // a book with text gets it replaced: the words say so
     return `<div class="sec"><h5>Текст${x.text_source ? `<span class="now">· ${esc(sourceOf(x.text_source))}</span>` : ""}<button class="link-btn" data-act="find">искать издания</button></h5>
       ${statusHtml(x)}${resultsHtml(found, x.text_source)}
-      <div class="own"><input name="text_url" placeholder="Ссылка на текст: страница книги, fb2, epub, pdf, txt"><label class="file">или <u>файл</u><input type="file" name="text_file" accept=".fb2,.zip,.epub,.pdf,.txt,.html,.htm" hidden></label><button class="btn sm" data-act="own">Загрузить</button></div></div>`;
+      <div class="own"><input name="text_url" placeholder="${swap ? "Заменить текст: ссылка" : "Своя ссылка"} на страницу книги, fb2, epub, pdf, txt"><label class="file">или <u>файл</u><input type="file" name="text_file" accept=".fb2,.zip,.epub,.pdf,.txt,.html,.htm" hidden></label><button class="btn sm" data-act="own">${swap ? "Заменить" : "Добавить"}</button></div></div>`;
   }
   function audioSection(b) {
-    const now = b.has_audio ? [b.narrator ? "читает " + b.narrator : "", sourceOf(b.audio_source), b.timing_source === "mms" ? "точное выравнивание" : "разметка по субтитрам"].filter(Boolean).join(" · ") : "нет";
+    const now = b.has_audio ? [narratorOf(b) ? "читает " + narratorOf(b) : "", sourceOf(b.audio_source), b.timing_source === "mms" ? "точное выравнивание" : "разметка по субтитрам"].filter(Boolean).join(" · ") : "нет";
     const align = b.has_audio && b.timing_source !== "mms" ? `<button class="link-btn" data-act="align">выровнять точно (долго)</button>` : "";
     const find = audioOn() ? `<button class="link-btn" data-act="findAudio">${b.has_audio ? "заменить озвучку" : "искать озвучки"}</button>` : "";
     return `<div class="sec"><h5>Аудио<span class="now">· ${esc(now)}</span>${find}${align}</h5>
       ${audioFindHtml(b)}
-      <div class="own"><input name="audio_url" placeholder="${b.has_audio ? "Заменить: " : ""}ссылка на YouTube, части по одной через пробел"><label class="file">или <u>файл</u><input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3" hidden></label><input name="narrator" class="narr" placeholder="Чтец"><button class="btn sm" data-act="audioGo">Загрузить</button></div>
+      <div class="own"><input name="audio_url" placeholder="${b.has_audio ? "Заменить: " : ""}ссылка на YouTube, части по одной через пробел"><label class="file">или <u>файл</u><input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3" hidden></label><input name="narrator" class="narr" placeholder="Чтец"><button class="btn sm" data-act="audioGo">${b.has_audio ? "Заменить" : "Добавить"}</button></div>
       ${b.has_audio || audioOn() ? "" : `<div class="m">Голос выбери сам: <a target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${q((b.title || "") + " аудиокнига")}">YouTube</a></div>`}</div>`;
   }
   function headHtml(x) {
+    const fold = icon("close", "⌃", "Свернуть (Esc)");
     if (finding === idOf(x)) {
       return `<div class="head editing"><span class="pen" aria-hidden="true">⌕</span>
         <input class="find-input" value="${esc(queryOf(x))}" spellcheck="false" aria-label="Что искать в ${SOURCES_LABEL}"
           placeholder="Название, автор, что угодно">
-        ${icon("findGo", "→", "Искать (↵)")}${icon("close", "✕", "Закрыть (Esc отменяет ввод)")}</div>`;
+        ${icon("findGo", "→", "Искать (↵)")}${fold}</div>`;
     }
     if (renaming !== idOf(x)) {
-      return `<div class="head"><button class="ic pen" data-act="rename" title="Переименовать">✎</button>
-        <div class="t">${esc(x.title || x.slug)}${isShell(x) ? '<span class="tag">без текста</span>' : ""}</div>
-        <button class="ic" data-act="close" title="Свернуть (Esc)">✕</button></div>`;
+      return `<div class="head"><button class="ic pen" data-act="rename" title="Переименовать" aria-label="Переименовать">✎</button>
+        <div class="t">${esc(isShell(x) ? x.title : nameOf(x))}${isShell(x) ? '<span class="tag">без текста</span>' : ""}</div>${fold}</div>`;
     }
     return `<div class="head editing"><span class="pen" aria-hidden="true">✎</span>
       <input class="rename-input" value="${esc(x.title || x.slug)}" spellcheck="false" aria-label="Название">
-      ${icon("renameYes", "✓", "Сохранить (↵)")}${icon("close", "✕", "Закрыть (Esc отменяет ввод)")}</div>`;
+      ${icon("renameYes", "✓", "Сохранить (↵)")}${fold}</div>`;
+  }
+  // a ready book opened in place still reads at one click: «Читать», where it stands, and its shelf
+  function leadHtml(b) {
+    if (isShell(b) || !b.ready) return "";
+    const reading = shelfOf(b) === "reading";
+    return `<div class="lead"><a class="btn sm primary" href="?book=${esc(b.slug)}">Читать</a><span class="m">${esc(progressOf(b).where)}</span>
+      <button class="link-btn" data-act="shelf">${reading ? "убрать из «Читаю сейчас»" : "положить в «Читаю сейчас»"}</button></div>`;
+  }
+  function footHtml(x) {
+    if (confirmDel === idOf(x)) {
+      const what = isShell(x) ? "убрать название из библиотеки?" : `удалить книгу${x.has_audio ? " вместе с аудио" : ""} и место, где остановился?`;
+      return `<div class="foot confirm">${what} <button class="danger" data-act="delYes">${isShell(x) ? "убрать" : "удалить"}</button> <button data-act="delNo">отмена</button></div>`;
+    }
+    return `<div class="foot"><button class="link-btn" data-act="del">${isShell(x) ? "убрать из библиотеки" : "удалить книгу"}</button></div>`;
   }
   function openHtml(x) {
     return `<div class="card open${isShell(x) ? " shell" : ""}" data-key="${esc(idOf(x))}"><div class="body">
       ${headHtml(x)}
-      ${facts(x) ? `<div class="m">${esc(facts(x))}</div>` : ""}
-      ${textSection(x)}${isShell(x) ? "" : audioSection(x)}</div></div>`;
+      ${facts(x) ? `<div class="m">${esc(facts(x))}</div>` : ""}${leadHtml(x)}${isShell(x) ? "" : failHtml(x)}
+      ${x.building ? "" : textSection(x)}${isShell(x) || !x.ready || x.building ? "" : audioSection(x)}${x.building ? "" : footHtml(x)}</div></div>`;
   }
   function cardHtml(b) {
-    if (open === b.slug) return openHtml(b);
-    const st = b.state, job = jobs[b.slug], failed = !!(job && !job.running && job.exit !== 0);
-    const pos = st.pos || 0, dur = st.duration || store.get("rs:dur:" + b.slug, 0);
-    // read as pages, an audiobook counts its page (the phone does the same)
-    const pct = st.finished ? 100 : b.has_audio && st.mode !== "pages" ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
-    const meta = [facts(b), !b.ready ? (b.building ? "загружается…" : failed ? null : "не загрузилась до конца") : b.building ? "заменяю…" : null].filter(Boolean).join(" · ");
-    const fail = failed ? `<div class="m status warn">не загрузилось: ${esc(job.log[job.log.length - 1] || "код " + job.exit)}</div>` : "";
+    if (open === b.slug && !b.building) return openHtml(b);
+    const job = jobOf(b), failed = !!failedJob(b);
+    const { pct, where } = progressOf(b);
+    const stage = job?.running && job.stage ? " · " + job.stage : "";
+    const meta = [facts(b), !b.ready ? (b.building ? "загружается" + (stage || "…") : failed ? null : "не загрузилась до конца") : b.building ? "заменяю" + (stage || "…") : null].filter(Boolean).join(" · ");
     const frag = b.fragment_note ? `<div class="m status warn">в конце текста «${esc(b.fragment_note)}»</div>` : "";
-    const where = !b.ready ? "" : st.finished ? "прочитано целиком" : b.has_audio ? (pct ? `прочитано ${pct}% · ${fmt(pos)}` : "не начато") : (st.sent ? `прочитано ${pct}%` : "не начато");
-    const cover = b.cover ? `<img class="cover" src="/books/${esc(b.slug)}/${esc(b.cover)}" alt="">` : `<div class="cover empty">${esc((b.title || b.slug).slice(0, 1))}</div>`;
-    const href = b.ready ? "?book=" + esc(b.slug) : "#";
-    return `<div class="card" data-key="${esc(b.slug)}"><a class="cover-link" href="${href}">${cover}</a>
-      <div class="body"><a href="${href}" class="tlink"><div class="t">${esc(b.title || b.slug)}</div></a><div class="m${meta ? "" : " empty"}">${esc(meta)}</div>${fail}${frag}
+    const cover = b.cover ? `<img class="cover" src="/books/${esc(b.slug)}/${esc(b.cover)}" alt="">` : `<div class="cover empty">${esc(nameOf(b).slice(0, 1))}</div>`;
+    // one stop for the keyboard per card: the title; the cover is the same link for the pointer only
+    const title = `<div class="t">${esc(nameOf(b))}</div>`;
+    const link = b.ready ? `<a class="cover-link" href="?book=${esc(b.slug)}" tabindex="-1" aria-hidden="true">${cover}</a>` : `<div class="cover-link">${cover}</div>`;
+    return `<div class="card" data-key="${esc(b.slug)}">${link}
+      <div class="body">${b.ready ? `<a href="?book=${esc(b.slug)}" class="tlink">${title}</a>` : title}<div class="m${meta ? "" : " empty"}">${esc(meta)}</div>${failHtml(b)}${frag}
       <div class="bar${pct ? "" : " empty"}"><i style="width:${pct}%"></i></div><div class="m${pct ? "" : " empty"}">${where}</div></div>${actsHtml(b)}</div>`;
   }
   function shellHtml(w) {
     if (open === w.id) return openHtml(w);
     return `<div class="card shell" data-key="${esc(w.id)}"><div class="cover empty" data-act="gear">${esc(w.title.slice(0, 1))}</div>
-      <div class="body" data-act="gear" title="Текст и аудио"><div class="t">${esc(w.title)}<span class="tag">без текста</span></div>${w.author ? `<div class="m">${esc(w.author)}</div>` : ""}${statusHtml(w)}</div>${actsHtml(w)}</div>`;
+      <div class="body" data-act="gear" title="Издания, своя ссылка или файл"><div class="t">${esc(w.title)}<span class="tag">без текста</span></div>${w.author ? `<div class="m">${esc(w.author)}</div>` : ""}${briefHtml(w)}</div>${actsHtml(w)}</div>`;
   }
 
-  // ---- finding and adding: the sign by the heading opens one line above the cards it filters ----
-  const omni = $("#omni-input"), omniRow = $("#omni"), omniOpen = $("#omni-open");
-  let query = "";
-  function showOmni(on, focus = true) {
-    omniRow.hidden = !on;
-    omniOpen.hidden = on;
-    if (on) { if (focus) omni.focus(); }
-    else { omni.blur(); omni.value = ""; query = ""; paint(); }  // focus must leave with the line, or "/" lands in it
-  }
-  omniOpen.onclick = () => showOmni(true);
-  const matches = (x) => !query || norm(x.title + " " + (x.author || "") + " " + (x.translator || "")).includes(norm(query));
+  // ---- finding and adding: one line above the shelves, always there. It filters the library as it is
+  // typed; ↵ opens the book picked with ↑/↓ (the first by default), or, when the library has no such book,
+  // saves the title and asks the catalogs for it at once ----
+  const omni = $("#omni-input");
+  let query = "", sel = 0;
+  const matches = (x) => !query || norm((x.title || "") + " " + (x.author || "") + " " + (x.translator || "")).includes(norm(query));
+  const clearOmni = () => { omni.value = ""; query = ""; sel = 0; };
   function addRowHtml(any) {
-    if (isUrl(query)) return `<div class="card add" data-act="link"><div class="body"><div class="t"><b>＋</b>Загрузить по ссылке</div><div class="m">↵ · название возьму из книги</div></div></div>`;
-    return `<div class="card add" data-act="save"><div class="body"><div class="t"><b>＋</b>Сохранить «${esc(query)}»${any ? " как новую книгу" : ""}</div><div class="m">${any ? "⌘↵" : "↵"} · без текста; найти его или добавить свой можно потом</div></div></div>`;
+    const row = (act, title, hint) => `<div class="card add" role="button" tabindex="0" data-act="${act}"><div class="body"><div class="t"><b>＋</b>${title}</div><div class="m">${hint}</div></div></div>`;
+    if (isUrl(query)) return row("link", "Загрузить книгу по ссылке", "↵ · название возьму из книги");
+    return row("save", `Найти «${esc(query)}» в каталогах`, `${any ? "⌘↵" : "↵ · в библиотеке такой нет"} · появится карточка «без текста» с найденными изданиями`);
   }
+  // shells whose title is loading into a book are that book's card until the load ends
+  const shellsShown = () => wishes.filter((w) => !(w.slug && books.some((b) => b.slug === w.slug)));
   // paint() lays out what is already loaded; renderLibrary() fetches first
   function paint() {
-    stopListen();  // the rows and the player are drawn anew: a listen never outlives the row it started from
-    const draft = keepDraft();
+    // the player rides along to the redrawn row: a repaint elsewhere must not cut a listen short
+    const pl = player(); pl?.remove();
+    const draft = keepDraft(), focus = keepFocus();
     const byActivity = (a, b) => (b.at || 0) - (a.at || 0) || (a.title || "").localeCompare(b.title || "", "ru");
-    const entry = (b) => ({ at: b.state.opened || b.added || 0, title: b.title, html: cardHtml(b) });
+    const entry = (b) => ({ at: b.state.opened || b.added || 0, title: nameOf(b), html: cardHtml(b) });
     // while a query is typed everything matching sits in one list under the line, so nothing hides above it
     const hits = books.filter(matches);
     const reading = query ? [] : hits.filter((b) => shelfOf(b) === "reading").map(entry).sort(byActivity);
     const rest = [...(query ? hits : hits.filter((b) => shelfOf(b) !== "reading")).map(entry),
-      ...wishes.filter(matches).map((w) => ({ at: +w.id.slice(1) || 0, title: w.title, html: shellHtml(w) }))].sort(byActivity);
+      ...shellsShown().filter(matches).map((w) => ({ at: +w.id.slice(1) || 0, title: w.title, html: shellHtml(w) }))].sort(byActivity);
     const any = reading.length + rest.length > 0;
-    $("#lib-title").textContent = query && !any ? "В библиотеке нет" : reading.length ? "Остальные" : "Библиотека";
+    $("#lib-title").textContent = reading.length ? "Остальные" : "Библиотека";
     $("#reading-section").hidden = !reading.length;
     $("#reading-list").innerHTML = reading.map((x) => x.html).join("");
     $("#library-list").innerHTML = rest.map((x) => x.html).join("") + (query ? addRowHtml(any) : !any ? '<p class="muted small">Пока пусто. Напиши название книги в строке выше, вставь ссылку или перетащи файл.</p>' : "");
-    restoreDraft(draft);
+    markSel();
+    if (listening) {
+      const row = document.querySelector(`.cand[data-ref="${CSS.escape(listening.ref)}"]`);
+      if (row && pl) { row.classList.add("on"); const btn = row.querySelector('[data-act="listen"]'); if (btn) { btn.textContent = "■"; btn.title = "Остановить"; } row.after(pl); }
+      else stopListen();
+    }
+    if (!restoreDraft(draft)) restoreFocus(focus);
+  }
+  const matchCards = () => (query ? [...document.querySelectorAll("#library-list .card:not(.add)")] : []);
+  function markSel() {
+    const cards = matchCards();
+    sel = Math.max(0, Math.min(sel, cards.length - 1));
+    cards.forEach((c, i) => c.classList.toggle("sel", i === sel));
   }
   // a repaint (a finished job, a search coming back) must not wipe a name that is being typed.
   // The field is remembered by name: a half-typed title must not reappear in the search line.
@@ -374,33 +460,63 @@
   }
   function restoreDraft(d) {
     const el = d && document.querySelector(d.on);
-    if (!el) return;
+    if (!el) return false;
     el.value = d.value;
     if (d.focused) { el.focus(); el.setSelectionRange(d.from, d.to); }
+    return d.focused;
+  }
+  // a repaint rebuilds the cards: the keyboard stays where it was — the same button of the same card, the
+  // «no» of a question that just appeared, or the card itself when the button is gone
+  function keepFocus() {
+    const a = document.activeElement, card = a?.closest?.(".card");
+    return card && !card.classList.contains("add") ? { key: card.dataset.key, act: a.dataset.act, ref: a.closest(".cand")?.dataset.ref } : null;
+  }
+  function restoreFocus(f) {
+    const card = f && document.querySelector(`.card[data-key="${CSS.escape(f.key)}"]`);
+    if (!card) return;
+    const el = card.querySelector('[data-act="delNo"], [data-act="stopNo"], [data-act="audioNo"]')
+      || (f.ref && card.querySelector(`.cand[data-ref="${CSS.escape(f.ref)}"] [data-act="${f.act}"]`))
+      || (f.act && card.querySelector(`[data-act="${{ delNo: "del", delYes: "del", stopNo: "stopJob" }[f.act] || f.act}"]`))
+      || card.querySelector('[data-act="gear"], .tlink, [data-act]');
+    el?.focus({ preventScroll: true });
   }
   async function renderLibrary() {
     [books, wishes] = await Promise.all([fetch("/api/books").then((r) => r.json()), api("GET", "/api/wishlist").catch(() => wishes)]);
     paint();
-    // nothing to find yet: the line is the only move, but it must not grab the keyboard on its own
-    if (!books.length && !wishes.length && omniRow.hidden) showOmni(true, false);
+    // nothing to find yet: the line is the only move, so it takes the keyboard
+    if (!books.length && !wishes.length && document.activeElement === document.body) omni.focus();
     headerLine(books.filter((b) => shelfOf(b) === "reading"), books);
   }
-  omni.addEventListener("input", () => { query = omni.value.trim(); paint(); });
+  // the book picked in the line: a ready one opens, any other opens its card
+  function openPicked(card) {
+    const x = card && entryOf(card);
+    if (!x) return;
+    if (!isShell(x) && x.ready) { location.href = "?book=" + x.slug; return; }
+    clearOmni();
+    ACTIONS.gear(x).then(() => document.querySelector(`.card[data-key="${CSS.escape(idOf(x))}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+  }
+  omni.addEventListener("input", () => { query = omni.value.trim(); sel = 0; paint(); });
   omni.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { showOmni(false); return; }
+    if (e.key === "Escape") { e.stopPropagation(); const had = !!query; clearOmni(); omni.blur(); if (had) paint(); return; }
+    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && query) { e.preventDefault(); sel += e.key === "ArrowDown" ? 1 : -1; markSel(); matchCards()[sel]?.scrollIntoView({ block: "nearest" }); return; }
     if (e.key !== "Enter" || !query) return;
     e.preventDefault();
-    const any = books.some(matches) || wishes.some(matches);
+    const cards = matchCards();
     if (isUrl(query)) addByLink(query);
-    else if (!any || e.metaKey || e.ctrlKey) addTitle(query);
+    else if (!cards.length || e.metaKey || e.ctrlKey) addTitle(query);
+    else openPicked(cards[sel]);
   });
   addEventListener("keydown", (e) => {
     if (e.key === "Escape" && listening) { stopListen(); return; }  // the first Esc silences, the next closes
-    if (e.key === "Escape") { prefs.hidden = true; if (renaming || finding) { renaming = finding = null; paint(); } else if (open) { open = null; paint(); } }
-    if (e.key === "/" && !(e.target instanceof Element && e.target.matches("input, textarea, select"))) { e.preventDefault(); showOmni(true); }
+    if (e.key === "Escape") {
+      prefs.hidden = true;
+      const no = document.querySelector(".ask .no");
+      if (no) { no.click(); return; }  // a question is answered «no» before anything closes
+      if (confirmDel || confirmStop || audioConfirm) { confirmDel = confirmStop = audioConfirm = null; paint(); return; }
+      if (renaming || finding) { renaming = finding = null; paint(); } else if (open) { const was = open; closeCard(); paint(); document.querySelector(`.card[data-key="${CSS.escape(was)}"] [data-act="gear"]`)?.focus(); }
+    }
+    if (e.key === "/" && !(e.target instanceof Element && e.target.matches("input, textarea, select"))) { e.preventDefault(); omni.focus(); }
   });
-  omni.addEventListener("blur", () => { if (!query) showOmni(false); });  // opened by accident: it closes itself
-  const clearOmni = () => { omni.value = ""; query = ""; };
 
   // ---- jobs: background pipeline runs; a card shows "loading" while its job runs and the error if it fails ----
   let jobsTimer = 0, jobsRunning = false;
@@ -423,27 +539,47 @@
       await pollJobs(); return r.slug;
     } finally { adding = false; }
   }
-  const saveHits = (slug, found) => { hitsCache[slug] = found; return api("PUT", `/api/hits/${slug}`, { hits: found.hits || [], author_hits: found.author_hits || null, query: found.query || "" }).catch(() => {}); };
+  const saveHits = (slug, found) => { hitsCache[slug] = found; return api("PUT", `/api/hits/${slug}`, { hits: found.hits || [], author_hits: found.author_hits || null, query: found.query || "", unopenable: found.unopenable || 0 }).catch(() => {}); };
 
   // ---- adding: a title becomes a shell card; a link or a dropped file loads right away ----
-  async function addTitle(title) {
+  // A title typed in the line: saved as a card «без текста» that opens and asks the catalogs at once, so
+  // ↵ is the whole way from a name to its editions. The bookmarklet only saves (`search` false).
+  async function addTitle(title, search = true) {
     const have = books.find((b) => norm(b.title) === norm(title));
-    if (have) { toast(`«${have.title}» уже в библиотеке`); return; }
-    wishes = await api("POST", "/api/wishlist", { title });
-    clearOmni(); paint();
-    const w = wishes.find((x) => norm(x.title) === norm(title));
-    toast("Сохранено: " + title);
-    document.querySelector(`.card[data-key="${w?.id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (have) { toast(`«${have.title}» уже в библиотеке`); clearOmni(); paint(); return; }
+    let w = wishes.find((x) => norm(x.title) === norm(title));
+    if (w) toast(`«${w.title}» уже сохранена`);
+    else { wishes = await api("POST", "/api/wishlist", { title }); w = wishes.find((x) => norm(x.title) === norm(title)); if (!search) toast("Сохранено: " + title); }
+    clearOmni();
+    if (!w) { paint(); return; }
+    if (!search) paint();
+    else if (w.searched && openableCount(w)) await ACTIONS.gear(w);
+    else await ACTIONS.find(w);
+    document.querySelector(`.card[data-key="${CSS.escape(w.id)}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
   async function addByLink(url) {
     if (await startAdd({ text_url: url })) { clearOmni(); renderLibrary(); }  // the card shows up loading, that is the message
   }
   async function addByFile(file) {
-    if (await startAdd({ title: file.name.replace(/\.(fb2\.zip|zip|fb2|epub|txt|html?)$/i, ""), text_file: file })) renderLibrary();
+    if (await startAdd({ title: file.name.replace(/\.(fb2\.zip|zip|fb2|epub|pdf|txt|html?)$/i, ""), text_file: file })) renderLibrary();
   }
   ["dragenter", "dragover"].forEach((ev) => addEventListener(ev, (e) => { if (e.dataTransfer?.types.includes("Files")) { e.preventDefault(); document.body.classList.add("dropping"); } }));
   ["dragleave", "drop"].forEach((ev) => addEventListener(ev, (e) => { if (ev === "drop" || e.relatedTarget == null) document.body.classList.remove("dropping"); }));
-  addEventListener("drop", (e) => { if (!e.dataTransfer?.files?.length || e.target.closest(".card.open")) return; e.preventDefault(); [...e.dataTransfer.files].forEach(addByFile); });
+  // a file dropped on an open card fills its own «или файл» (text or audio by its type); anywhere else every
+  // file becomes a book, one after another (one /api/add at a time)
+  addEventListener("drop", async (e) => {
+    if (!e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    const files = [...e.dataTransfer.files], card = e.target instanceof Element && e.target.closest(".card.open");
+    if (card) {
+      const input = card.querySelector(files[0].type.startsWith("audio/") ? "[name=audio_file]" : "[name=text_file]");
+      if (!input) return;
+      const dt = new DataTransfer(); dt.items.add(files[0]); input.files = dt.files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+    for (const f of files) await addByFile(f);
+  });
 
   // ---- library search for a card: the result stays with it (wishlist item or hits.json) ----
   function stopSearch(x) {
@@ -482,10 +618,14 @@
       const any = res.hits.length || res.author?.hits?.length;
       const said = [res.note, failedNote].filter(Boolean).join(" · ");
       // nothing found while a library was down is not "no such book": say what happened instead
+      const retry = '<button class="link-btn" data-act="find">повторить</button>';
+      const shut = res.unopenable || 0;
       state = any
-        ? (said ? (failedNote ? { status: esc(said) } : { note: esc(said) }) : null)
-        : { status: esc(failedNote ? `${failedNote}, попробуй ещё раз` : `не нашлось в ${SOURCES_LABEL}`) };
-      const found = { hits: res.hits, author_hits: res.author, query };  // the query stays with the card, to search again from
+        ? (said ? (failedNote ? { status: esc(said) + retry } : { note: esc(said) }) : null)
+        : shut ? null  // the rows say «нашлось, но только в форматах, которые не открыть»
+        : failed.length ? { status: esc(`не нашлось в ${SOURCES_N - failed.length} из ${SOURCES_N} каталогов; ${failedNote}`) + retry }
+        : { status: `не нашлось ни в одном из ${SOURCES_N} каталогов` };
+      const found = { hits: res.hits, author_hits: res.author, query, unopenable: shut };  // the query stays with the card, to search again from
       if (searching.get(id) === state0) {
         if (isShell(x)) wishes = await api("PUT", "/api/wishlist/" + x.id, { ...found, searched: today() }).catch(() => wishes);
         else await saveHits(x.slug, found);
@@ -497,7 +637,7 @@
   }
   // the rename and search fields belong to the card they were opened on: they close with it, or the
   // next card to open shows a field for a name nobody is editing
-  const closeCard = () => { open = renaming = finding = audioConfirm = null; stopListen(); };
+  const closeCard = () => { open = renaming = finding = audioConfirm = confirmDel = null; stopListen(); };
   // load a picked edition or an own link/file: a shell becomes the book, a ready book gets its text replaced
   async function loadText(x, fields) {
     // the catalog names the book: a picked edition brings its own title, an own file keeps the card's
@@ -506,7 +646,9 @@
     const s = await startAdd(fields);
     if (!s) return;
     closeCard();
-    if (isShell(x)) { await saveHits(s, { hits: x.hits, author_hits: x.author_hits, query: queryOf(x) }); searching.delete(x.id); await api("DELETE", "/api/wishlist/" + x.id).catch(() => {}); }
+    // the title stays, tied to the book it loads into: the server lets it go once the load succeeds, and
+    // a load called off or failed shows it again with its editions
+    if (isShell(x)) { await saveHits(s, { hits: x.hits, author_hits: x.author_hits, query: queryOf(x), unopenable: x.unopenable }); searching.delete(x.id); await api("PUT", "/api/wishlist/" + x.id, { slug: s }).catch(() => {}); }
     renderLibrary();
   }
   const entryOf = (card) => books.find((b) => b.slug === card.dataset.key) || wishes.find((w) => w.id === card.dataset.key);
@@ -515,8 +657,8 @@
   const ACTIONS = {
     link: () => addByLink(query),
     save: () => addTitle(query),
-    read: async (x) => { await api("PUT", `/api/state/${x.slug}`, { shelf: "reading", shelfAt: Date.now() }); renderLibrary(); },
-    pause: async (x) => { await api("PUT", `/api/state/${x.slug}`, { shelf: "library", shelfAt: Date.now() }); renderLibrary(); },
+    // the shelf is said in words in the open card; ▶ is only ever «open the book»
+    shelf: async (x) => { await api("PUT", `/api/state/${x.slug}`, { shelf: shelfOf(x) === "reading" ? "library" : "reading", shelfAt: Date.now() }); renderLibrary(); },
     gear: async (x) => {
       const to = open === idOf(x) ? null : idOf(x);
       closeCard();
@@ -572,22 +714,39 @@
       if (query) searchFor(x, query);
     },
     stop: (x) => { stopSearch(x); },
-    stopJob: async (x) => {
+    // calling a load off is asked first: an alignment or a long recording may be hours in
+    stopJob: (x) => { confirmStop = x.slug; paint(); },
+    stopNo: () => { confirmStop = null; paint(); },
+    stopYes: async (x) => {
+      confirmStop = null;
       const r = await api("DELETE", "/api/jobs/" + x.slug).catch((err) => ({ error: String(err) }));
-      if (r.error === "not found") toast("Этот сервер ещё не умеет отменять загрузку, перезапусти его");
-      else if (r.error) toast("Не вышло отменить: " + r.error);
-      else delete jobs[x.slug];
+      if (r.error) toast("Не вышло отменить: " + r.error);
+      else { delete jobs[x.slug]; toast("Загрузка отменена"); }
       renderLibrary();
+    },
+    // a failure is on record until it is dismissed (the server keeps the job's log across restarts)
+    dismiss: async (x) => { await api("DELETE", "/api/jobs/" + x.slug).catch(() => {}); delete jobs[x.slug]; renderLibrary(); },
+    // the edition did not open: back to the list of editions. A new book goes, so its title shows again
+    // «без текста» with what was found; a ready book keeps its text and opens its card on the list
+    otherEdition: async (x) => {
+      const shell = shellOf(x);
+      if (!x.ready) { await api("DELETE", "/api/books/" + x.slug).catch(() => {}); delete jobs[x.slug]; }
+      else await api("DELETE", "/api/jobs/" + x.slug).catch(() => {});
+      await renderLibrary();
+      const to = !x.ready && shell ? wishes.find((w) => w.id === shell.id) : books.find((b) => b.slug === x.slug);
+      if (to) { open = null; await ACTIONS.gear(to); }
     },
     pick: (x, btn) => {
       const h = JSON.parse(btn.dataset.hit);
-      loadText(x, { title: h.title, author: h.author, translator: h.translator, year: h.year, narrator: h.narrator, text_url: h.urls.join("\n"), audio_url: isShell(x) ? h.audio || "" : "" });
+      const run = () => loadText(x, { title: h.title, author: h.author, translator: h.translator, year: h.year, narrator: h.narrator, text_url: h.urls.join("\n"), audio_url: isShell(x) ? h.audio || "" : "" });
+      if (!isShell(x) && x.ready) askInPlace(btn, "текст заменится, место в режиме страниц начнётся сначала —", "заменить", run); else run();
     },
     own: (x, btn) => {
       const row = btn.closest(".own"), url = row.querySelector("[name=text_url]").value.trim(), file = row.querySelector("[name=text_file]").files[0];
       if (!url && !file) { toast("Нужна ссылка на текст или файл"); return; }
       if (url && !isUrl(url)) { toast("Ссылка должна начинаться с http(s)"); return; }
-      loadText(x, { text_url: url, text_file: file });
+      const run = () => loadText(x, { text_url: url, text_file: file });
+      if (!isShell(x) && x.ready) askInPlace(btn, "текст заменится, место в режиме страниц начнётся сначала —", "заменить", run); else run();
     },
     audioGo: async (x, btn) => {
       const row = btn.closest(".own"), urls = row.querySelector("[name=audio_url]").value.trim().split(/\s+/).filter(Boolean).join("\n"), file = row.querySelector("[name=audio_file]").files[0];
@@ -628,7 +787,20 @@
       if (r.error) toast("Ошибка: " + r.error); else { closeCard(); toast("Точное выравнивание запущено, это долго"); pollJobs(); renderLibrary(); }
     },
   };
+  // a question asked where the button was, without a repaint: what was typed or chosen in the card stays
+  function askInPlace(btn, question, yes, run) {
+    const ask = document.createElement("span");
+    ask.className = "ask";
+    ask.innerHTML = `${esc(question)} <button type="button" class="yes">${esc(yes)}</button> <button type="button" class="no">отмена</button>`;
+    btn.replaceWith(ask);
+    ask.querySelector(".yes").onclick = (e) => { e.stopPropagation(); ask.replaceWith(btn); run(); };
+    ask.querySelector(".no").onclick = (e) => { e.stopPropagation(); ask.replaceWith(btn); btn.focus(); };
+    ask.querySelector(".no").focus();
+  }
   $("#library").addEventListener("click", (e) => {
+    // the listening bar seeks where it is clicked
+    const bar = e.target.closest(".lbar");
+    if (bar && listening && isFinite(listenEl.duration)) { const r = bar.getBoundingClientRect(); listenEl.currentTime = ((e.clientX - r.left) / r.width) * listenEl.duration; return; }
     const btn = e.target.closest("[data-act]");
     if (!btn) return;
     const card = btn.closest(".card");
@@ -637,6 +809,7 @@
   });
   $("#library").addEventListener("keydown", (e) => {
     if (!(e.target instanceof Element)) return;
+    if (e.target.matches(".card.add") && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); e.target.click(); return; }
     if (e.target.classList.contains("afind-input")) {
       if (e.key === "Enter") { e.preventDefault(); e.target.closest(".afind")?.querySelector('[data-act="findAudioGo"]')?.click(); }
       return;
@@ -660,6 +833,6 @@
     const wishParam = new URLSearchParams(location.search).get("wish");
     if (!wishParam) return;
     history.replaceState(null, "", location.pathname);
-    addTitle(wishParam.replace(/\s+[-–—|].*$/, "").trim() || wishParam);
+    addTitle(wishParam.replace(/\s+[-–—|].*$/, "").trim() || wishParam, false);
   });
 })();

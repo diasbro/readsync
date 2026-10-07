@@ -37,21 +37,20 @@
     <div class="demo" aria-hidden="true"><span class="demo-line" id="demo-line"></span></div>
   </header>
 
+  <!-- one line above every shelf: it filters the library as it is typed, ↵ adds what the library lacks -->
+  <div class="omni" id="omni">
+    <span class="glyph" aria-hidden="true">⌕</span>
+    <input id="omni-input" placeholder="Найти в библиотеке или добавить книгу" aria-label="Найти в библиотеке или добавить книгу (/)" autocomplete="off" spellcheck="false">
+    <kbd class="k-rest" title="Нажми / из любого места">/</kbd><kbd class="k-on">esc</kbd>
+  </div>
+
   <section class="lib-section" id="reading-section" hidden>
     <h2>Читаю сейчас</h2>
     <div id="reading-list" class="lib-grid"></div>
   </section>
 
   <section class="lib-section">
-    <div class="sec-head">
-      <h2 id="lib-title">Библиотека</h2>
-      <button class="glyph" id="omni-open" title="Найти или добавить (/)" aria-label="Найти или добавить">⌕</button>
-    </div>
-    <div class="omni" id="omni" hidden>
-      <span class="glyph" aria-hidden="true">⌕</span>
-      <input id="omni-input" placeholder="Найти или добавить" autocomplete="off" spellcheck="false">
-      <kbd>esc</kbd>
-    </div>
+    <h2 id="lib-title">Библиотека</h2>
     <div id="library-list" class="lib-grid"></div>
   </section>
   <audio id="listen" preload="none"></audio>

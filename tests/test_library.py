@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -182,3 +183,134 @@ def test_an_audiobook_read_as_pages_counts_its_page(tmp_path, monkeypatch):
     state = {b["slug"]: b["state"] for b in library.list_books()}
     assert state["listened"]["finished"] and state["listened"]["mode"] == "audio"
     assert state["read"]["finished"] and state["read"]["mode"] == "pages"
+
+
+def wait_job(slug: str, timeout: float = 10.0) -> None:
+    proc = library.JOBS[slug]["proc"]
+    proc.wait(timeout=timeout)
+
+
+def fake_job(tmp_path: Path, body: str) -> list[str]:
+    script = tmp_path / "job.py"
+    script.write_text(textwrap.dedent(body), encoding="utf-8")
+    return [sys.executable, str(script)]
+
+
+def test_a_failure_and_its_reason_outlive_the_server(tmp_path, monkeypatch):
+    """The job writes its exit code to its log: a server started later still says why it failed."""
+    monkeypatch.setattr(library, "BOOKS", tmp_path / "books")
+    (tmp_path / "books" / "b").mkdir(parents=True)
+    library.launch("b", fake_job(tmp_path, 'import sys\nprint("часть 1/2")\nsys.exit("в файле всего 25 слов")\n'))
+    wait_job("b")
+    library.JOBS.clear()  # a restart: nothing in memory
+
+    st = library.job_status()["b"]
+
+    assert st["running"] is False and st["exit"] == 1
+    assert st["log"][-1] == "в файле всего 25 слов"
+    assert (tmp_path / "books" / "b" / "add.log").exists()  # kept until the reader dismisses it
+    library.stop_job("b")  # the dismissal
+    assert not (tmp_path / "books" / "b" / "add.log").exists()
+    assert "b" not in library.job_status()
+
+
+def test_a_job_that_succeeded_unseen_lets_go_of_its_log_and_its_title(tmp_path, monkeypatch):
+    books = tmp_path / "books"
+    monkeypatch.setattr(library, "BOOKS", books)
+    monkeypatch.setattr(library, "WISHLIST_FILE", books / "wishlist.json")
+    (books / "b").mkdir(parents=True)
+    (books / "wishlist.json").write_text(
+        json.dumps([{"id": "w1", "title": "B", "slug": "b"}, {"id": "w2", "title": "C"}]), encoding="utf-8"
+    )
+    library.launch("b", fake_job(tmp_path, 'print("размечаю")\n'))
+    wait_job("b")
+    library.JOBS.clear()
+
+    st = library.job_status()["b"]
+
+    assert st["exit"] == 0
+    assert not (books / "b" / "add.log").exists()
+    assert [w["id"] for w in library.load_wishlist()] == ["w2"]
+
+
+def test_a_job_left_by_an_earlier_server_is_still_running_and_can_be_stopped(tmp_path, monkeypatch, work_root):
+    """It holds its work dir: the card says «загружается», a second load is refused, and a stop reaches it."""
+    books = tmp_path / "books"
+    monkeypatch.setattr(library, "BOOKS", books)
+    (books / "b").mkdir(parents=True)
+    (books / "b" / "book.toml").write_text('title = "Бэ"\n', encoding="utf-8")
+    cmd = fake_job(
+        tmp_path,
+        """
+        import os, sys, time
+        from pathlib import Path
+        w = Path(os.environ["READSYNC_WORK"]) / "b"
+        w.mkdir(parents=True)
+        (w / "pid").write_text(str(os.getpid()))
+        print("часть 3/12", flush=True)
+        time.sleep(60)
+        """,
+    )
+    library.launch("b", cmd)
+    proc = library.JOBS.pop("b")["proc"]  # the server that started it is gone
+    threading.Thread(target=proc.wait, daemon=True).start()  # reaped as launchd would reap it
+    try:
+        deadline = time.monotonic() + 10
+        while not (work_root / "b" / "pid").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2)
+
+        st = library.job_status()["b"]
+        assert st["running"] is True and st["stage"] == "часть 3/12"
+        assert library.list_books()[0]["building"] is True
+        job, err = library.start_job({"slug": {"value": "b"}, "text_url": {"value": "https://example.org/b"}})
+        assert job is None and err == "«Бэ» уже загружается"
+
+        library.stop_job("b")
+
+        assert proc.wait(timeout=15) is not None
+        assert not (books / "b").exists()  # a new book called off goes altogether
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, 9)
+            proc.wait()
+
+
+def test_a_job_that_died_with_the_mac_reads_as_cut_short(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "add.log").write_text("+ yt-dlp …\nчасть 2/9\n", encoding="utf-8")
+
+    st = library.job_status()["b"]
+
+    assert st == {**st, "running": False, "exit": -1}
+    assert st["log"][-1] == "оборвалась: часть 2/9"
+
+
+def test_a_ready_book_called_off_keeps_its_text(tmp_path, monkeypatch, work_root):
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "book.json").write_text("{}", encoding="utf-8")
+    library.launch("b", fake_job(tmp_path, "import time\ntime.sleep(60)\n"))
+
+    library.stop_job("b")
+
+    assert sorted(p.name for p in (tmp_path / "b").iterdir()) == ["book.json"]
+
+
+def test_a_book_added_by_link_takes_its_own_title(tmp_path, monkeypatch):
+    """The stub names no title: add_book keeps a title it finds in book.toml, and the slug is not one."""
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: None)
+
+    job, err = library.start_job({"text_url": {"value": "https://fantasy-worlds.net/lib/id26447/"}})
+
+    assert err == ""
+    assert "title" not in (tmp_path / job["slug"] / "book.toml").read_text(encoding="utf-8")
+
+
+def test_hits_keep_the_count_of_unopenable_editions(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    (tmp_path / "b").mkdir()
+    library.save_hits("b", {"hits": [], "unopenable": 3, "query": "b"})
+    assert json.loads((tmp_path / "b" / "hits.json").read_text(encoding="utf-8"))["unopenable"] == 3

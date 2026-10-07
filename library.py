@@ -137,8 +137,7 @@ def list_books() -> list[dict]:
         meta["ready"] = (d / "book.json").exists()
         meta["audio"] = next((f.name for f in (d / "audio.m4a", d / "audio.mp3", d / "yt.webm") if f.exists()), None)
         meta["has_audio"] = bool(meta["audio"]) and (d / "timing.json").exists()
-        job = JOBS.get(d.name)
-        meta["building"] = bool(job and job["proc"].poll() is None)
+        meta["building"] = job_running(d.name)
         meta["added"] = int(toml.stat().st_mtime * 1000)
         meta["has_hits"] = (d / "hits.json").exists()
         cover = (
@@ -219,8 +218,10 @@ def save_wishlist(items: list[dict]) -> None:
     os.replace(tmp, WISHLIST_FILE)
 
 
-WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url", "searched", "query")
-WISH_JSON = ("hits", "author_hits")  # the last search result stays with the title until it is loaded
+# `slug`: the book a picked edition is loading into. The title stays until that job succeeds, so a
+# load called off or failed leaves the card «без текста» with its editions, as it was
+WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url", "searched", "query", "slug")
+WISH_JSON = ("hits", "author_hits", "unopenable")  # the last search result stays with the title until it is loaded
 
 
 def wishlist_add(data: dict) -> list[dict]:
@@ -264,6 +265,15 @@ def wishlist_delete(wid: str) -> list[dict]:
         return items
 
 
+def wishlist_loaded(slug: str) -> None:
+    """The book a saved title was loading into is there: the title has done its job."""
+    with STATE_LOCK:
+        items = load_wishlist()
+        keep = [i for i in items if i.get("slug") != slug]
+        if len(keep) != len(items):
+            save_wishlist(keep)
+
+
 def save_hits(slug: str, data: dict) -> None:
     """The search result a book was picked from stays next to it, so another edition is one click away."""
     if not SLUG_RE.match(slug) or not (BOOKS / slug).is_dir():
@@ -274,6 +284,7 @@ def save_hits(slug: str, data: dict) -> None:
                 "hits": data.get("hits") or [],
                 "author_hits": data.get("author_hits"),
                 "query": str(data.get("query") or ""),  # what was asked for, to search again from
+                "unopenable": int(data.get("unopenable") or 0),  # found, but only in formats that do not open
             },
             ensure_ascii=False,
         ),
@@ -321,8 +332,7 @@ def delete_book(slug: str) -> None:
     d = BOOKS / slug
     if not SLUG_RE.match(slug) or not d.is_dir():
         raise ValueError("книга не существует")
-    job = JOBS.get(slug)
-    if job and job["proc"].poll() is None:
+    if job_running(slug):
         raise ValueError("книга ещё загружается")
     with STATE_LOCK:
         shutil.rmtree(d)
@@ -469,7 +479,7 @@ def start_job(form: dict) -> tuple[dict | None, str]:
     title = val("title")
     slug = val("slug") or (slugify(title) if title else slug_from_source(form_values(form, "text_url")))
     if not SLUG_RE.match(slug):
-        return None, "bad slug"
+        return None, "не вышло назвать папку книги"
     audio_ref = val("audio_ref")
     if audio_ref:  # a recording found by the audio search: the pipeline resolves its parts itself
         try:
@@ -479,15 +489,15 @@ def start_job(form: dict) -> tuple[dict | None, str]:
         if form_values(form, "audio_url") or (form.get("audio_file") or {}).get("filename"):
             return None, "либо найденная озвучка, либо своя ссылка или файл"
     d = BOOKS / slug
-    if slug in JOBS and JOBS[slug]["proc"].poll() is None:
-        return None, f"книга {slug} уже загружается"
+    if job_running(slug):
+        return None, f"«{title_of(slug)}» уже загружается"
     texts = form_values(form, "text_url")
     tf = form.get("text_file")
     has_file = bool(tf and tf.get("filename") and tf["data"])
     attach_audio = (d / "book.json").exists() and not texts and not has_file
     replace = (d / "book.json").exists() and not attach_audio and val("replace") == "1"
     if (d / "book.json").exists() and not attach_audio and not replace:
-        return None, f"книга {slug} уже есть"
+        return None, f"«{title_of(slug)}» уже есть в библиотеке"
     d.mkdir(parents=True, exist_ok=True)
     if has_file:
         fname = "upload_" + re.sub(r"[^\w.-]+", "_", tf["filename"])
@@ -540,17 +550,58 @@ def start_job(form: dict) -> tuple[dict | None, str]:
         state.forget_sent(d)
     if not (d / "book.toml").exists():  # a stub so the card shows up as "loading" right away; add_book fills it in
         esc_ = lambda v: str(v).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
-        stub = {"slug": slug, "title": title or slug, "author": val("author")}
+        # no title of our own for a link: add_book keeps a title it finds here, and the book's is the one wanted
+        stub = {"slug": slug, "title": title, "author": val("author")}
         (d / "book.toml").write_text("".join(f'{k} = "{esc_(v)}"\n' for k, v in stub.items() if v), encoding="utf-8")
     launch(slug, cmd)
     return {"slug": slug}, ""
 
 
+# the job's exit code, written at the end of its log by the shell that runs it: the server may be gone (an
+# update, a restart, the iCloud switch) when the job ends, and the card must still know how it went
+EXIT_MARK = "readsync: exit "
+EXIT_RE = re.compile(r"readsync: exit (\d+)")
+
+
 def launch(slug: str, cmd: list[str]) -> None:
-    """A job runs in a process group of its own, so a stop reaches yt-dlp, ffmpeg and the aligner too."""
+    """A job runs in a process group of its own, so a stop reaches yt-dlp, ffmpeg and the aligner too.
+    It outlives the server; its log (add.log) stays until it succeeds or the reader dismisses the failure."""
+    wrapped = ["/bin/sh", "-c", f'"$@"; code=$?; echo "{EXIT_MARK}$code"; exit $code', "sh", *cmd]
     with open(BOOKS / slug / "add.log", "w", encoding="utf-8") as log:  # the child inherits it; ours closes here
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT, start_new_session=True)
+        proc = subprocess.Popen(wrapped, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT, start_new_session=True)
     JOBS[slug] = {"proc": proc, "started": time.time(), "slug": slug}
+
+
+def _holder(slug: str) -> int | None:
+    """The pid of a live job that claimed this book's work dir, whichever server (or shell) started it."""
+    if not SLUG_RE.match(slug):
+        return None
+    _pipeline()
+    from tidy import held, work_dir
+
+    w = work_dir(slug)
+    if not held(w):
+        return None
+    try:
+        return int((w / "pid").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def job_running(slug: str) -> bool:
+    """A job is loading this book: one this server started, or one an earlier server left running."""
+    job = JOBS.get(slug)
+    if job and job["proc"].poll() is None:
+        return True
+    return _holder(slug) is not None
+
+
+def title_of(slug: str) -> str:
+    """The book's title for a message, its folder name when it has none yet."""
+    try:
+        return tomllib.loads((BOOKS / slug / "book.toml").read_text(encoding="utf-8")).get("title") or slug
+    except (OSError, ValueError):
+        return slug
 
 
 def _group_alive(pgid: int) -> bool:
@@ -563,33 +614,54 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
-def kill_group(proc: subprocess.Popen, grace: float = 10.0) -> None:
-    """SIGTERM to the whole group (the job unwinds and tidies), SIGKILL to whatever is left after `grace`."""
-    pgid = proc.pid  # start_new_session: the job leads its own group
+def kill_group(pgid: int, proc: subprocess.Popen | None = None, grace: float = 10.0) -> None:
+    """SIGTERM to the whole group (the job unwinds and tidies), SIGKILL to whatever is left after `grace`.
+    `proc` is the leader when this server started the job, to reap it."""
     with contextlib.suppress(ProcessLookupError):
         os.killpg(pgid, signal.SIGTERM)
     deadline = time.monotonic() + grace
-    while time.monotonic() < deadline and (proc.poll() is None or _group_alive(pgid)):
+    while time.monotonic() < deadline and ((proc is not None and proc.poll() is None) or _group_alive(pgid)):
         time.sleep(0.1)
-    with contextlib.suppress(ProcessLookupError):
+    with contextlib.suppress(ProcessLookupError, PermissionError):  # EPERM: only an unreaped leader is left
         os.killpg(pgid, signal.SIGKILL)
-    proc.wait()
+    if proc is not None:
+        proc.wait()
 
 
 def stop_job(slug: str) -> None:
     """Called off by the reader: the pipeline is stopped and what it half-downloaded is thrown away.
-    A book that was already there keeps its text; a new one keeps its card, with no text yet."""
-    job = JOBS.get(slug)
-    if not SLUG_RE.match(slug) or not job or job["proc"].poll() is not None:
+    A book that was already there keeps its text; a new one goes altogether, so the title it was loading
+    for is «без текста» again. A job that is over has nothing to stop: its failure is dismissed (the log goes)."""
+    if not SLUG_RE.match(slug):
         raise ValueError("нечего останавливать")
-    kill_group(job["proc"])
+    d = BOOKS / slug
+    job = JOBS.get(slug)
+    pid = _holder(slug)
+    if job and job["proc"].poll() is None:
+        kill_group(job["proc"].pid, job["proc"])  # start_new_session: the job leads its own group
+    elif pid is not None:  # started by an earlier server: its group is found from the pid it left
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            pgid = 0
+        if pgid and pgid != os.getpgrp():
+            kill_group(pgid)
+    elif (d / "add.log").exists():
+        JOBS.pop(slug, None)
+        (d / "add.log").unlink()
+        return
+    else:
+        raise ValueError("нечего останавливать")
     JOBS.pop(slug, None)  # called off on purpose: the card must not report it as a failure
     _pipeline()
     from tidy import tidy, work_dir
 
     shutil.rmtree(work_dir(slug), ignore_errors=True)
-    if (BOOKS / slug).is_dir():
-        tidy(BOOKS / slug)
+    if not (d / "book.json").exists():
+        shutil.rmtree(d, ignore_errors=True)
+    elif d.is_dir():
+        (d / "add.log").unlink(missing_ok=True)
+        tidy(d)
 
 
 def start_align(slug: str) -> tuple[dict | None, str]:
@@ -597,7 +669,7 @@ def start_align(slug: str) -> tuple[dict | None, str]:
     d = BOOKS / slug
     if not SLUG_RE.match(slug) or not (d / "timing.json").exists():
         return None, "у книги нет аудио"
-    if slug in JOBS and JOBS[slug]["proc"].poll() is None:
+    if job_running(slug):
         return None, "книга ещё загружается"
     py = str(PIPELINE_PY) if PIPELINE_PY.exists() else sys.executable
     launch(slug, [py, str(ROOT / "pipeline" / "align.py"), str(d)])
@@ -605,18 +677,37 @@ def start_align(slug: str) -> tuple[dict | None, str]:
 
 
 def job_status() -> dict:
+    """Every job the library knows: running (here or left by an earlier server), or over with its log
+    still on disk. The log is the record: a restart forgets neither a running job nor why one failed.
+    `stage` is the step a running job is at, as the pipeline says it («часть 3/12», «размечаю»)."""
     out = {}
-    for slug, j in JOBS.items():
-        code = j["proc"].poll()
+    for slug in sorted(set(JOBS) | {p.parent.name for p in BOOKS.glob("*/add.log")}):
+        if not SLUG_RE.match(slug):
+            continue
+        j = JOBS.get(slug)
+        path = BOOKS / slug / "add.log"
         try:
-            log = (BOOKS / slug / "add.log").read_text(encoding="utf-8", errors="replace")
+            log = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             log = ""
-        lines = [ln for ln in log.splitlines() if ln.strip() and "warning" not in ln.lower()]
+        raw = [ln for ln in log.splitlines() if ln.strip()]
+        marked = next((int(m.group(1)) for ln in reversed(raw) if (m := EXIT_RE.fullmatch(ln.strip()))), None)
+        code = j["proc"].poll() if j else None
+        running = (j is not None and code is None) or _holder(slug) is not None
+        if running:
+            code = None
+        elif code is None:
+            code = marked if marked is not None else -1  # no code at all: the job died with the Mac or was killed
+        lines = [ln for ln in raw if "warning" not in ln.lower() and not ln.startswith(EXIT_MARK)]
         # the last plain line, not the traceback frames: that is what the card shows
         tail = [ln for ln in lines if not ln.startswith(("  ", "Traceback", "+ ")) and "CalledProcessError" not in ln]
         lines = tail or lines
-        if code == 0:  # a finished job has nothing left to say: its log goes with it
-            (BOOKS / slug / "add.log").unlink(missing_ok=True)
-        out[slug] = {"running": code is None, "exit": code, "log": lines[-6:], "started": j["started"]}
+        if code == -1:
+            lines = [*lines[:-1], f"оборвалась: {lines[-1]}"] if lines else ["загрузка оборвалась"]
+        started = j["started"] if j else (path.stat().st_mtime if log else 0)
+        if code == 0 and log:  # a finished job has nothing left to say: its log goes, and the title it was for
+            path.unlink(missing_ok=True)
+            wishlist_loaded(slug)
+        stage = next((ln for ln in reversed(lines) if re.search("[А-Яа-яЁё]", ln)), "") if running else ""
+        out[slug] = {"running": running, "exit": code, "log": lines[-6:], "stage": stage, "started": started}
     return out
