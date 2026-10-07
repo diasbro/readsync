@@ -60,6 +60,7 @@ final class Player: NSObject, ObservableObject {
     private var pagesOn = false  // the reader shows pages: the lock screen must not start the narrator under them
     private var rate: Float = 1
     private var lastSave: Task<Void, Never>?
+    private var autoplay: String?  // «Слушать» in the library: this book plays once it is loaded and in place
 
     /// Wait for the last position write and the reader's own writes: the library reads them right after a
     /// book is closed.
@@ -70,6 +71,27 @@ final class Player: NSObject, ObservableObject {
 
     /// The book the narrator is loaded with.
     var slug: String? { book?.slug }
+
+    /// The book open in the reader now, audio or not.
+    var pageSlug: String? { web == nil ? nil : webSlug }
+
+    /// «Слушать»: the narrator starts as soon as the reader has the book loaded, from its saved place.
+    func playWhenOpened(_ slug: String) {
+        if book?.slug == slug, !pagesOn { return play() }
+        autoplay = slug
+    }
+
+    /// The asked-for start, once the item can play and the saved place is known.
+    private func startIfAsked() {
+        guard let book, autoplay == book.slug, stateLoaded, !pagesOn, let player,
+            player.currentItem?.status == .readyToPlay
+        else { return }
+        autoplay = nil
+        let d = player.currentItem?.duration.seconds.finite ?? 0
+        if storedPos.t > 0, d == 0 || storedPos.t < d - 5 { seek(storedPos.t, chosen: false) }
+        reattached = true  // the place is put: the page's own restore of it would only jump back
+        play(rewind: false)
+    }
 
     /// The reader's page for `slug` is on screen and hears the narrator from now on.
     func attach(_ web: WKWebView, slug: String) {
@@ -84,6 +106,7 @@ final class Player: NSObject, ObservableObject {
     /// The reader is closed: the narrator stays as it was, and its place is saved for the library to read.
     /// One the reader left under pages was never listened to and goes.
     func readerClosed(_ slug: String) {
+        autoplay = nil
         if slug == book?.slug, pagesOn { return stop() }
         savePosition()
     }
@@ -110,7 +133,9 @@ final class Player: NSObject, ObservableObject {
             if !chosen, reattached { return emit("seeked") }
             seek(ReadingState.num(msg["t"]), chosen: chosen)
         case "rate": setRate(Float(ReadingState.num(msg["rate"])))
-        case "pages": pagesOn = (msg["on"] as? Bool) ?? false
+        case "pages":
+            pagesOn = (msg["on"] as? Bool) ?? false
+            if pagesOn { autoplay = nil }
         default: break
         }
     }
@@ -130,6 +155,7 @@ final class Player: NSObject, ObservableObject {
             return emit("error", error: "нет аудио", toAnyPage: true)
         }
         stop()  // the last book's place, words and session go with it
+        if autoplay != book.slug { autoplay = nil }
         let gen = itemGen
         self.src = src
         self.book = book
@@ -145,6 +171,7 @@ final class Player: NSObject, ObservableObject {
                 p.words = words
                 p.storedPos = (ReadingState.num(merged["pos"]), ReadingState.num(merged["posAt"]))
                 p.stateLoaded = true
+                p.startIfAsked()
                 // it began to play before the words were known: the session starts now, from where it is
                 if p.sessionStart == nil, p.isPlaying, !words.starts.isEmpty { p.sessionStart = (Date(), p.wordIndex(p.time)) }
                 p.tick()
@@ -200,6 +227,7 @@ final class Player: NSObject, ObservableObject {
                 pendingSeek = nil
                 seek(t, chosen: false)
             }
+            startIfAsked()
             emit("loadedmetadata")
             tick()
         } else if status == .failed {

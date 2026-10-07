@@ -5,6 +5,8 @@ options:
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
+  # the app speaks Russian: system panels (the folder picker), sizes and dates follow it
+  developmentLanguage: ru
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -43,6 +45,7 @@ targets:
       path: Info.plist
       properties:
         UIBackgroundModes: [audio]
+        CFBundleLocalizations: [ru]
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
   ReadsyncTests:

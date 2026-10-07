@@ -102,6 +102,76 @@ final class ShelfTests: XCTestCase {
         XCTAssertEqual(Shelf.readToDrop([:], local: local, loaded: nil, now: now), [])
     }
 
+    func testToSync() {
+        let book = { (slug: String) in Book(slug: slug, toml: "edition = \"e1\"\nfiles = \"book.json:5\"") }
+        let books = ["absent", "failed", "outdated", "here", "text", "fetching", "taken-off", "loaded", "open"].map(book)
+        let copies: [String: Copy] = [
+            "failed": .failed("x"), "outdated": .outdated, "here": .here, "text": .textOnly, "fetching": .fetching(0.5),
+            "taken-off": .absent, "loaded": .outdated, "open": .outdated,
+        ]
+        let picked = Shelf.toSync(books, copies: copies, skip: ["taken-off"], busy: ["loaded", "open"]).map(\.slug)
+        XCTAssertEqual(picked, ["absent", "failed", "outdated"])
+        // nothing busy: the held-back updates come in too
+        XCTAssertEqual(
+            Shelf.toSync(books, copies: copies, skip: ["taken-off"], busy: []).map(\.slug),
+            ["absent", "failed", "outdated", "loaded", "open"])
+        // a book taken off is left even once it is out of date or failed
+        XCTAssertEqual(Shelf.toSync([book("x")], copies: ["x": .failed("y")], skip: ["x"], busy: []), [])
+        XCTAssertEqual(Shelf.toSync([book("x")], copies: ["x": .outdated], skip: ["x"], busy: []), [])
+    }
+
+    @MainActor
+    func testRemovedHereIsNotSynced() throws {
+        let name = "readsync-tests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer {
+            defaults.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: URL.libraryDirectory.appending(path: "Preferences/\(name).plist"))
+        }
+        let shelf = Shelf(defaults: defaults)
+        let slug = "zz-test-\(UUID().uuidString)", other = "zz-test-\(UUID().uuidString)"
+        shelf.inLibrary = [slug]
+        shelf.removeHere(slug)
+        XCTAssertEqual(shelf.skip, [slug])
+        // a copy of a book the library no longer has leaves nothing to skip
+        shelf.removeHere(other)
+        XCTAssertEqual(shelf.skip, [slug])
+        // kept across launches
+        XCTAssertEqual(Shelf(defaults: defaults).skip, [slug])
+        let book = Book(slug: slug, toml: "files = \"book.json:5\"")
+        XCTAssertEqual(Shelf.toSync([book], copies: [:], skip: shelf.skip, busy: []), [])
+        // «Синхронизация» is on unless switched off
+        XCTAssertTrue(defaults.bool(forKey: Shelf.syncKey))
+    }
+
+    func testCurrentIsBegunNotFinished() {
+        XCTAssertFalse(Shelf.inProgress(0))  // opened by mistake
+        XCTAssertTrue(Shelf.inProgress(0.004))
+        XCTAssertTrue(Shelf.inProgress(0.5))
+        XCTAssertFalse(Shelf.inProgress(0.99))
+        XCTAssertFalse(Shelf.inProgress(1))
+    }
+
+    func testCopyProgressAndCancel() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("zz-copy-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let src = dir.appendingPathComponent("a"), dest = dir.appendingPathComponent("b")
+        try Data(count: 9 << 20).write(to: src)
+        var seen: [Int64] = []
+        XCTAssertTrue(Coordinated.copy(src, to: dest) { seen.append($0) })
+        XCTAssertEqual(seen, [4 << 20, 8 << 20, 9 << 20])  // the ring moves within a file
+        XCTAssertEqual(try fm.attributesOfItem(atPath: dest.path)[.size] as? Int, 9 << 20)
+        let job = CopyJob()
+        job.cancel()
+        XCTAssertFalse(Coordinated.copy(src, to: dir.appendingPathComponent("c"), job: job))
+    }
+
+    func testSizeInRussian() {
+        XCTAssertEqual(size(524_500_000).replacingOccurrences(of: "\u{00A0}", with: " "), "524,5 МБ")
+    }
+
     func testBooksWord() {
         XCTAssertEqual([1, 2, 5, 11, 12, 21, 22, 25, 111, 104].map(booksWord),
             ["книга", "книги", "книг", "книг", "книг", "книга", "книги", "книг", "книг", "книги"])

@@ -2,6 +2,7 @@
 // no folder chosen, in the app's own folder in Files). iCloud is only the way in: a book is read and
 // played from a copy the app keeps for itself, so iOS never takes it away mid-chapter.
 
+import Combine
 import Foundation
 import SwiftUI
 import UIKit
@@ -59,6 +60,7 @@ enum Toml {
 struct Progress: Equatable {
     var fraction = 0.0
     var opened = 0.0
+    var pages = false  // last read as pages: the way back in is reading, not listening
 }
 
 /// `textOnly`: a copy of an audiobook without its audio, read as pages.
@@ -85,17 +87,32 @@ final class Shelf: ObservableObject {
     /// What each local copy weighs, by its own manifest: the library's «На iPhone» line.
     @Published private(set) var localBytes: [String: Int64] = [:]
     @Published var message = ""
+    /// A folder was chosen but cannot be reached now: nothing read here is saved.
+    @Published private(set) var folderLost = false
+    /// Books of the shared library, as the last refresh found them: «Удалить → Отовсюду» is for these.
+    @Published var inLibrary: Set<String> = []
 
     private let fm = FileManager.default
+    private let defaults: UserDefaults
     private var scoped: URL?
-    private var folderLost = false  // a folder was chosen but cannot be reached now
-    private var fetchingAll = false
+    private var syncing = false
     private var launched = false  // the first refresh has run: `-fetchAll YES` acts once, after it
+    private var jobs: [String: CopyJob] = [:]
+    private var tasks: [String: Task<Void, Never>] = [:]  // a fetch still ending: the next one of the book waits for it
+    private var watch: AnyCancellable?
     private let bookmarkKey = "libraryBookmark"
-    private let folderLostMessage = "Нет доступа к папке библиотеки: выбери её снова"
-    /// The library's «Убирать прочитанные». Not in AppSettings: the reader's save there keeps
-    /// only the keys it knows of and would switch it off.
+    private let folderLostMessage = "Нет доступа к папке библиотеки — прогресс не сохраняется"
+    /// The library's «Убирать прочитанные» and «Синхронизация». Not in AppSettings: the reader's save
+    /// there keeps only the keys it knows of and would switch them off.
     nonisolated static let dropReadKey = "dropRead"
+    nonisolated static let syncKey = "sync"
+    private let skipKey = "syncSkip"
+
+    /// Books the reader took off this phone: «Синхронизация» leaves them until one is downloaded by hand.
+    private(set) var skip: Set<String> {
+        get { Set(defaults.stringArray(forKey: skipKey) ?? []) }
+        set { defaults.set(newValue.sorted(), forKey: skipKey) }
+    }
 
     /// Where the app keeps its own copies; made once.
     nonisolated static let localRoot: URL = {
@@ -118,6 +135,9 @@ final class Shelf: ObservableObject {
         return folderLost ? nil : fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
+    /// A folder of the reader's choosing, not the app's own one in Files.
+    var folderChosen: Bool { scoped != nil || folderLost }
+
     /// The folder that holds the book folders: the chosen one, or its `books` subfolder.
     var booksRoot: URL? {
         guard let sharedRoot else { return nil }
@@ -125,15 +145,20 @@ final class Shelf: ObservableObject {
         return fm.fileExists(atPath: inner.path) ? inner : sharedRoot
     }
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        defaults.register(defaults: [Self.syncKey: true])
         restoreFolder()
         sweepStaging()
+        // the narrator let go of a book: an update it held back can come in now
+        watch = Player.shared.$book.map { $0?.slug }.removeDuplicates().dropFirst()
+            .sink { [weak self] _ in Task { await self?.sync() } }
     }
 
     // ---- the folder ----
 
     private func restoreFolder() {
-        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else {
+        guard let data = defaults.data(forKey: bookmarkKey) else {
             folderName = "Файлы → На iPhone → readsync"
             return
         }
@@ -145,7 +170,7 @@ final class Shelf: ObservableObject {
             folderLost = false
             if message == folderLostMessage { message = "" }
             folderName = url.lastPathComponent
-            if stale, let fresh = try? url.bookmarkData() { UserDefaults.standard.set(fresh, forKey: bookmarkKey) }
+            if stale, let fresh = try? url.bookmarkData() { defaults.set(fresh, forKey: bookmarkKey) }
         } else {
             print("readsync: the library folder's bookmark did not resolve")  // seen with `devicectl … --console`
             folderLost = true
@@ -164,7 +189,7 @@ final class Shelf: ObservableObject {
         folderLost = false
         message = ""
         folderName = url.lastPathComponent
-        if let data = try? url.bookmarkData() { UserDefaults.standard.set(data, forKey: bookmarkKey) }
+        if let data = try? url.bookmarkData() { defaults.set(data, forKey: bookmarkKey) }
         Task { await refresh() }
     }
 
@@ -172,6 +197,7 @@ final class Shelf: ObservableObject {
 
     func refresh() async {
         if folderLost { restoreFolder() }  // the folder may be back (iCloud signed in again, say)
+        if !folderLost { message = "" }  // a failure told before is told again by its row
         let root = booksRoot
         let found = await Task.detached { () -> [Book] in
             guard let root else { return [] }
@@ -189,13 +215,18 @@ final class Shelf: ObservableObject {
         // a copy whose book left the Mac's library (or a folder that cannot be reached right now) stays
         // readable until the reader removes it
         let shared = Set(found.map(\.slug))
+        inLibrary = shared
         let local = ((try? fm.contentsOfDirectory(atPath: Self.localRoot.path)) ?? [])
             .filter { !$0.hasPrefix(".") }
             .compactMap(Self.localCopy)
         localBytes = Dictionary(uniqueKeysWithValues: local.map { ($0.slug, $0.bytes) })
         let localOnly = local.filter { !shared.contains($0.slug) }
         books = (found + localOnly).sorted { $0.title.localizedCompare($1.title) == .orderedAscending }
-        for book in found { copies[book.slug] = localCopy(of: book) }
+        for book in found {
+            let now = localCopy(of: book)
+            if now == .absent, copy(of: book.slug).isFailed { continue }  // the row keeps saying why
+            copies[book.slug] = now
+        }
         for book in localOnly where !isFetching(book.slug) { copies[book.slug] = .here }
         let all = books, dirs = Dictionary(uniqueKeysWithValues: all.compactMap { b in sharedDir(b.slug).map { (b.slug, $0) } })
         let measured = await Task.detached { () -> [String: Progress] in
@@ -204,7 +235,7 @@ final class Shelf: ObservableObject {
                 guard let dir = dirs[book.slug] else { continue }
                 Self.cacheCover(book.slug, from: dir)
                 let st = ReadingState.load(shared: dir, edition: book.edition)
-                var p = Progress(opened: ReadingState.num(st["opened"]))
+                var p = Progress(opened: ReadingState.num(st["opened"]), pages: st["mode"] as? String == "pages")
                 let duration = Self.duration(book.slug)
                 if book.hasAudio, duration > 0, st["mode"] as? String != "pages" {
                     p.fraction = min(1, ReadingState.num(st["pos"]) / duration)
@@ -217,17 +248,16 @@ final class Shelf: ObservableObject {
         }.value
         Player.forgetMissingCovers()
         progress = measured
-        if UserDefaults.standard.bool(forKey: Self.dropReadKey) {
+        if defaults.bool(forKey: Self.dropReadKey) {
             let here = Set(copies.filter { $0.value.isReadable }.map(\.key))
             for slug in Self.readToDrop(measured, local: here, loaded: Player.shared.slug, now: ReadingState.nowMs) {
-                remove(slug)
+                removeHere(slug)
             }
         }
-        if !launched {
-            launched = true
-            // launched with `-fetchAll YES`: every book onto the phone, as the menu's «Скачать все книги»
-            if UserDefaults.standard.bool(forKey: "fetchAll"), booksRoot != nil { Task { await fetchAll() } }
-        }
+        // launched with `-fetchAll YES`: every book onto the phone once, whatever the toggle says
+        let once = !launched && defaults.bool(forKey: "fetchAll")
+        launched = true
+        Task { await sync(all: once) }
     }
 
     private func isFetching(_ slug: String) -> Bool {
@@ -305,12 +335,15 @@ final class Shelf: ObservableObject {
         return Double(head[r].split(separator: ":").last!.trimmingCharacters(in: .whitespaces)) ?? 0
     }
 
-    /// The book to come back to: the last one opened that has a copy on this phone.
+    /// The book to come back to: the last one opened that has a copy on this phone and is begun, not
+    /// finished. A book opened by mistake and closed again does not take its place.
     var current: Book? {
         books.filter { copy(of: $0.slug).isReadable }
-            .filter { (progress[$0.slug]?.opened ?? 0) > 0 }
+            .filter { (progress[$0.slug]?.opened ?? 0) > 0 && Self.inProgress(progress[$0.slug]?.fraction ?? 0) }
             .max { (progress[$0.slug]?.opened ?? 0) < (progress[$1.slug]?.opened ?? 0) }
     }
+
+    nonisolated static func inProgress(_ fraction: Double) -> Bool { fraction > 0 && fraction < 0.99 }
 
     /// The copy the reader opens: the local one, whatever the shared library says now.
     func localBook(_ slug: String) -> Book? { Self.localCopy(slug) }
@@ -318,10 +351,11 @@ final class Shelf: ObservableObject {
     // ---- getting a copy ----
 
     /// The task ends once the copy is in or has failed. `textOnly`: an audiobook without its audio; left
-    /// out, a copy keeps the kind it is.
+    /// out, a copy keeps the kind it is. `byHand`: the reader asked for it, so «Синхронизация» keeps it again.
     @discardableResult
-    func fetch(_ book: Book, textOnly: Bool? = nil) -> Task<Void, Never>? {
+    func fetch(_ book: Book, textOnly: Bool? = nil, byHand: Bool = true) -> Task<Void, Never>? {
         if case .fetching = copy(of: book.slug) { return nil }
+        if byHand { skip.remove(book.slug) }
         guard let root = booksRoot else {
             print("readsync: \(book.slug) not copied: no library folder")
             message = folderLostMessage
@@ -332,43 +366,82 @@ final class Shelf: ObservableObject {
         sweepStaging()
         copies[book.slug] = .fetching(0)
         let source = root.appendingPathComponent(book.slug, isDirectory: true)
-        return Task.detached {
-            let result = Self.copyBook(book.slug, from: source, textOnly: textOnly) { done in
-                Task { @MainActor in
-                    if Shelf.shared.isFetching(book.slug) { Shelf.shared.copies[book.slug] = .fetching(done) }
+        let job = CopyJob(), before = tasks[book.slug]
+        jobs[book.slug] = job
+        let task = Task.detached {
+            await before?.value  // a cancelled fetch of the same book still clearing its staging folder
+            let result = job.cancelled
+                ? .failure(Failure(message: "", cancelled: true))
+                : Self.copyBook(book.slug, from: source, textOnly: textOnly, job: job) { done in
+                    Task { @MainActor in
+                        if Shelf.shared.jobs[book.slug] === job { Shelf.shared.copies[book.slug] = .fetching(done) }
+                    }
                 }
-            }
             await MainActor.run {
                 let shelf = Shelf.shared
-                guard shelf.isFetching(book.slug) else { return }  // removed while it was coming in
+                if shelf.jobs[book.slug] === job { shelf.jobs[book.slug] = nil }
+                guard !job.cancelled, shelf.isFetching(book.slug) else { return }  // cancelled or removed meanwhile
                 switch result {
                 case .success:
                     let mine = Self.localCopy(book.slug)
                     shelf.copies[book.slug] = mine.map { Self.copyState(local: $0, shared: book) } ?? .here
                     shelf.localBytes[book.slug] = mine?.bytes
                     Player.forgetCover(book.slug)
+                    if !shelf.folderLost { shelf.message = "" }
                 case .failure(let why):
                     print("readsync: \(book.slug) not copied: \(why.message)")
                     shelf.copies[book.slug] = Self.localCopy(book.slug) == nil ? .failed(why.message) : .outdated
-                    shelf.message = why.message
+                    shelf.message = "«\(book.title)» не скачалась: \(why.message)"
                 }
+            }
+        }
+        tasks[book.slug] = task
+        Task {
+            await task.value
+            if tasks[book.slug] == task { tasks[book.slug] = nil }
+        }
+        return task
+    }
+
+    /// A download stopped half way: the copy is as it was, and «Синхронизация» leaves the book alone.
+    func cancel(_ slug: String) {
+        guard let job = jobs[slug] else { return }
+        job.cancel()
+        jobs[slug] = nil
+        skip.insert(slug)
+        copies[slug] = books.first { $0.slug == slug }.map { Self.copyState(local: Self.localCopy(slug), shared: $0) } ?? .absent
+    }
+
+    /// The books «Синхронизация» copies now: those not on the phone, failed, or older than the library's,
+    /// but none the reader took off it, and none open in the reader or held by the narrator.
+    nonisolated static func toSync(_ books: [Book], copies: [String: Copy], skip: Set<String>, busy: Set<String>)
+        -> [Book]
+    {
+        books.filter { book in
+            guard !skip.contains(book.slug) else { return false }
+            switch copies[book.slug] ?? .absent {
+            case .absent, .failed: return true
+            case .outdated: return !busy.contains(book.slug)
+            default: return false
             }
         }
     }
 
-    /// Every book not on the phone, or not as the Mac has it now, one after another: all at once, iCloud
-    /// would download every book's audio side by side and none would be readable for a long while.
-    func fetchAll() async {
-        guard !fetchingAll else { return }
-        fetchingAll = true
-        defer { fetchingAll = false }
-        for book in books {
-            switch copy(of: book.slug) {
-            case .absent, .failed: break
-            case .outdated where book.slug != Player.shared.slug: break  // the one loaded waits for its own swipe
-            default: continue
-            }
-            await fetch(book)?.value
+    /// «Синхронизация»: every book that wants copying, one after another: all at once, iCloud would download
+    /// every book's audio side by side and none would be readable for a long while. `all`: the launch
+    /// argument's one go, toggle or not, taken-off books too.
+    func sync(all: Bool = false) async {
+        guard !syncing, all || defaults.bool(forKey: Self.syncKey), booksRoot != nil else { return }
+        syncing = true
+        defer { syncing = false }
+        var tried = Set<String>()  // a failing book is tried once a round, not over and over
+        while all || defaults.bool(forKey: Self.syncKey) {
+            let busy = Set([Player.shared.slug, Player.shared.pageSlug].compactMap { $0 })
+            guard let book = Self.toSync(books, copies: copies, skip: all ? [] : skip, busy: busy)
+                .first(where: { !tried.contains($0.slug) })
+            else { return }
+            tried.insert(book.slug)
+            await fetch(book, byHand: false)?.value
         }
     }
 
@@ -381,7 +454,10 @@ final class Shelf: ObservableObject {
         }
     }
 
-    struct Failure: Error { let message: String }
+    struct Failure: Error {
+        let message: String
+        var cancelled = false
+    }
 
     /// The files of the manifest a copy takes, smallest first; a text-only copy leaves the audio.
     nonisolated static func parts(of book: Book, textOnly: Bool) -> [(name: String, size: Int64)] {
@@ -405,16 +481,20 @@ final class Shelf: ObservableObject {
     /// Copy the files the reader needs, check them against the manifest, then swap the copy in whole.
     /// `textOnly`: everything but the audio.
     nonisolated static func copyBook(
-        _ slug: String, from source: URL, textOnly: Bool = false, progress: @escaping (Double) -> Void
+        _ slug: String, from source: URL, textOnly: Bool = false, job: CopyJob? = nil,
+        progress: @escaping (Double) -> Void
     ) -> Result<Void, Failure> {
         let fm = FileManager.default
+        let stopped = Failure(message: "", cancelled: true)
         // the manifest as it is now, read once: the files are checked against it and it is the one kept
         guard let toml = Coordinated.read(source.appendingPathComponent("book.toml")),
             let text = String(data: toml, encoding: .utf8)
-        else { return .failure(Failure(message: "book.toml не читается")) }
+        else { return .failure(Failure(message: "нет book.toml")) }
         let book = Book(slug: slug, toml: text)
         let staging = localRoot.appendingPathComponent(".\(slug).new", isDirectory: true)
         try? fm.removeItem(at: staging)
+        var whole = false
+        defer { if !whole { try? fm.removeItem(at: staging) } }  // half a copy is hundreds of megabytes
         do {
             try fm.createDirectory(at: staging, withIntermediateDirectories: true)
             let wanted = parts(of: book, textOnly: textOnly)
@@ -425,18 +505,26 @@ final class Shelf: ObservableObject {
                 guard !name.contains("/"), !name.contains(".."), !name.hasPrefix(".") else {
                     return .failure(Failure(message: "в book.toml чужое имя файла: \(name)"))
                 }
-                // copied as a file, not read into memory: the audio alone is hundreds of megabytes
+                // copied as a file, not read into memory: the audio alone is hundreds of megabytes; the ring
+                // moves with every few megabytes of it
                 let dest = staging.appendingPathComponent(name)
-                guard Coordinated.copy(source.appendingPathComponent(name), to: dest) else {
-                    return .failure(Failure(message: "\(name) ещё не пришёл из iCloud"))
+                let base = done
+                guard Coordinated.copy(source.appendingPathComponent(name), to: dest, job: job, progress: { n in
+                    progress(Double(base + min(n, size)) / total)
+                }) else {
+                    if job?.cancelled == true { return .failure(stopped) }
+                    print("readsync: \(slug): \(name) did not come from iCloud")
+                    return .failure(Failure(message: "файлы ещё в iCloud"))
                 }
                 let got = ((try? fm.attributesOfItem(atPath: dest.path))?[.size] as? NSNumber)?.int64Value ?? -1
                 if got != size {
-                    return .failure(Failure(message: "книга ещё синхронизируется, попробуй позже"))
+                    print("readsync: \(slug): \(name) is \(got) bytes, the manifest says \(size)")
+                    return .failure(Failure(message: "книга ещё синхронизируется"))
                 }
                 done += size
                 progress(Double(done) / total)
             }
+            if job?.cancelled == true { return .failure(stopped) }
             let images = source.appendingPathComponent("images", isDirectory: true)
             // an image not downloaded yet is its `.name.icloud` placeholder: read by its real name, it is fetched
             let names = Set(Coordinated.list(images).map { ReadingState.realName($0).lastPathComponent })
@@ -447,7 +535,8 @@ final class Shelf: ObservableObject {
                 for name in names.sorted() {
                     // a copy short of an image is not a whole copy
                     guard let data = Coordinated.read(images.appendingPathComponent(name)) else {
-                        return .failure(Failure(message: "\(name) ещё не пришёл из iCloud"))
+                        print("readsync: \(slug): images/\(name) did not come from iCloud")
+                        return .failure(Failure(message: "файлы ещё в iCloud"))
                     }
                     try data.write(to: dest.appendingPathComponent(name))
                 }
@@ -455,7 +544,9 @@ final class Shelf: ObservableObject {
             // the manifest last, as on the Mac: a copy with it is a whole copy
             let kept = textOnly ? Data(manifest(text, files: wanted).utf8) : toml
             try kept.write(to: staging.appendingPathComponent("book.toml"))
+            if job?.cancelled == true { return .failure(stopped) }
             let dest = localDir(slug)
+            whole = true
             if fm.fileExists(atPath: dest.path) {
                 _ = try fm.replaceItemAt(dest, withItemAt: staging)  // one step: the old copy stays until the new one is in
             } else {
@@ -465,21 +556,83 @@ final class Shelf: ObservableObject {
             if let audio = book.audioName { try? fm.evictUbiquitousItem(at: source.appendingPathComponent(audio)) }
             return .success(())
         } catch {
-            try? fm.removeItem(at: staging)
+            whole = false
             return .failure(Failure(message: error.localizedDescription))
         }
     }
 
-    func remove(_ slug: String) {
+    // ---- taking books away ----
+
+    /// «Удалить → Только с iPhone» (and «Убирать прочитанные»): the copy goes, the book stays in the library,
+    /// and «Синхронизация» leaves it until it is downloaded by hand.
+    func removeHere(_ slug: String) {
         if Player.shared.slug == slug { Player.shared.stop() }  // the narrator must not play a file that is gone
+        if let job = jobs.removeValue(forKey: slug) { job.cancel() }
         try? fm.removeItem(at: Self.localDir(slug))
-        copies[slug] = Copy.absent
+        copies[slug] = .absent
         localBytes[slug] = nil
+        if inLibrary.contains(slug) {
+            skip.insert(slug)
+        } else {
+            books.removeAll { $0.slug == slug }  // a copy of a book the library no longer has: nothing is left
+            copies[slug] = nil
+        }
     }
 
-    /// The shared folder of one book: where its reading state lives.
-    /// None while the chosen folder cannot be reached: the state is then neither read nor written.
-    func sharedDir(_ slug: String) -> URL? { booksRoot?.appendingPathComponent(slug, isDirectory: true) }
+    /// «Удалить → Отовсюду»: the book's folder leaves the shared library, so every device loses it.
+    func removeEverywhere(_ book: Book) {
+        let dir = sharedDir(book.slug)
+        removeHere(book.slug)
+        skip.remove(book.slug)
+        books.removeAll { $0.slug == book.slug }
+        copies[book.slug] = nil
+        progress[book.slug] = nil
+        inLibrary.remove(book.slug)
+        if let cover = Self.cachedCover(book.slug) { try? fm.removeItem(at: cover) }
+        Player.forgetCover(book.slug)
+        guard let dir else { return }
+        Task.detached {
+            let ok = Coordinated.delete(dir)
+            if !ok { print("readsync: \(book.slug) not deleted from the library") }
+            await MainActor.run {
+                if !ok { Shelf.shared.message = "«\(book.title)» не удалилась из библиотеки" }
+                Task { await Shelf.shared.refresh() }
+            }
+        }
+    }
+
+    /// The shared folder of one book: where its reading state lives. None while the chosen folder cannot be
+    /// reached, or when the library has no such book any more: the state is then neither read nor written,
+    /// and a book deleted elsewhere does not come back as a folder of state.
+    func sharedDir(_ slug: String) -> URL? {
+        guard let dir = booksRoot?.appendingPathComponent(slug, isDirectory: true) else { return nil }
+        return fm.fileExists(atPath: dir.path) ? dir : nil
+    }
+}
+
+/// One download, to be called off: a wait for iCloud is given up, a copy stops at its next piece.
+final class CopyJob: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+    private var coordinator: NSFileCoordinator?
+
+    var cancelled: Bool { lock.withLock { stopped } }
+
+    func cancel() {
+        let c: NSFileCoordinator? = lock.withLock {
+            stopped = true
+            return coordinator
+        }
+        c?.cancel()
+    }
+
+    /// The coordinator now waiting for iCloud; false once the job is called off.
+    func waiting(on c: NSFileCoordinator?) -> Bool {
+        lock.withLock {
+            coordinator = c
+            return !stopped
+        }
+    }
 }
 
 /// Reads and writes that iCloud's file provider sees: a file not downloaded yet is fetched first, and a
@@ -494,11 +647,43 @@ enum Coordinated {
         return out
     }
 
-    static func copy(_ url: URL, to dest: URL) -> Bool {
+    /// A copy in pieces of a few megabytes: `progress` hears the bytes copied, and a job called off stops it.
+    static func copy(_ url: URL, to dest: URL, job: CopyJob? = nil, progress: ((Int64) -> Void)? = nil) -> Bool {
         var ok = false
         var error: NSError?
-        NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: url, options: [], error: &error) { u in
-            ok = (try? FileManager.default.copyItem(at: u, to: dest)) != nil
+        let c = NSFileCoordinator(filePresenter: nil)
+        guard job?.waiting(on: c) ?? true else { return false }
+        defer { _ = job?.waiting(on: nil) }
+        c.coordinate(readingItemAt: url, options: [], error: &error) { u in
+            guard let input = try? FileHandle(forReadingFrom: u),
+                FileManager.default.createFile(atPath: dest.path, contents: nil),
+                let output = try? FileHandle(forWritingTo: dest)
+            else { return }
+            defer {
+                try? input.close()
+                try? output.close()
+            }
+            var copied: Int64 = 0
+            while true {
+                if job?.cancelled == true { return }
+                let chunk: Data?
+                do { chunk = try input.read(upToCount: 4 << 20) } catch { return }
+                guard let chunk, !chunk.isEmpty else { break }  // nil at the end of the file
+                guard (try? output.write(contentsOf: chunk)) != nil else { return }
+                copied += Int64(chunk.count)
+                progress?(copied)
+            }
+            ok = true
+        }
+        return ok
+    }
+
+    /// A folder deleted so that iCloud deletes it on every device.
+    static func delete(_ url: URL) -> Bool {
+        var ok = false
+        var error: NSError?
+        NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: url, options: .forDeleting, error: &error) { u in
+            ok = (try? FileManager.default.removeItem(at: u)) != nil
         }
         return ok
     }
