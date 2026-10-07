@@ -12,7 +12,8 @@ final class StateVectorsTests: XCTestCase {
         XCTAssertFalse(vectors.isEmpty)
         for v in vectors {
             let files = v["files"] as! [[String: Any]]
-            let got = ReadingState.merge(files, edition: v["edition"] as! String)
+            let got = ReadingState.merge(
+                files, edition: v["edition"] as! String, editions: Editions(json: v["editions"]))
             let want = v["merged"] as! [String: Any]
             // numbers compare as numbers: Python writes 10, Swift reads 10.0
             XCTAssertEqual(normalize(got), normalize(want), v["name"] as? String ?? "")

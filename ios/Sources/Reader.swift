@@ -116,6 +116,7 @@ final class Bridge: NSObject, WKNavigationDelegate {
         }
         if method == "PUT", path == "/api/settings" {
             AppSettings.save(body)
+            Player.shared.lockText = AppSettings.lockText  // the switch is in the reader's settings
             return replyHandler(AppSettings.load(), nil)
         }
         // the path names the book: a write meant for another one is not this page's to make
@@ -124,19 +125,30 @@ final class Bridge: NSObject, WKNavigationDelegate {
             : nil
         guard named == slug else { return replyHandler(nil, "не та книга") }
         guard let book = Shelf.shared.localBook(slug) else { return replyHandler(nil, "нет книги") }
-        guard let dir = Shelf.shared.sharedDir(slug) else { return replyHandler(nil, "папка библиотеки недоступна") }
+        guard let dir = Shelf.shared.sharedDir(slug) else {
+            // a book the library no longer has: nothing to save, and nothing wrong (its row says so)
+            if Shelf.shared.booksRoot != nil { return replyHandler([String: Any](), nil) }
+            return replyHandler(nil, "папка библиотеки недоступна")
+        }
         let id = UUID()
         Bridge.writes[id] = Task.detached {
-            let out: [String: Any]
+            let written: [String: Any]?
             if path.hasSuffix("/session") {
-                out = ReadingState.addSession(
+                written = ReadingState.addSession(
                     shared: dir, edition: book.edition, day: body["day"] as? String ?? ReadingState.today,
                     sec: ReadingState.num(body["sec"]), words: ReadingState.num(body["words"]))
             } else {
                 var patch = body
                 patch.removeValue(forKey: "pos")  // the player owns the position here
                 patch.removeValue(forKey: "posAt")
-                out = ReadingState.put(shared: dir, edition: book.edition, patch: patch)
+                written = ReadingState.put(shared: dir, edition: book.edition, patch: patch)
+            }
+            guard let out = written else {  // this phone's file could not be read: nothing was saved
+                await MainActor.run {
+                    Bridge.writes[id] = nil
+                    replyHandler(nil, "не сохранено")
+                }
+                return
             }
             let merged = JSONBox(out)
             await MainActor.run { Player.shared.stateChanged(book.slug, merged.value as? [String: Any] ?? [:]) }
@@ -240,12 +252,13 @@ final class Files: NSObject, WKURLSchemeHandler {
 
     nonisolated static func respond(path: String, slug: String) async -> (Int, String, Data) {
         let json = { (obj: Any) -> (Int, String, Data) in
-            (200, "application/json", (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8))
+            (200, "application/json", JSONSafe.data(obj) ?? Data("{}".utf8))
         }
         if path == "/api/settings" { return json(AppSettings.load()) }
         if path == "/api/books" { return json(await MainActor.run { books() }) }
         if path.hasPrefix("/api/state/") {
             let s = String(path.dropFirst("/api/state/".count))
+            guard Shelf.isPlainName(s) else { return (404, "text/plain", Data()) }  // a book's name, not a path
             guard let book = Shelf.localCopy(s) else { return json([:]) }
             guard let dir = await MainActor.run(body: { Shelf.shared.sharedDir(s) }) else { return json([:]) }
             return json(ReadingState.load(shared: dir, edition: book.edition))
@@ -272,7 +285,10 @@ final class Files: NSObject, WKURLSchemeHandler {
     @MainActor static func books() -> [[String: Any]] {
         Shelf.shared.books.compactMap { b in
             guard let local = Shelf.localCopy(b.slug) else { return nil }
-            var out: [String: Any] = ["slug": local.slug, "title": local.title, "author": local.author, "ready": true]
+            var out: [String: Any] = [
+                "slug": local.slug, "title": local.title, "author": local.author, "ready": true,
+                "edition": local.edition,  // the page stamps a sentence with the text it shows
+            ]
             if let a = local.audioName, local.hasAudio { out["audio"] = a }
             // where the main text ends: the reader marks the book read there
             if let end = local.textEnd { out["text_end"] = end }
@@ -301,34 +317,45 @@ enum AppSettings {
             .appendingPathComponent("settings.json")
     }
 
+    /// The saved settings; an old top-level `lockText` is moved into the reader's settings the first time.
     static func load() -> [String: Any] {
-        (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let all = (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        guard let moved = migrated(all, now: ReadingState.nowMs) else { return all }
+        write(moved)
+        return moved
     }
 
-    /// The reader's save: the app's own keys, which the page does not know, are kept.
+    /// `lockText` was the app's own key beside the reader's settings; now it is one of them. Stamped now, so
+    /// the page takes it over its cached copy instead of saving its default over it. None: nothing to move.
+    static func migrated(_ all: [String: Any], now: Double) -> [String: Any]? {
+        guard let old = all["lockText"] else { return nil }
+        var out = all
+        out.removeValue(forKey: "lockText")
+        var settings = all["settings"] as? [String: Any] ?? [:]
+        if settings["lockText"] == nil, let on = old as? Bool {
+            settings["lockText"] = on
+            out["settings"] = settings
+            out["settingsAt"] = max(ReadingState.num(all["settingsAt"]), now)
+        }
+        return out
+    }
+
+    /// The reader's save.
     static func save(_ value: [String: Any]) {
-        var value = value
-        if value["lockText"] == nil, let keep = load()["lockText"] { value["lockText"] = keep }
         write(value)
     }
 
     private static func write(_ value: [String: Any]) {
-        if let data = try? JSONSerialization.data(withJSONObject: value) { try? data.write(to: file, options: .atomic) }
+        if let data = JSONSafe.data(value) { try? data.write(to: file, options: .atomic) }
     }
 
     static var rewind: Bool { ((load()["settings"] as? [String: Any])?["rewind"] as? Bool) ?? true }
 
     /// «Отмечать прочитанной в конце»: the reader's setting, saved by the page; on until switched off.
-    static let markReadKey = "autoDone"
-    static var markRead: Bool { ((load()["settings"] as? [String: Any])?[markReadKey] as? Bool) ?? true }
+    /// A book is marked read at the end of its text, always: a mark made by mistake is undone right there
+    /// («отменить») or by setting the status back, so there is no switch for it.
+    static let markRead = true
 
-    /// The sentence being spoken as the lock screen's title: the app's setting, set from the library.
-    static var lockText: Bool {
-        get { (load()["lockText"] as? Bool) ?? false }
-        set {
-            var all = load()
-            all["lockText"] = newValue
-            write(all)
-        }
-    }
+    /// «Текст на экране блокировки»: the sentence being spoken as the lock screen's title; the reader's setting.
+    static var lockText: Bool { ((load()["settings"] as? [String: Any])?["lockText"] as? Bool) ?? false }
 }

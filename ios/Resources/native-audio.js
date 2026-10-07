@@ -6,7 +6,7 @@
   "use strict";
   const send = (cmd, extra) => window.webkit.messageHandlers.audio.postMessage(Object.assign({ cmd }, extra || {}));
   const listeners = {};
-  const st = { paused: true, duration: NaN, rate: 1, src: "", error: null, t: 0, at: performance.now() };
+  const st = { paused: true, duration: NaN, rate: 1, src: "", error: null, t: 0, at: performance.now(), pausedAt: 0 };
   const now = () => (st.paused ? st.t : st.t + ((performance.now() - st.at) / 1000) * st.rate);
   const emit = (type) => (listeners[type] || []).slice().forEach((l) => {
     if (l.once) listeners[type] = listeners[type].filter((x) => x !== l);
@@ -22,8 +22,11 @@
     get duration() { return st.duration; },
     get paused() { return st.paused; },
     get error() { return st.error; },
+    // when the app's player paused (ms since 1970): a pause on the lock screen reaches the page only at unlock
+    get pausedAt() { return st.pausedAt; },
     get playbackRate() { return st.rate; },
-    set playbackRate(r) { st.rate = r; send("rate", { rate: r }); },  // the app keeps a paused player paused
+    // the time so far was played at the old rate: anchored before the new one counts
+    set playbackRate(r) { st.t = now(); st.at = performance.now(); st.rate = r; send("rate", { rate: r }); },  // the app keeps a paused player paused
     get src() { return st.src; },
     set src(v) { st.src = v; send("load", { src: v }); },
     play() { st.t = now(); st.at = performance.now(); st.paused = false; send("play"); return Promise.resolve(); },
@@ -35,6 +38,7 @@
       if (s.paused != null) st.paused = s.paused;
       if (s.rate) st.rate = s.rate;
       if (s.duration) st.duration = s.duration;
+      st.pausedAt = s.pausedAt || 0;
       st.error = s.error ? { message: s.error } : s.event === "loadedmetadata" ? null : st.error;
       if (s.event === "snapshot") {
         // back from a locked screen: a play or pause that happened meanwhile is told now

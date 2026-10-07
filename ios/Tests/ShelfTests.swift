@@ -143,7 +143,7 @@ final class ShelfTests: XCTestCase {
     func testToSyncLeavesReadBooks() {
         let book = { (slug: String) in Book(slug: slug, toml: "edition = \"e1\"\nfiles = \"book.json:5\"") }
         let books = ["read", "reading", "taken-off"].map(book)
-        // «Убирать прочитанные» on: a read book is not brought back
+        // «Скрывать прочитанные» on: a read book is not brought back
         XCTAssertEqual(
             Shelf.toSync(books, copies: [:], skip: ["taken-off"], busy: [], done: ["read"]).map(\.slug), ["reading"])
         // read again (its status is no longer done): it comes back; one taken off by hand still does not
@@ -176,7 +176,8 @@ final class ShelfTests: XCTestCase {
             defaults.removePersistentDomain(forName: name)
             try? FileManager.default.removeItem(at: URL.libraryDirectory.appending(path: "Preferences/\(name).plist"))
         }
-        let shelf = Shelf(defaults: defaults)
+        let docs = try scratchFolder("readsync-docs")
+        let shelf = try scratchShelf(docs: docs, defaults: defaults)
         let slug = "zz-test-\(UUID().uuidString)", other = "zz-test-\(UUID().uuidString)"
         shelf.inLibrary = [slug]
         shelf.removeHere(slug)
@@ -185,7 +186,7 @@ final class ShelfTests: XCTestCase {
         shelf.removeHere(other)
         XCTAssertEqual(shelf.skip, [slug])
         // kept across launches
-        XCTAssertEqual(Shelf(defaults: defaults).skip, [slug])
+        XCTAssertEqual(try scratchShelf(docs: docs, defaults: defaults).skip, [slug])
         let book = Book(slug: slug, toml: "files = \"book.json:5\"")
         XCTAssertEqual(Shelf.toSync([book], copies: [:], skip: shelf.skip, busy: []), [])
         // «Синхронизация» is on unless switched off

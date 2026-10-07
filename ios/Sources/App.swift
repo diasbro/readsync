@@ -1,7 +1,8 @@
-// readsync on the phone: the shared library, and the reader for any book copied to the phone.
-// Finding and adding books happens elsewhere.
+// readsync on the phone: the library, and the reader for any book copied to the phone. Text books are
+// added here from files (fb2, epub, pdf, txt); audiobooks come only from the shared library.
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct ReadsyncApp: App {
@@ -12,6 +13,7 @@ struct ReadsyncApp: App {
         WindowGroup {
             LibraryView()
                 .environmentObject(shelf)
+                .onOpenURL { shelf.add([$0]) }  // «Открыть в readsync» from another app
         }
         .onChange(of: phase) { _, now in
             switch now {
@@ -34,18 +36,22 @@ struct LibraryView: View {
     @State private var reading: String?
     @State private var openWhenReady: String?  // tapped while not on the phone yet: opens as soon as it is
     @State private var picking = false
+    @State private var pick = Pick.books  // what the system's picker is open for
     @State private var deleting: Book?
-    @State private var lockText = Player.shared.lockText
+    @State private var askICloud = false  // «Синхронизация» switched on with the library not in iCloud Drive
+    @State private var askBring: Bring?  // a library opened in iCloud Drive: the books added here go into it?
+    @State private var notice: String?  // how the move ended: one short line
     @AppStorage(Shelf.dropReadKey) private var dropRead = false
     @AppStorage(Shelf.syncKey) private var sync = true
     @AppStorage("libView") private var libView = "list"  // this phone's own: «list» or «covers»
     @AppStorage("showRead") private var showRead = false
     @Environment(\.dynamicTypeSize) private var textSize
+    @Environment(\.scenePhase) private var phase
 
     var body: some View {
         NavigationStack {
             Group {
-                if shelf.books.isEmpty {
+                if shelf.books.isEmpty && shelf.adding.isEmpty {
                     empty
                 } else if libView == "covers" {
                     grid
@@ -56,30 +62,70 @@ struct LibraryView: View {
             .navigationTitle("Библиотека")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button("Добавить книгу", systemImage: "plus") { choose(.books) }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Picker("Вид", selection: $libView) {
                             Label("Списком", systemImage: "list.bullet").tag("list")
                             Label("Обложками", systemImage: "square.grid.2x2").tag("covers")
                         }
                         .pickerStyle(.palette)
-                        Button("Выбрать папку библиотеки", systemImage: "folder") { picking = true }
+                        // the source under «Открыть», as the button's subtitle: one line, next to what changes it
+                        Button { choose(.folder) } label: {
+                            Text("Открыть")
+                            Text(shelf.sourceLabel)
+                            Image(systemName: "folder")
+                        }
                         Button("Обновить", systemImage: "arrow.clockwise") { Task { await shelf.refresh() } }
-                        Toggle("Синхронизация", systemImage: "arrow.triangle.2.circlepath", isOn: $sync)
-                        Toggle("Текст на экране блокировки", systemImage: "lock.iphone", isOn: $lockText)
-                        Toggle("Убирать прочитанные", systemImage: "archivebox", isOn: $dropRead)
-                        Text("Папка: \(shelf.folderName)")
+                        Toggle("Синхронизация", systemImage: "arrow.triangle.2.circlepath", isOn: syncSwitch)
+                        Toggle("Скрывать прочитанные", systemImage: "archivebox", isOn: $dropRead)
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
+                    .tint(Color.accentColor)  // the menu's icons in the app's colour, not the system blue
                 }
             }
-            .fileImporter(isPresented: $picking, allowedContentTypes: [.folder]) { result in
-                if case .success(let url) = result { shelf.choose(folder: url) }
+            .fileImporter(isPresented: $picking, allowedContentTypes: pick == .books ? Self.bookTypes : [.folder],
+                          allowsMultipleSelection: pick == .books) { result in
+                guard case .success(let urls) = result else { return }
+                switch pick {
+                case .books: shelf.add(urls)
+                case .folder: if let url = urls.first { opened(url, syncing: false) }
+                case .iCloud: if let url = urls.first { opened(url, syncing: true) }
+                case .moveTo:
+                    guard let url = urls.first else { return }
+                    Task {
+                        notice = await shelf.moveLibrary(into: url)
+                        if shelf.inICloud { sync = true }
+                    }
+                }
             }
-            .task { await shelf.refresh() }
-            .onChange(of: lockText) { _, on in Player.shared.lockText = on }
             .onChange(of: dropRead) { _, on in if on { Task { await shelf.refresh() } } }
-            .onChange(of: sync) { _, on in if on { Task { await shelf.sync() } } }
+            .onChange(of: sync) { _, on in
+                if on { Task { await shelf.sync() } } else { shelf.stopSync() }
+            }
+            .alert("Синхронизация через iCloud", isPresented: $askICloud) {
+                // the books go into the folder picked, book by book: a library there already (the Mac's) keeps
+                // all it has, and nothing in it is replaced
+                Button("Перенести библиотеку") { choose(.moveTo) }
+                Button("Открыть папку в iCloud Drive") { choose(.iCloud) }
+                Button("Отмена", role: .cancel) {}
+            } message: {
+                Text("Выбери папку в iCloud Drive: книги перенесутся в неё и будут на всех устройствах.")
+            }
+            .alert("Перенести книги в эту библиотеку?", isPresented: bringShown, presenting: askBring) { bring in
+                Button("Перенести") { Task { notice = await shelf.bring(bring.slugs, already: bring.already) } }
+                Button("Оставить", role: .cancel) {}
+            } message: { bring in
+                Text("В прежней библиотеке \(bring.slugs.count) \(booksWord(bring.slugs.count)).")
+            }
+            .alert(notice ?? "", isPresented: noticeShown) {
+                Button("OK", role: .cancel) {}
+            }
+            .modifier(ImportDialogs())
+            .onChange(of: shelf.toOpen) { _, _ in openAdded() }
+            .onChange(of: reading) { _, now in if now == nil { openAdded() } }
             .onChange(of: shelf.copies) { _, copies in
                 guard let slug = openWhenReady else { return }
                 switch copies[slug] ?? .absent {
@@ -88,6 +134,7 @@ struct LibraryView: View {
                     reading = slug
                 case .absent, .failed:
                     openWhenReady = nil  // it did not come: a later download must not open it out of the blue
+                    Player.shared.dropAutoplay(slug)  // nor play it
                 default:
                     break
                 }
@@ -108,23 +155,54 @@ struct LibraryView: View {
             }
         }
         .tint(.accentColor)
+        // here, on the screen and not on the list or the grid inside it: a modifier on that Group goes to each
+        // of them, and switching the view ran a refresh (and a sync round) every time
+        .task { await shelf.refresh() }
+        // while the library is open and «Синхронизация» is on, a book added elsewhere, or one whose files had
+        // not come yet, is picked up within a minute, without the reader doing anything. Started again with
+        // each change of the phase: a task reads the phase it was started with, never a later one
+        .task(id: phase) {
+            guard phase == .active else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                if !Task.isCancelled, sync, shelf.inICloud, reading == nil { await shelf.refresh() }
+            }
+        }
+    }
+
+    /// A book just added, opened when the reader is not open on another one; else once it is closed.
+    private func openAdded() {
+        guard reading == nil, let slug = shelf.toOpen else { return }
+        shelf.toOpen = nil
+        if let book = shelf.books.first(where: { $0.slug == slug }) { open(book) }
     }
 
     private var list: some View {
-        let current = shelf.current
-        let (all, read) = Shelf.sections(shelf.books, progress: shelf.progress, current: current?.slug)
+        let reading = shelf.reading
+        let (all, read) = Shelf.sections(shelf.books, progress: shelf.progress, reading: Set(reading.map(\.slug)))
         return List {
+            if let round = shelf.round {
+                SyncLine(round: round, copies: shelf.copies)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 8, trailing: 20))
+            }
             if !shelf.message.isEmpty {
                 message.listRowSeparator(.hidden)
             }
+            ForEach(shelf.adding) { item in
+                AddingRow(item: item) { shelf.cancelAdd(item.id) }
+            }
             // one section with its titles as rows: plain sections would leave a wide gap between them
-            if let current {
+            if let current = reading.first {
                 SectionTitle("Читаю сейчас")
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 0, trailing: 20))
                 nowReading(current)
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 12, trailing: 16))
                     .listRowSeparator(.hidden)
+                ForEach(reading.dropFirst()) { book in
+                    row(book)
+                }
                 SectionTitle("Все книги")
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 8, leading: 20, bottom: 0, trailing: 20))
@@ -132,7 +210,7 @@ struct LibraryView: View {
             ForEach(all) { book in
                 row(book)
             }
-            if !read.isEmpty {
+            if !read.isEmpty, !dropRead {  // «Скрывать прочитанные»: no shelf of them at all
                 readTitle(read)
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 18, leading: 20, bottom: 6, trailing: 20))
@@ -155,20 +233,27 @@ struct LibraryView: View {
 
     /// «Обложками»: the same library, its books as a grid of covers under «Читаю сейчас».
     private var grid: some View {
-        let current = shelf.current
-        let (all, read) = Shelf.sections(shelf.books, progress: shelf.progress, current: current?.slug)
+        let reading = shelf.reading
+        let (all, read) = Shelf.sections(shelf.books, progress: shelf.progress, reading: Set(reading.map(\.slug)))
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                if let round = shelf.round {
+                    SyncLine(round: round, copies: shelf.copies).padding(.horizontal, 20).padding(.bottom, 12)
+                }
                 if !shelf.message.isEmpty {
                     message.padding(.horizontal, 20).padding(.bottom, 12)
                 }
-                if let current {
+                ForEach(shelf.adding) { item in
+                    AddingRow(item: item) { shelf.cancelAdd(item.id) }.padding(.horizontal, 20).padding(.bottom, 12)
+                }
+                if let current = reading.first {
                     SectionTitle("Читаю сейчас").padding(.horizontal, 20).padding(.top, 4)
                     nowReading(current).padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 12)
+                    if reading.count > 1 { tiles(Array(reading.dropFirst())).padding(.top, 4).padding(.bottom, 12) }
                     SectionTitle("Все книги").padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 12)
                 }
                 tiles(all)
-                if !read.isEmpty {
+                if !read.isEmpty, !dropRead {
                     readTitle(read).padding(.horizontal, 20).padding(.top, 28).padding(.bottom, showRead ? 12 : 0)
                     if showRead { tiles(read) }
                 }
@@ -189,14 +274,56 @@ struct LibraryView: View {
         }
     }
 
+    /// «Синхронизация» switched on: straight on, with the library in iCloud Drive; else the question first.
+    private var syncSwitch: Binding<Bool> {
+        // sync is through iCloud: with the source elsewhere the switch reads off whatever was saved
+        Binding(get: { sync && shelf.inICloud }, set: { on in
+            if on, !shelf.inICloud { askICloud = true } else { sync = on }
+        })
+    }
+
+    private var bringShown: Binding<Bool> { Binding(get: { askBring != nil }, set: { if !$0 { askBring = nil } }) }
+    private var noticeShown: Binding<Bool> { Binding(get: { notice != nil }, set: { if !$0 { notice = nil } }) }
+
+    /// The picker for books (fb2, fb2.zip, epub, pdf, txt), or for a library folder: any, or one in iCloud
+    /// Drive from «Синхронизация», to open or to move the library into.
+    enum Pick { case books, folder, iCloud, moveTo }
+
+    static let bookTypes: [UTType] = {
+        let fb2 = [UTType(filenameExtension: "fb2"), UTType("org.gribuser.fictionbook")].compactMap { $0 }
+        return fb2 + [.epub, .zip, .pdf, .plainText]
+    }()
+
+    private func choose(_ kind: Pick) {
+        pick = kind
+        picking = true
+    }
+
+    /// A folder opened: the library from now on, and the question whether the books added here go into it.
+    /// `syncing`: opened from «Синхронизация», which goes on when the folder is in iCloud Drive.
+    private func opened(_ url: URL, syncing: Bool) {
+        Task {
+            // from «Синхронизация»: a folder with no library in it gets readsync/books, as a move would make
+            let chosen = syncing ? await shelf.chooseLibrary(url) : shelf.choose(folder: url)
+            guard chosen, let library = shelf.booksRoot else { return }
+            if syncing {
+                if shelf.inICloud { sync = true } else { notice = "Папка не в iCloud Drive — синхронизация выключена" }
+            }
+            let own = shelf.ownLibrary
+            let slugs = await Task.detached { Shelf.booksToBring(from: own, to: library) }.value
+            if !slugs.isEmpty { askBring = Bring(slugs: slugs, already: Shelf.ownBookCount(own) - slugs.count) }
+        }
+    }
+
     private var message: some View {
-        Label(shelf.message, systemImage: shelf.folderLost ? "icloud.slash" : "exclamationmark.icloud")
+        Label(shelf.message, systemImage: shelf.folderLost ? "folder.badge.questionmark" : "exclamationmark.circle")
             .font(.footnote).foregroundStyle(.secondary)
     }
 
     private func nowReading(_ current: Book) -> some View {
-        let listen = current.hasAudio && shelf.copy(of: current.slug) != .textOnly
-            && shelf.progress[current.slug]?.pages != true
+        // the audio of the copy on the phone, or, none there yet, of the library's book
+        let audio = shelf.localBook(current.slug).map(\.hasAudio) ?? current.hasAudio
+        let listen = audio && shelf.progress[current.slug]?.pages != true
         return NowReading(book: current, progress: shelf.progress[current.slug]?.fraction ?? 0, listen: listen) {
             if listen { Player.shared.playWhenOpened(current.slug) }
             open(current)
@@ -210,14 +337,14 @@ struct LibraryView: View {
 
     private var footer: some View {
         let n = shelf.localBytes.count
-        return Text("На iPhone: \(n) \(booksWord(n)) · \(size(shelf.localBytes.values.reduce(0, +)))")
+        return Text("Загружено: \(n) \(booksWord(n)) · \(size(shelf.localBytes.values.reduce(0, +)))")
             .font(.caption).foregroundStyle(.tertiary).monospacedDigit()
             .frame(maxWidth: .infinity)
     }
 
     /// «Прочитанные · 12», with how many of them this year: a tap folds them away or out.
     private func readTitle(_ read: [Book]) -> some View {
-        let year = String(Calendar.current.component(.year, from: Date()))
+        let year = Shelf.utcYear(Date())  // the days a book was finished on are UTC days
         let thisYear = Shelf.readIn(year, read, progress: shelf.progress)
         return Button {
             withAnimation(.easeOut(duration: 0.2)) { showRead.toggle() }
@@ -250,7 +377,7 @@ struct LibraryView: View {
 
     private func tile(_ book: Book) -> some View {
         let copy = shelf.copy(of: book.slug)
-        return BookTile(book: book, copy: copy, progress: shelf.progress[book.slug] ?? Progress()) {
+        return BookTile(book: book, copy: copy, progress: shelf.progress[book.slug] ?? Progress(), detached: detached(book)) {
             open(book)
         } cancel: {
             shelf.cancel(book.slug)
@@ -268,7 +395,7 @@ struct LibraryView: View {
     private func row(_ book: Book) -> some View {
         let copy = shelf.copy(of: book.slug)
         // a tap, not a Button: the ring of a download is a button of its own inside the row
-        return BookRow(book: book, copy: copy, progress: shelf.progress[book.slug] ?? Progress()) {
+        return BookRow(book: book, copy: copy, progress: shelf.progress[book.slug] ?? Progress(), detached: detached(book)) {
             shelf.cancel(book.slug)
         }
         .onTapGesture { open(book) }
@@ -280,6 +407,12 @@ struct LibraryView: View {
             actions(book, copy)
         }
         .modifier(askDelete(book))
+    }
+
+    /// A copy whose book the library does not have (any more): read, but nothing of it is saved. With the
+    /// folder out of reach the message over the list says so for all of them.
+    private func detached(_ book: Book) -> Bool {
+        !shelf.folderLost && !shelf.inLibrary.contains(book.slug) && shelf.copy(of: book.slug).isReadable
     }
 
     /// «Удалить»: from this phone only, or from the library on every device. Shown at the book's row.
@@ -328,23 +461,26 @@ struct LibraryView: View {
     }
 
     @ViewBuilder private var empty: some View {
-        ContentUnavailableView {
-            if shelf.folderLost {
-                Label("Нет доступа к папке библиотеки", systemImage: "icloud.slash")
-            } else {
-                Label("Пока пусто", systemImage: "books.vertical")
+        if shelf.folderLost {
+            ContentUnavailableView {
+                Label("Папка библиотеки недоступна", systemImage: "folder.badge.questionmark")
+            } description: {
+                Text("Открой её снова или вернись к своей библиотеке.")
+            } actions: {
+                Button("Открыть снова") { choose(.folder) }
+                    .buttonStyle(.borderedProminent)
+                Button("Вернуться к своей библиотеке") { shelf.forgetFolder() }
+                    .buttonStyle(.borderless)
             }
-        } description: {
-            if shelf.folderLost {
-                Text("Выбери её снова.")
-            } else if shelf.folderChosen {
-                Text("В папке «\(shelf.folderName)» нет книг.")
-            } else {
-                Text("Выбери папку iCloud Drive → readsync.")
+        } else {
+            ContentUnavailableView {
+                Label("Пока нет книг", systemImage: "books.vertical")
+            } description: {
+                Text("Добавь книгу: fb2, epub, pdf или txt.")
+            } actions: {
+                Button("Добавить книгу") { choose(.books) }
+                    .buttonStyle(.borderedProminent)
             }
-        } actions: {
-            Button("Выбрать папку") { picking = true }
-                .buttonStyle(.borderedProminent)
         }
     }
 
@@ -362,6 +498,81 @@ struct LibraryView: View {
     }
 }
 
+/// «Загрузка · 4 из 15» under the title while a round runs, its bytes as a thin bar.
+struct SyncLine: View {
+    let round: SyncRound
+    let copies: [String: Copy]
+
+    var body: some View {
+        let (done, total, fraction) = round.count(copies: copies)
+        if total > 0 {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Загрузка · \(done) из \(total)")
+                    .font(.footnote).foregroundStyle(.secondary).monospacedDigit()
+                ProgressView(value: fraction).tint(Color.accentColor)
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+}
+
+/// The books added here to bring into a library opened in iCloud Drive; `already`: those it has.
+struct Bring {
+    let slugs: [String]
+    let already: Int
+}
+
+/// A file being made into a book: its name, «Добавляю…», and a square to call it off.
+struct AddingRow: View {
+    let item: Adding
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 14) {
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.accentColor.opacity(0.15))
+                .frame(width: 52, height: 52 * 1.45)
+                .overlay { ProgressView() }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.name)
+                    .font(.system(.body, design: .serif, weight: .medium))
+                    .lineLimit(2)
+                Text("Добавляю…").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button(action: cancel) {
+                Image(systemName: "stop.circle").font(.title3).foregroundStyle(Color.accentColor)
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Отменить")
+        }
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// What adding books has to say: the files that did not become books, and a book the library has already.
+struct ImportDialogs: ViewModifier {
+    @EnvironmentObject var shelf: Shelf
+
+    func body(content: Content) -> some View {
+        let failed = Binding(get: { shelf.importNotice != nil }, set: { if !$0 { shelf.importNotice = nil } })
+        let twin = shelf.duplicates.first
+        content
+            .alert(shelf.importNotice?.title ?? "", isPresented: failed) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(shelf.importNotice?.message ?? "")
+            }
+            .alert(twin.map { "«\($0.title)» уже есть" } ?? "", isPresented: .constant(twin != nil), presenting: twin) { d in
+                Button("Открыть") { shelf.settle(d, keep: false, openTwin: true) }
+                Button("Добавить ещё одну") { shelf.settle(d, keep: true) }
+                Button("Отмена", role: .cancel) { shelf.settle(d, keep: false) }
+            }
+    }
+}
+
 struct DeleteDialog: ViewModifier {
     let book: Book
     @Binding var shown: Bool
@@ -370,7 +581,7 @@ struct DeleteDialog: ViewModifier {
     func body(content: Content) -> some View {
         content.confirmationDialog(book.title, isPresented: $shown, titleVisibility: .visible) {
             if shelf.copy(of: book.slug) != .absent || !shelf.skip.contains(book.slug) {
-                Button("Только с iPhone") { shelf.removeHere(book.slug) }
+                Button("Только здесь") { shelf.removeHere(book.slug) }
             }
             if shelf.inLibrary.contains(book.slug) {
                 Button("Отовсюду", role: .destructive) { shelf.removeEverywhere(book) }
@@ -491,7 +702,7 @@ struct MiniPlayer: View {
                     ProgressBar(value: player.progress, height: 2)
                 }
                 Button {
-                    if player.playing { player.pause() } else { player.play() }
+                    if player.playing { player.pause() } else { player.resume() }
                 } label: {
                     Image(systemName: player.playing ? "pause.fill" : "play.fill")
                         .font(.title3)
@@ -527,6 +738,7 @@ struct BookRow: View {
     let book: Book
     let copy: Copy
     let progress: Progress
+    var detached = false  // not in the library: nothing read here is saved
     let cancel: () -> Void
 
     var body: some View {
@@ -555,6 +767,14 @@ struct BookRow: View {
     }
 
     @ViewBuilder private var status: some View {
+        if detached {
+            Text("Не в библиотеке — прогресс не сохраняется").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+        } else {
+            copyStatus
+        }
+    }
+
+    @ViewBuilder private var copyStatus: some View {
         switch copy {
         case .here where progress.status == .done:
             Text(readOn(progress)).font(.caption).foregroundStyle(.secondary)
@@ -588,7 +808,7 @@ struct BookRow: View {
     @ViewBuilder private var trailing: some View {
         switch copy {
         case .absent, .failed:
-            Image(systemName: "icloud.and.arrow.down").font(.title3).foregroundStyle(Color.accentColor)
+            Image(systemName: "arrow.down.circle").font(.title3).foregroundStyle(Color.accentColor)
         case .fetching(let p):
             Button(action: cancel) {
                 Ring(value: p, stop: true).frame(width: 26, height: 26).padding(8).contentShape(Rectangle())
@@ -608,6 +828,7 @@ struct BookTile<Actions: View>: View {
     let book: Book
     let copy: Copy
     let progress: Progress
+    var detached = false  // not in the library: nothing read here is saved
     let open: () -> Void
     let cancel: () -> Void
     @ViewBuilder let actions: () -> Actions
@@ -643,12 +864,20 @@ struct BookTile<Actions: View>: View {
     }
 
     @ViewBuilder private var status: some View {
+        if detached {
+            Text("Не в библиотеке")
+        } else {
+            copyStatus
+        }
+    }
+
+    @ViewBuilder private var copyStatus: some View {
         switch copy {
         case .fetching:
-            Text("Скачивается")
+            Text("Загрузка")
         case .absent:
             HStack(spacing: 4) {
-                Image(systemName: "icloud.and.arrow.down").foregroundStyle(Color.accentColor)
+                Image(systemName: "arrow.down.circle").foregroundStyle(Color.accentColor)
                 Text(size(book.bytes))
             }
         case .outdated:
@@ -712,6 +941,7 @@ struct BookTile<Actions: View>: View {
         case .here, .textOnly:
             parts.append(progress.status == .done ? readOn(progress) : progress.fraction > 0 ? progressText(progress) : "")
         }
+        if detached { parts.append("не в библиотеке, прогресс не сохраняется") }
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 }
