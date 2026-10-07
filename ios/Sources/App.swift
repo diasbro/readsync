@@ -397,6 +397,8 @@ struct LibraryView: View {
         // a tap, not a Button: the ring of a download is a button of its own inside the row
         return BookRow(book: book, copy: copy, progress: shelf.progress[book.slug] ?? Progress(), detached: detached(book)) {
             shelf.cancel(book.slug)
+        } update: {
+            shelf.fetch(book)
         }
         .onTapGesture { open(book) }
         .accessibilityAddTraits(.isButton)
@@ -740,6 +742,7 @@ struct BookRow: View {
     let progress: Progress
     var detached = false  // not in the library: nothing read here is saved
     let cancel: () -> Void
+    let update: () -> Void
 
     var body: some View {
         HStack(spacing: 14) {
@@ -809,6 +812,14 @@ struct BookRow: View {
         switch copy {
         case .absent, .failed:
             Image(systemName: "arrow.down.circle").font(.title3).foregroundStyle(Color.accentColor)
+        case .outdated:  // the copy here is older: the sign stays until the new version is in
+            Button(action: update) {
+                Image(systemName: "arrow.down.circle").font(.title3).foregroundStyle(Color.accentColor)
+                    .padding(8).contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .padding(-8)
+            .accessibilityLabel("Обновить")
         case .fetching(let p):
             Button(action: cancel) {
                 Ring(value: p, stop: true).frame(width: 26, height: 26).padding(8).contentShape(Rectangle())
@@ -881,7 +892,11 @@ struct BookTile<Actions: View>: View {
                 Text(size(book.bytes))
             }
         case .outdated:
-            Text("Новая версия").foregroundStyle(Color.accentColor)
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.down.circle")
+                Text("Новая версия")
+            }
+            .foregroundStyle(Color.accentColor)
         case .failed:
             Text("Не скачалась").foregroundStyle(.orange)
         case .here, .textOnly:
