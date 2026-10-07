@@ -163,3 +163,22 @@ def test_a_bad_audio_ref_is_rejected(tmp_path, monkeypatch):
         assert job is None and err, ref
     assert launched == []
     assert sorted(p.name for p in (tmp_path / "b").iterdir()) == ["book.json"]
+
+
+def test_an_audiobook_read_as_pages_counts_its_page(tmp_path, monkeypatch):
+    """Left in page mode, the book is finished by its last page, not by a narrator that never moved."""
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    monkeypatch.setattr(library, "load_state", lambda slug: STATES[slug])
+    STATES = {
+        "listened": {"pos": 3590, "sentPct": 10, "mode": "audio"},
+        "read": {"pos": 0, "sentPct": 99, "mode": "pages"},
+    }
+    for slug in STATES:
+        d = tmp_path / slug
+        d.mkdir()
+        (d / "book.toml").write_text(f'title = "{slug}"\n', encoding="utf-8")
+        (d / "book.json").write_text('{"blocks": []}', encoding="utf-8")
+        (d / "timing.json").write_text('{"duration": 3600, "words": []}', encoding="utf-8")
+    state = {b["slug"]: b["state"] for b in library.list_books()}
+    assert state["listened"]["finished"] and state["listened"]["mode"] == "audio"
+    assert state["read"]["finished"] and state["read"]["mode"] == "pages"

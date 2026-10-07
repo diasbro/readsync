@@ -152,8 +152,10 @@ def list_books() -> list[dict]:
                 m = re.search(rb'"duration":\s*([\d.]+)', fh.read(300))
                 duration = float(m.group(1)) if m else 0.0
         pos = float(st.get("pos", 0) or 0)
-        # finished: the audio position is within a minute of the end, or the last spread of a text-only book
-        finished = (duration > 0 and pos >= duration - 60) or (duration == 0 and (st.get("sentPct") or 0) >= 99)
+        # an audiobook read as pages moves its page, not its narrator: the mode it was left in says which counts,
+        # as on the phone. Finished: within a minute of the end, or the last spread
+        by_page = duration == 0 or st.get("mode") == "pages"
+        finished = (st.get("sentPct") or 0) >= 99 if by_page else pos >= duration - 60
         meta["state"] = {
             "opened": st.get("opened", 0),
             "shelf": st.get("shelf", ""),
@@ -161,6 +163,7 @@ def list_books() -> list[dict]:
             "duration": duration,
             "sent": st.get("sent", 0),
             "sentPct": st.get("sentPct", 0),
+            "mode": st.get("mode", ""),
             "seconds": sum(v.get("sec", 0) for v in (st.get("stats") or {}).get("days", {}).values()),
             "finished": bool(finished),
         }

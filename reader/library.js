@@ -312,7 +312,8 @@
     if (open === b.slug) return openHtml(b);
     const st = b.state, job = jobs[b.slug], failed = !!(job && !job.running && job.exit !== 0);
     const pos = st.pos || 0, dur = st.duration || store.get("rs:dur:" + b.slug, 0);
-    const pct = st.finished ? 100 : b.has_audio ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
+    // read as pages, an audiobook counts its page (the phone does the same)
+    const pct = st.finished ? 100 : b.has_audio && st.mode !== "pages" ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
     const meta = [facts(b), !b.ready ? (b.building ? "загружается…" : failed ? null : "не загрузилась до конца") : b.building ? "заменяю…" : null].filter(Boolean).join(" · ");
     const fail = failed ? `<div class="m status warn">не загрузилось: ${esc(job.log[job.log.length - 1] || "код " + job.exit)}</div>` : "";
     const frag = b.fragment_note ? `<div class="m status warn">в конце текста «${esc(b.fragment_note)}»</div>` : "";
