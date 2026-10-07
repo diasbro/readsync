@@ -224,12 +224,17 @@ def test_download_resumes_a_cut_part(tmp_path, monkeypatch):
         def __init__(self, data, status, length, cut):
             self.data, self.status, self.cut = data, status, cut
             self.headers = {"Content-Length": str(length)}
+            if status == 206:
+                self.headers["Content-Range"] = f"bytes {len(body) - length}-{len(body) - 1}/{len(body)}"
 
         def __enter__(self):
             return self
 
         def __exit__(self, *a):
             return False
+
+        def geturl(self):
+            return "https://s1.knigavuhe.org/1.mp3"
 
         def read(self, n):
             if not self.data and self.cut:
@@ -425,3 +430,86 @@ def test_a_packed_file_too_big_for_a_book_is_not_unpacked(monkeypatch):
 
     with pytest.raises(SystemExit, match="это не книга"):
         add_book.unwrap(buf.getvalue(), "book.zip")
+
+
+class Resp:
+    """An HTTP answer for `urlopen` fakes: `data` is what arrives, `headers` what the server claims."""
+
+    def __init__(self, data: bytes, status: int, headers: dict, final: str = ""):
+        self.data, self.status, self.headers, self.final = data, status, headers, final
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def geturl(self):
+        return self.final
+
+    def read(self, n):
+        out, self.data = self.data[:n], self.data[n:]
+        return out
+
+
+def test_a_text_body_cut_short_is_resumed(monkeypatch, tmp_path):
+    """The first answer ends at 200 of the 500 bytes it announced: the length check catches it, the rest
+    comes by Range. The format comes from the address after the redirect, the body does not tell it."""
+    body = b"plain words " * 42
+    ranges = []
+
+    def urlopen(req, timeout):
+        rng = req.get_header("Range")
+        ranges.append(rng)
+        if rng is None:
+            return Resp(body[:200], 200, {"Content-Length": str(len(body))}, "https://cdn.example/book.fb2")
+        start = int(rng.removeprefix("bytes=").rstrip("-"))
+        headers = {
+            "Content-Length": str(len(body) - start),
+            "Content-Range": f"bytes {start}-{len(body) - 1}/{len(body)}",
+        }
+        return Resp(body[start:], 206, headers, "https://cdn.example/book.fb2")
+
+    monkeypatch.setattr(add_book.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(add_book.time, "sleep", lambda s: None)
+    part = tmp_path / "01"
+
+    assert add_book.fetch_text("https://mirror.example/get?id=1", part) == "fb2"
+    assert (part / "book.fb2").read_bytes() == body
+    assert ranges == [None, "bytes=200-"]
+
+
+def test_a_resumed_answer_from_another_offset_starts_over(monkeypatch, tmp_path):
+    """A 206 that does not continue from the bytes we have is not appended: the next try starts from zero."""
+    body = bytes(range(100))
+    ranges = []
+
+    def urlopen(req, timeout):
+        rng = req.get_header("Range")
+        ranges.append(rng)
+        if rng is None and len(ranges) == 1:
+            return Resp(body[:40], 200, {"Content-Length": "100"})
+        if rng is None:
+            return Resp(body, 200, {"Content-Length": "100"})
+        return Resp(body[10:], 206, {"Content-Length": "90", "Content-Range": "bytes 10-99/100"})
+
+    monkeypatch.setattr(add_book.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(add_book.time, "sleep", lambda s: None)
+    dst = tmp_path / "x.bin"
+    add_book.download("https://x.example/x.bin", dst)
+    assert dst.read_bytes() == body
+    assert ranges == [None, "bytes=40-", None]
+
+
+def test_a_missing_file_is_not_retried(monkeypatch, tmp_path):
+    calls = []
+
+    def urlopen(req, timeout):
+        calls.append(timeout)
+        raise add_book.urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(add_book.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(add_book.time, "sleep", lambda s: pytest.fail("retried"))
+    with pytest.raises(SystemExit, match="текст не скачался"):
+        add_book.fetch_text("https://x.example/gone.epub", tmp_path / "01")
+    assert calls == [120]

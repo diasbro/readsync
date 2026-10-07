@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import re
+import threading
+import time
+from pathlib import Path
+
 import sources
 from sources import base
 from sources.flibusta import Flibusta
+
+ROOT = Path(__file__).resolve().parent.parent
 
 ENTRY = """<entry><title>Дао Дэ Цзин</title><author><name>Лао-цзы</name></author>
 <dc:language>ru</dc:language>
@@ -479,3 +486,389 @@ def test_a_round_that_ran_out_of_time_stops_its_tries(monkeypatch):
     time.sleep(1.2)
     assert errors == ["flaky: не ответил за 0.3 с"]
     assert len(calls) == asked
+
+
+# ---------------------------------------------------------------- search rounds
+
+
+def test_a_catalog_past_its_own_budget_does_not_hold_the_round(monkeypatch):
+    """A catalog that names its own `seconds` is not waited for past it: the rows of the others are the
+    answer, and the search does not hang on one mirror for the whole round."""
+    gate = threading.Event()  # a request already in flight: nothing can call it back
+
+    class Slow:
+        name = "slow"
+        seconds = 0.3
+
+        def search(self, query):
+            gate.wait(10)
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    class Quick:
+        name = "quick"
+
+        def search(self, query):
+            return [base.hit("quick", "Книга перемен", "https://x/1.fb2", "fb2")]
+
+        def author_books(self, query):
+            return "", []
+
+    monkeypatch.setattr(sources, "SOURCES", [Slow(), Quick()])
+    monkeypatch.setattr(sources, "ROUND_SECONDS", 30)
+    t0 = time.monotonic()
+    try:
+        hits, _, _, errors, failed = sources.ask(["книга перемен"], cancel=threading.Event())
+        spent = time.monotonic() - t0
+    finally:
+        gate.set()  # the hanging request is let go: the test does not carry it into the next one
+    assert spent < 2, f"ждали медленный каталог {spent:.1f} с"
+    assert [h["title"] for h in hits] == ["Книга перемен"]  # the fast catalog answered while it hung
+    assert errors == ["slow: не ответил за 0.3 с"] and failed == {"slow"}
+
+
+def test_a_short_word_of_a_title_counts_for_a_match():
+    """«Лунь юй» is a title of two two-letter words. The words a phrase search may ask for are the long
+    ones, but a row that names the short ones too is that book and not a coincidence."""
+    assert base.said_words("Лунь юй Виногродский") == ["лунь", "юй", "виногродский"]
+    assert base.terms("Лунь юй Виногродский") == ["виногродский", "лунь"]  # what the catalogs are asked
+
+
+def test_a_title_of_short_words_is_found_by_its_first_words(monkeypatch):
+    class Catalog:
+        name = "gutenberg"
+
+        def search(self, query):
+            if query == "лунь юй":
+                return [base.hit(self.name, "Лунь Юй", "https://x/1.fb2", "fb2", author="Конфуций")]
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr(sources, "SOURCES", [Catalog()])
+    res = sources.search_text("Лунь юй Виногродский")
+    assert [r["title"] for r in res["hits"]] == ["Лунь Юй"]
+
+
+def test_a_row_that_names_part_of_the_query_does_not_stop_the_shorter_searches(monkeypatch):
+    """A row that names only some words of the query is not the book: the shorter searches still run."""
+
+    class Partial:
+        name = "wikisource"
+
+        def search(self, query):
+            return [base.hit(self.name, "ПУТЬ ДИСКУРСИВНОГО ПОЗНАНИЯ ТРАКТАТА", "https://x/article", "html")]
+
+        def author_books(self, query):
+            return "", []
+
+    class Books:
+        name = "gutenberg"
+
+        def search(self, query):
+            if query == "дао дэ цзин":
+                return [base.hit(self.name, "Дао дэ цзин", "https://x/1.fb2", "fb2")]
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr(sources, "SOURCES", [Partial(), Books()])
+    res = sources.search_text("Дао дэ цзин Виногродский")
+    # the book the shorter search found comes first, and the first round's row is kept
+    assert [r["title"] for r in res["hits"]] == ["Дао дэ цзин", "ПУТЬ ДИСКУРСИВНОГО ПОЗНАНИЯ ТРАКТАТА"]
+    assert res["note"]
+
+
+def test_a_row_that_names_the_whole_query_ends_the_search(monkeypatch):
+    """The phrase found the book itself: no shorter searches follow, and the round is not asked twice."""
+    asked = []
+
+    class Catalog:
+        name = "gutenberg"
+
+        def search(self, query):
+            asked.append(query)
+            if query.lower() == "tao te ching":  # a catalog does not care for the case of a query
+                return [base.hit(self.name, "Tao Te Ching", "https://x/1.epub", "epub", author="Laozi")]
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr(sources, "SOURCES", [Catalog()])
+    res = sources.search_text("Tao Te Ching")
+    assert [r["title"] for r in res["hits"]] == ["Tao Te Ching"] and res["note"] == ""
+    assert asked == ["Tao Te Ching"]
+
+
+def test_a_request_the_round_never_started_is_named_as_late(monkeypatch):
+    """More requests than the pool has workers: a source whose requests were still queued when the round
+    ended did not answer either, and is named so (and the answer is not cached as whole)."""
+
+    class Slow:
+        def __init__(self, name):
+            self.name = name
+
+        def search(self, query):
+            time.sleep(0.3)
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    monkeypatch.setattr(sources, "SOURCES", [Slow(f"s{i}") for i in range(8)])
+    monkeypatch.setattr(sources, "PER_SOURCE", 1)  # 8 workers for 8 * (3 + 2) = 40 requests
+    monkeypatch.setattr(sources, "ROUND_SECONDS", 0.5)
+    monkeypatch.setattr(sources, "PAUSE", 0)
+    _, _, _, errors, failed = sources.ask(["а", "б", "в"], author_queries=("г", "д"), cancel=threading.Event())
+    never_started = {f"s{i}" for i in range(4, 8)}  # 16 requests made in 0.5 s, these were behind them
+    assert never_started <= failed, failed
+    assert never_started <= {e.split(":")[0] for e in errors}, errors
+    assert all(e.endswith("не ответил за 0.5 с") for e in errors), errors
+
+
+def test_a_budget_runs_from_when_the_request_is_made(monkeypatch):
+    """A request that waited in the queue behind others still gets its whole budget."""
+
+    class Busy:
+        name = "busy"
+
+        def search(self, query):
+            time.sleep(0.5)
+            return []
+
+        def author_books(self, query):
+            time.sleep(0.5)
+            return "", []
+
+    class Quick:
+        name = "quick"
+        seconds = 0.3
+
+        def search(self, query):
+            return [base.hit("quick", "Книга перемен", "https://x/1.fb2", "fb2")]
+
+        def author_books(self, query):
+            return "", []
+
+    monkeypatch.setattr(sources, "SOURCES", [Busy(), Quick()])
+    monkeypatch.setattr(sources, "PER_SOURCE", 1)  # 2 workers, both taken by `busy` for 0.5 s
+    monkeypatch.setattr(sources, "ROUND_SECONDS", 5)
+    hits, _, _, errors, failed = sources.ask(["книга перемен"], author_queries=("x",), cancel=threading.Event())
+    assert [h["title"] for h in hits] == ["Книга перемен"] and not errors and not failed
+
+
+def test_initials_do_not_make_a_match():
+    """«Л. Н. Толстой»: the initials are not words of the title, nor a search of their own."""
+    assert base.said_words("Л. Н. Толстой Война и мир") == ["толстой", "война", "мир"]
+    assert "л н" not in base.fallbacks("Л. Н. Толстой Война и мир")
+    row = {"title": "Анна Каренина", "author": "Толстой Л. Н.", "translator": ""}
+    assert base.matched(["л", "н", "толстой"], row) == 1
+
+
+def test_the_note_is_shown_only_when_the_shorter_searches_found_something(monkeypatch):
+    """The reader is told the list came from shorter searches when it did — and not when the first round
+    already had the row and the shorter ones added nothing."""
+
+    class Catalog:
+        name = "gutenberg"
+
+        def search(self, query):
+            if query.lower() == "дао дэ цзин виногродский":  # only the query as typed
+                return [base.hit(self.name, "Дао дэ цзин", "https://x/1.fb2", "fb2")]
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr(sources, "SOURCES", [Catalog()])
+    res = sources.search_text("Дао дэ цзин Виногродский")
+    assert [r["title"] for r in res["hits"]] == ["Дао дэ цзин"] and res["note"] == ""
+
+
+def test_a_catalog_that_declares_a_budget_declares_a_sane_one():
+    """`ask` waits no longer than `ROUND_SECONDS` for anyone, so a budget past it would be a silent lie.
+    A catalog that answers many pages at a time, or none at all when a mirror is down, has one."""
+    for s in sources.SOURCES:
+        assert 0 < getattr(s, "seconds", sources.ROUND_SECONDS) <= sources.ROUND_SECONDS, s.name
+    assert Flibusta().seconds < sources.ROUND_SECONDS  # an OPDS shelf: several pages, and mirrors that go down
+
+
+# ---------------------------------------------------------------- one list of catalogs, one place to add one
+
+
+def test_the_priority_list_is_the_search_order():
+    """The order the catalogs are searched in is the order their rows are ranked in: written down twice
+    before, they drifted apart the moment a catalog was added to one of them."""
+    assert tuple(s.name for s in sources.SOURCES) == base.SOURCE_ORDER
+
+
+def test_the_reader_names_every_catalog():
+    """The reader labels a row from its own map and counts the catalogs from it: a source in SOURCES but
+    not in reader/library.js shows a raw id and a wrong «не нашлось ни в одном из N каталогов»."""
+    js = (ROOT / "reader" / "library.js").read_text(encoding="utf-8")
+    named = re.search(r"const SOURCE = \{(.*?)\};", js, re.S).group(1)
+    missing = [s.name for s in sources.SOURCES if f'"{s.name}"' not in named and f"{s.name}:" not in named]
+    assert not missing, f"нет подписи в reader/library.js: {missing}"
+
+
+# ---------------------------------------------------------------- archive.org, the texts
+
+
+IA_SEARCH = {
+    "response": {
+        "numFound": 2,
+        "docs": [
+            {
+                "identifier": "tao-te-king",
+                "title": "Tao Tê Ching: di Lao-Tze",
+                "creator": "Julius Evola",
+                "downloads": 553,
+            },
+            {"identifier": "lending-only", "title": "Tao Te Ching", "creator": "Laozi", "downloads": 9000},
+        ],
+    }
+}
+IA_FILES = [
+    {"name": "Tao Te King .pdf", "format": "Image Container PDF", "size": "28677288"},
+    {"name": "Tao Te King _text.pdf", "format": "Text PDF", "size": "3980227"},
+    {"name": "Tao Te King _djvu.txt", "format": "DjVuTXT", "size": "418366"},
+    {"name": "tao.epub", "format": "EPUB", "size": "1024", "source": "original"},
+]
+IA_META = {
+    "metadata": {"title": "Tao Tê Ching: di Lao-Tze", "creator": "Julius Evola", "language": "ita", "year": "1974"},
+    "files": IA_FILES,
+}
+IA_LENDING = {
+    "metadata": {"title": "Tao Te Ching", "creator": "Laozi", "year": "1999", "access-restricted-item": "true"},
+    "files": [{"name": "lending.epub", "format": "EPUB", "size": "10", "source": "original"}],
+}
+
+
+def test_internet_archive_search_asks_only_for_readable_texts():
+    from sources.internet_archive import InternetArchive
+
+    q = InternetArchive().lucene("Tao Te Ching")
+    assert q.startswith("mediatype:texts AND ")
+    assert "NOT access-restricted-item:true" in q  # the lending library's books answer 401
+    assert 'format:"DjVuTXT"' in q and "Image Container PDF" not in q
+    assert "(title:(ching) OR creator:(ching))" in q and "(title:(tao) OR creator:(tao))" in q
+    assert "NOT collection:deemphasize" in q and "NOT collection:no-preview" in q
+
+
+def test_internet_archive_reads_the_best_file_and_never_a_scan():
+    from sources.internet_archive import InternetArchive
+
+    ia = InternetArchive()
+    assert ia.file_of(IA_META) == ("tao.epub", "epub", 1024)  # an EPUB beats the OCR text
+    assert ia.file_of({"files": IA_FILES[:3]}) == ("Tao Te King _djvu.txt", "txt", 418366)  # then the text
+    assert ia.file_of({"files": IA_FILES[1:2]}) == ("Tao Te King _text.pdf", "pdf", 3980227)  # then an OCR'd PDF
+    assert ia.file_of({"files": IA_FILES[:1]}) is None  # a pile of page images is not a book
+    assert ia.file_of(IA_LENDING) is None  # held by the lending library, whatever its files are called
+    derived = {"name": "scan.epub", "format": "EPUB", "size": "428694396", "source": "derivative"}
+    assert ia.file_of({"files": [derived, *IA_FILES[:3]]})[0] == "Tao Te King _djvu.txt"  # a JPEG per page
+
+
+def test_internet_archive_skips_an_item_of_several_books():
+    """An item may hold several works or volumes: no telling which file is the one asked for."""
+    from sources.internet_archive import InternetArchive
+
+    ia = InternetArchive()
+    two_epubs = [{"name": f"{n}.epub", "format": "EPUB", "source": "original"} for n in ("A Raw Youth", "Demian")]
+    assert ia.file_of({"files": two_epubs}) is None
+    two_txts = [{"name": f"{n}_djvu.txt", "format": "DjVuTXT", "source": "derivative"} for n in ("a", "b")]
+    assert ia.file_of({"files": two_txts}) is None
+
+
+def test_internet_archive_names_the_volume_and_the_language():
+    from sources.internet_archive import InternetArchive, lang_of
+
+    meta = {
+        "metadata": {"title": "The novels of Fyodor Dostoevsky", "volume": "4", "language": "eng"},
+        "files": IA_FILES,
+    }
+    h = InternetArchive().to_hit({"identifier": "novels04"}, meta)
+    assert h["title"] == "The novels of Fyodor Dostoevsky, т. 4" and h["lang"] == "en"
+    langs = {"Russian": "ru", "deu": "de", "FRE": "fr", "zho": "zh", "ces": "cs", "nld": "nl", "ell": "el"}
+    assert {k: lang_of(k) for k in langs} == langs and lang_of(["rus", "German"]) == "ru"
+
+
+def test_internet_archive_survives_an_answer_that_is_not_as_described():
+    from sources.ia import parse_search
+    from sources.internet_archive import InternetArchive
+
+    assert parse_search({"response": {"docs": ["x", None, {"identifier": "ok"}]}}) == [{"identifier": "ok"}]
+    assert parse_search([]) == [] and parse_search({"response": []}) == []
+    assert InternetArchive().to_hit({"identifier": "x"}, ["files"]) is None
+
+
+def test_internet_archive_stops_reading_metadata_when_the_round_is_over(monkeypatch):
+    from sources import internet_archive
+    from sources.internet_archive import InternetArchive
+
+    docs = [{"identifier": f"tao-{i}", "title": "Tao Te Ching", "creator": "Laozi"} for i in range(8)]
+    over = threading.Event()
+    asked = []
+
+    def fake_fetch(url):
+        if "advancedsearch" in url:
+            return {"response": {"docs": docs}}
+        asked.append(url)
+        over.set()  # the round ends while the first items are read
+        return IA_META
+
+    monkeypatch.setattr(internet_archive, "fetch", fake_fetch)
+    monkeypatch.setattr(base.ROUND, "over", over, raising=False)
+    InternetArchive().search("Tao Te Ching")
+    assert 1 <= len(asked) <= 2, asked  # what was already in flight on the two slots, nothing after
+
+
+def test_internet_archive_rows_are_direct_files(monkeypatch):
+    from sources import internet_archive
+    from sources.internet_archive import InternetArchive
+
+    asked = []
+
+    def fake_fetch(url):
+        asked.append(url)
+        if "advancedsearch" in url:
+            return IA_SEARCH
+        return {"tao-te-king": IA_META, "lending-only": IA_LENDING}[url.rsplit("/", 1)[-1]]
+
+    monkeypatch.setattr(internet_archive, "fetch", fake_fetch)
+    hits = InternetArchive().search("Tao Te Ching")
+    assert len(hits) == 1  # the lending copy has no file to read and is not a row
+    h = hits[0]
+    assert h["url"] == "https://archive.org/download/tao-te-king/tao.epub" and h["kind"] == "epub"
+    assert (h["author"], h["year"], h["lang"], h["size_kb"]) == ("Julius Evola", "1974", "it", 1)
+    assert "sort[]=downloads+desc" in asked[0] and "output=json" in asked[0]
+    assert asked[1] == "https://archive.org/metadata/tao-te-king"
+
+
+def test_internet_archive_keeps_only_the_rows_that_name_the_query():
+    from sources.internet_archive import InternetArchive
+
+    ia = InternetArchive()
+    assert ia.names_query("Tao Te Ching", {"title": "Tao Tê Ching: di Lao-Tze", "creator": "Julius Evola"})
+    assert not ia.names_query("Tao Te Ching", {"title": "Основы даосизма", "creator": "Кто-то"})
+    assert not ia.names_query("Tao Te Ching", {"title": "", "creator": ""})
+
+
+def test_internet_archive_ignores_a_file_entry_with_no_name():
+    """An entry without a name would send the reader to the item's directory listing, and `files` is not
+    always a list: neither is a book."""
+    from sources.internet_archive import InternetArchive
+
+    ia = InternetArchive()
+    assert ia.file_of({"files": [{"format": "DjVuTXT", "size": "10"}]}) is None
+    assert ia.file_of({"files": {"DjVuTXT": "x"}}) is None
+    assert ia.file_of({"files": ["DjVuTXT"]}) is None
+    assert ia.file_of({"files": [{"format": "DjVuTXT", "name": "b.txt", "size": "12"}]}) == ("b.txt", "txt", 12)

@@ -5,12 +5,20 @@ from __future__ import annotations
 
 import html
 import re
+import threading
 import urllib.request
 
 VOLUME_RE = re.compile(r"\b(?:т|том|кн|книга|ч|часть|vol|volume|part)\.?\s*(\d+|[IVXLC]+)\b", re.I)
 OPENS = frozenset(("html", "fb2", "epub", "pdf", "txt"))  # what the pipeline can turn into a book
-# priority when rows are sorted: the Russian catalogs first, then the open ones
-SOURCE_ORDER = ("fantasy-worlds", "flibusta", "coollib", "standard-ebooks", "gutenberg", "wikisource", "bia")
+# priority when rows are sorted: the search order, set from SOURCES by `sources/__init__.py`
+SOURCE_ORDER: tuple[str, ...] = ()
+# `over`: the running round's end, set by `sources.ask` in each request's thread
+ROUND = threading.local()
+
+
+def round_over() -> threading.Event:
+    """The end of the round this thread's request belongs to; a fresh event outside a round."""
+    return getattr(ROUND, "over", None) or threading.Event()
 
 
 def get(url: str, timeout: int = 40) -> bytes:
@@ -46,12 +54,17 @@ def terms(query: str) -> list[str]:
     return seen
 
 
+def said_words(query: str) -> list[str]:
+    """The words of a query that judge a row: short ones too («Лунь юй»), but no stop words or initials."""
+    return [w for w in norm_title(query).split() if len(w) > 1 and w not in STOP]
+
+
 def fallbacks(query: str, limit: int = 3) -> list[str]:
     """Shorter searches for a query the catalogs cannot match as a phrase. A reader names the author
     before the title («Толстой Война и мир») or after it («…решений Виногродский»), so the query
     without its first word and without its last one are tried whole, as long as what is left could
     be a title. Then the first two words, and the longest single ones."""
-    raw = norm_title(query).split()
+    raw = [w for w in norm_title(query).split() if len(w) > 1 or w in STOP]  # no initials
     kept = [w for w in raw if w not in STOP]
     out: list[str] = []
     if len(kept) > 1:
@@ -72,7 +85,7 @@ def matched(words: list[str], row: dict) -> int:
     """How many of the query's words a row names, in its title, author or translator. Whole words
     only, allowing a different ending («войны» names «война», «Владимир» does not name «мир»)."""
     said = norm_title(" ".join((row.get("title", ""), row.get("author", ""), row.get("translator", "")))).split()
-    return sum(any(same_word(w, x) for x in said) for w in words)
+    return sum(len(w) > 1 and any(same_word(w, x) for x in said) for w in words)
 
 
 def same_word(a: str, b: str) -> bool:
