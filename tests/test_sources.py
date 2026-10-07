@@ -229,3 +229,152 @@ def test_volume_numbers_do_not_share_a_cached_answer(monkeypatch):
     sources.search_text("Троецарствие, том 1")
     sources.search_text("Троецарствие, том 2")
     assert "Троецарствие, том 2" in asked
+
+
+# --- open libraries: Standard Ebooks, Project Gutenberg, Wikisource, the Buddhadasa archive ---
+
+SE_FEED = """<feed><entry>
+<id>https://standardebooks.org/ebooks/laozi/tao-te-ching/james-legge</id>
+<title>Tao Te Ching</title>
+<author><name>Laozi</name><uri>https://standardebooks.org/ebooks/laozi</uri></author>
+<dc:issued>2014-05-25T00:00:00Z</dc:issued><dc:language>en-GB</dc:language>
+<link href="https://standardebooks.org/ebooks/laozi/tao-te-ching/james-legge/downloads/laozi_tao-te-ching_james-legge.epub?source=feed" length="803239" rel="http://opds-spec.org/acquisition/open-access" title="Recommended compatible epub" type="application/epub+zip" />
+<link href="https://standardebooks.org/ebooks/laozi/tao-te-ching/james-legge/downloads/laozi_tao-te-ching_james-legge.azw3?source=feed" length="885471" rel="http://opds-spec.org/acquisition/open-access" title="Amazon Kindle azw3" type="application/x-mobipocket-ebook" />
+</entry><entry>
+<id>https://standardebooks.org/ebooks/w-b-yeats/poetry</id>
+<title>Poetry</title><author><name>W. B. Yeats</name></author>
+<link href="https://standardebooks.org/ebooks/w-b-yeats/poetry/downloads/w-b-yeats_poetry.epub?source=feed" length="1000" title="Recommended compatible epub" type="application/epub+zip" />
+</entry></feed>"""
+
+
+def test_standard_ebooks_entries(monkeypatch):
+    from sources.standard_ebooks import StandardEbooks
+
+    hits = StandardEbooks().entries(SE_FEED)
+    tao = hits[0]
+    assert tao["url"].endswith("laozi_tao-te-ching_james-legge.epub?source=feed") and tao["kind"] == "epub"
+    assert (tao["author"], tao["translator"], tao["year"], tao["size_kb"], tao["lang"]) == (
+        "Laozi",
+        "James Legge",
+        "2014",
+        784,
+        "en",
+    )
+    assert hits[1]["translator"] == ""
+    # the search reads blurbs as well: a book that does not name the query is not a hit
+    monkeypatch.setattr("sources.standard_ebooks.get", lambda url, timeout=40: SE_FEED.encode())
+    assert [h["title"] for h in StandardEbooks().search("Tao Te Ching")] == ["Tao Te Ching"]
+
+
+PG_FEED = """<feed><entry><id>https://www.gutenberg.org/ebooks/216.opds</id>
+<title>The Tao Teh King, or the Tao and its Characteristics</title><content type="text">Laozi</content></entry>
+<entry><id>https://www.gutenberg.org/ebooks/7337.opds</id><title>道德經 (Chinese)</title>
+<content type="text">Laozi</content></entry>
+<entry><id>https://www.gutenberg.org/ebooks/10471.opds</id>
+<title>The World&#39;s Greatest Books — Volume 01</title><content type="text">1179 downloads</content></entry>
+</feed>"""
+
+
+def test_gutenberg_entries_and_spellings(monkeypatch):
+    from sources.gutenberg import Gutenberg
+
+    hits = Gutenberg().entries(PG_FEED)
+    assert hits[0]["url"] == "https://www.gutenberg.org/ebooks/216.epub3.images" and hits[0]["kind"] == "epub"
+    assert (hits[1]["title"], hits[1]["lang"]) == ("道德經", "zh")
+    assert hits[2]["author"] == "" and hits[2]["title"] == "The World's Greatest Books — Volume 01"
+    monkeypatch.setattr("sources.gutenberg.get", lambda url, timeout=40: PG_FEED.encode())
+    # no row names «Tao Te Ching»: the catalog matched another spelling, so the rows sharing a word stand
+    assert [h["title"] for h in Gutenberg().search("Tao Te Ching")] == [hits[0]["title"]]
+    assert Gutenberg().search("The Web That Has No Weaver") == []  # found by subject, not one word shared
+    # rows that name the query push out those the catalog found by subject
+    assert [h["title"] for h in Gutenberg().search("Tao Teh King")] == [hits[0]["title"]]
+    no_records = (
+        "<feed><entry><id>https://www.gutenberg.org/ebooks.opds/</id><title>No records found.</title></entry></feed>"
+    )
+    assert Gutenberg().entries(no_records) == []
+
+
+WS_ANSWER = {
+    "query": {
+        "pages": [
+            {"index": 2, "title": "Война и мир (Толстой)", "pageprops": {}},
+            {"index": 1, "title": "Война и мир", "pageprops": {"disambiguation": ""}},
+            {"index": 3, "title": "Война и мир (Толстой)/Том 1", "pageprops": {}},
+            {"index": 4, "title": "ЭСБЕ/Пекин", "pageprops": {}},
+            {"index": 5, "title": "История Тибета и Хухунора", "pageprops": {}},
+        ]
+    }
+}
+
+
+def test_wikisource_keeps_whole_works(monkeypatch):
+    import json
+
+    from sources.wikisource import Wikisource, language
+
+    assert language("Война и мир") == "ru" and language("Tao Te Ching") == "en"
+    asked = []
+
+    def fake_get(url, timeout=40):
+        asked.append(url)
+        return json.dumps(WS_ANSWER).encode()
+
+    monkeypatch.setattr("sources.wikisource.get", fake_get)
+    hits = Wikisource().search("Война и мир")
+    assert asked[0].startswith("https://ru.wikisource.org/w/api.php?")
+    assert [h["title"] for h in hits] == ["Война и мир (Толстой)"]  # no list of editions, chapter or article
+    url = hits[0]["url"]
+    assert url.startswith("https://ws-export.wmcloud.org/?lang=ru&format=epub-3&page=") and hits[0]["kind"] == "epub"
+    assert "%D0%92%D0%BE%D0%B9%D0%BD%D0%B0_%D0%B8_%D0%BC%D0%B8%D1%80_(" in url
+
+
+def test_accents_do_not_hide_a_title():
+    from sources.standard_ebooks import relevant
+
+    row = base.hit("wikisource", "Tâo Teh King", "u", "epub")
+    assert relevant("tao teh king", [row]) == [row]
+    assert relevant("ching", [base.hit("bia", "Dependent Quenching", "u", "pdf")]) == []  # whole words only
+
+
+BIA_ANSWER = [
+    {
+        "title": {"rendered": "Handbook-for-Mankind-Buddhadasa-Bhikkhu"},
+        "source_url": "https://main.bia.or.th/wp-content/uploads/2025/02/Handbook-for-Mankind-Buddhadasa-Bhikkhu.pdf",
+        "media_details": {"filesize": 4661429},
+    },
+    {
+        "title": {"rendered": "人類手冊-Handbook-for-Mankind-Buddhadasa-CN"},
+        "source_url": "https://main.bia.or.th/wp-content/uploads/2025/02/x-CN.pdf",
+        "media_details": {"filesize": 21807745},
+    },
+    {
+        "title": {"rendered": "Руководство к жизни-Handbook for Mankind"},
+        "source_url": "https://main.bia.or.th/wp-content/uploads/2025/02/ru.pdf",
+        "media_details": {},
+    },
+    {"title": {"rendered": "Poster"}, "source_url": "https://main.bia.or.th/poster.jpg", "media_details": {}},
+]
+
+
+def test_bia_files_as_books(monkeypatch):
+    import json
+
+    from sources.bia import Bia
+
+    hits = Bia().files(BIA_ANSWER)
+    assert [(h["title"], h["author"], h["lang"], h["kind"]) for h in hits] == [
+        ("Handbook for Mankind", "Buddhadasa Bhikkhu", "", "pdf"),
+        ("人類手冊 Handbook for Mankind", "Buddhadasa Bhikkhu", "zh", "pdf"),
+        ("Руководство к жизни Handbook for Mankind", "", "", "pdf"),
+    ]
+    assert hits[0]["size_kb"] == 4552 and hits[2]["size_kb"] is None
+    monkeypatch.setattr("sources.bia.get", lambda url, timeout=40: json.dumps(BIA_ANSWER).encode())
+    assert len(Bia().search("Руководство к жизни")) == 1
+
+
+def test_open_libraries_follow_the_russian_catalogs():
+    names = [s.name for s in sources.SOURCES]
+    assert names[:3] == ["fantasy-worlds", "flibusta", "coollib"]
+    assert {"standard-ebooks", "gutenberg", "wikisource", "bia"} <= set(names[3:])
+    for s in sources.SOURCES:
+        assert callable(s.search) and callable(s.author_books)

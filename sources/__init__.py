@@ -8,11 +8,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 
 from .base import OPENS, SOURCE_ORDER, editions, fallbacks, matched, norm_title, terms, title_score
+from .bia import Bia
 from .coollib import Coollib
 from .fantasy_worlds import FantasyWorlds
 from .flibusta import Flibusta
+from .gutenberg import Gutenberg
+from .standard_ebooks import StandardEbooks
+from .wikisource import Wikisource
 
-SOURCES = [FantasyWorlds(), Flibusta(), Coollib()]
+# the Russian catalogs first; then libraries whose books are free by law or by their owners' gift
+SOURCES = [FantasyWorlds(), Flibusta(), Coollib(), StandardEbooks(), Gutenberg(), Wikisource(), Bia()]
 SHORTER_TRIES = 3  # how many shorter searches follow a phrase that found nothing
 ROUND_SECONDS = 45  # one deadline for a whole round of requests, not one per request
 PER_SOURCE = 2  # at most this many requests to one catalog at a time: more and the mirrors answer 502

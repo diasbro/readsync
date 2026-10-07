@@ -9,7 +9,8 @@ import urllib.request
 
 VOLUME_RE = re.compile(r"\b(?:т|том|кн|книга|ч|часть|vol|volume|part)\.?\s*(\d+|[IVXLC]+)\b", re.I)
 OPENS = frozenset(("html", "fb2", "epub", "pdf", "txt"))  # what the pipeline can turn into a book
-SOURCE_ORDER = ("fantasy-worlds", "flibusta", "coollib")  # priority when rows are sorted
+# priority when rows are sorted: the Russian catalogs first, then the open ones
+SOURCE_ORDER = ("fantasy-worlds", "flibusta", "coollib", "standard-ebooks", "gutenberg", "wikisource", "bia")
 
 
 def get(url: str, timeout: int = 40) -> bytes:
