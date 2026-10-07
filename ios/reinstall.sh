@@ -39,7 +39,7 @@ rm -f "$list"
 if [ -z "$device" ]; then exit 0; fi
 
 team=$(security find-certificate -a -c "Apple Development" -p 2>/dev/null | openssl x509 -noout -subject 2>/dev/null \
-  | sed -n 's/.*OU *= *\([A-Z0-9]\{10\}\).*/\1/p' | head -1)
+  | sed -n 's/.*OU *= *\([A-Z0-9]\{10\}\).*/\1/p' | head -1 || true)  # none found: said just below
 if [ -z "$team" ]; then echo "$(date '+%F %T') no Apple Development certificate: sign in to Xcode once"; exit 1; fi
 
 echo "$(date '+%F %T') reinstalling on $device"

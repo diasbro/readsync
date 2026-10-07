@@ -19,13 +19,13 @@ from email.parser import BytesParser
 from email.policy import HTTP
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 from library import (
     BOOKS,
     READER,
     SLUG_RE,
     STATE_LOCK,
+    Busy,
     add_session,
     delete_book,
     ensure_manifests,
@@ -77,24 +77,45 @@ UPSTREAM = urllib.request.build_opener(HttpsRedirects)
 
 
 def parse_multipart(content_type: str, body: bytes) -> dict[str, dict]:
-    """Return {field: {"value": str} | {"filename": str, "data": bytes}} from a multipart/form-data body."""
-    msg = BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body)
+    """Return {field: {"value": str} | {"filename": str, "data": memoryview}} from a multipart/form-data body.
+    Only the headers of each part go through the email parser; a file is a view into `body`, not a copy, so
+    an audiobook upload is held in memory once."""
+    boundary = (
+        BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + content_type.encode() + b"\r\n\r\n").get_boundary()
+    )
+    if not boundary:
+        raise ValueError("not a multipart form")
+    delim = b"--" + boundary.encode("latin-1")
+    view = memoryview(body)
     out: dict[str, dict] = {}
-    for part in msg.iter_parts():
+    at = body.find(delim)
+    while at >= 0 and body[at + len(delim) : at + len(delim) + 2] != b"--":  # "--boundary--" closes the form
+        head = at + len(delim)
+        end = body.find(b"\r\n" + delim, head)
+        split = body.find(b"\r\n\r\n", head, end)
+        if end < 0 or split < 0:
+            raise ValueError("cut-off multipart form")
+        at = end + 2
+        part = BytesParser(policy=HTTP).parsebytes(bytes(view[head:split]).lstrip(b" \t\r\n") + b"\r\n\r\n")
         name = part.get_param("name", header="content-disposition")
         if not name:
             continue
         fn = part.get_filename()
-        payload = part.get_payload(decode=True) or b""
+        payload = view[split + 4 : end]
         if fn:
             out[name] = {"filename": fn, "data": payload}
         else:
-            value = payload.decode("utf-8", "replace").strip()
+            value = bytes(payload).decode("utf-8", "replace").strip()
             if name in out and "value" in out[name]:  # repeated field: keep every value (volumes / parts)
                 out[name]["values"] = out[name].get("values", [out[name]["value"]]) + [value]
             else:
                 out[name] = {"value": value}
     return out
+
+
+def no_constant(name: str) -> float:
+    """NaN and Infinity are not JSON: saved, they would make a state file that JSON.parse refuses."""
+    raise ValueError(f"{name} is not a number")
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -114,8 +135,10 @@ class Handler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         path = path.split("?", 1)[0].split("#", 1)[0]
         if path.startswith("/books/"):
-            rel = Path(path[len("/books/") :])
-            target = (BOOKS / rel).resolve()
+            try:  # the page asks for images/рис 1.jpg as images/%D1%80%D0%B8%D1%81%201.jpg
+                target = (BOOKS / urllib.parse.unquote(path[len("/books/") :])).resolve()
+            except (OSError, ValueError):  # a NUL byte, say
+                return str(BOOKS / "__forbidden__")
             if BOOKS.resolve() in target.parents:
                 return str(target)
             return str(BOOKS / "__forbidden__")
@@ -136,23 +159,62 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def read_json(self):
+    def parse_request(self) -> bool:
+        """A Content-Length that is not a number of bytes is refused before anything else: where its body ends
+        is unknown, so the connection closes rather than read that body as the next request."""
+        if not super().parse_request():
+            return False
+        n = (self.headers.get("Content-Length") or "").strip()
+        if n and not re.fullmatch(r"[0-9]+", n):
+            self.close_connection = True
+            self.send_json({"error": "bad Content-Length"}, HTTPStatus.BAD_REQUEST)
+            return False
+        return True
+
+    def body_length(self, limit: int) -> int:
         n = int(self.headers.get("Content-Length") or 0)
-        if n > 1_000_000:
+        if not 0 <= n <= limit:  # read(-1) would wait for the client to hang up
             self.close_connection = True  # do not try to resync the stream after a refused body
-            raise ValueError("body too large")
-        raw = self.rfile.read(n) or b"{}"
+            raise ValueError("body too large" if n > limit else "bad Content-Length")
+        return n
+
+    def read_json(self) -> dict:
+        """A JSON object; anything else (a list, NaN, Infinity) is the client's mistake."""
+        raw = self.rfile.read(self.body_length(1_000_000)) or b"{}"
         try:
-            return json.loads(raw)
+            body = json.loads(raw, parse_constant=no_constant)
         except ValueError as e:
             raise ValueError(f"bad json: {e}") from None
+        if not isinstance(body, dict):
+            raise ValueError("bad json: not an object")
+        return body
 
     def read_form(self) -> dict:
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > 3_000_000_000:
-            self.close_connection = True
-            raise ValueError("body too large")
+        n = self.body_length(3_000_000_000)
         return parse_multipart(self.headers.get("Content-Type", ""), self.rfile.read(n))
+
+    def refused(self) -> bool:
+        """Only this server's own pages are answered: a request naming another host (a page whose name was
+        made to resolve to 127.0.0.1) or one sent from another origin gets 403, a GET too (an <img> on any page
+        would start a search or end a listen). A page opened from elsewhere (the «+ readsync» bookmarklet's
+        /?wish=) is a plain top-level navigation to a page, not to the API, and is let through. True when refused."""
+        host, port = self.server.server_address[:2]
+        ours = {f"{h}:{port}" for h in ("127.0.0.1", "localhost", host)}
+        origin = self.headers.get("Origin")
+        foreign = (origin is not None and origin not in {f"http://{o}" for o in ours}) or self.headers.get(
+            "Sec-Fetch-Site"
+        ) == "cross-site"
+        navigation = (
+            self.command in ("GET", "HEAD")
+            and self.headers.get("Sec-Fetch-Mode") == "navigate"
+            and self.headers.get("Sec-Fetch-Dest") == "document"
+            and not self.path.startswith("/api/")
+        )
+        if self.headers.get("Host", f"127.0.0.1:{port}") in ours and (not foreign or navigation):
+            return False
+        self.close_connection = True  # its body, if any, is never read
+        self.send_json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
+        return True
 
     def state_slug(self):
         m = re.match(r"^/api/state/([^/?]+)(/session)?$", self.path)
@@ -160,7 +222,13 @@ class Handler(SimpleHTTPRequestHandler):
             return None, None
         return m.group(1), bool(m.group(2))
 
+    def do_HEAD(self):
+        if not self.refused():
+            super().do_HEAD()
+
     def do_GET(self):
+        if self.refused():
+            return
         if self.path.startswith("/api/books"):
             return self.send_json(list_books())
         if self.path.startswith("/api/state/"):
@@ -220,6 +288,8 @@ class Handler(SimpleHTTPRequestHandler):
     # The request body is always read before responding: on a keep-alive connection an unread
     # body would be parsed as the start of the next request.
     def do_PUT(self):
+        if self.refused():
+            return
         try:
             body = self.read_json()
         except ValueError as e:
@@ -231,6 +301,8 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path.startswith("/api/books/"):
             try:
                 return self.send_json(rename_book(self.path.rsplit("/", 1)[-1], body.get("title", "")))
+            except Busy as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.CONFLICT)
             except (ValueError, OSError) as e:
                 return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
         if self.path.startswith("/api/hits/"):
@@ -248,6 +320,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
 
     def do_POST(self):
+        if self.refused():
+            return
         if self.path.startswith("/api/add"):
             try:
                 form = self.read_form()
@@ -286,6 +360,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
 
     def do_DELETE(self):
+        if self.refused():
+            return
         if self.path.startswith("/api/jobs/"):
             try:
                 with STATE_LOCK:
@@ -372,8 +448,8 @@ class Handler(SimpleHTTPRequestHandler):
             while LISTEN["since"] <= gen:  # another recording started: this one is over
                 try:
                     chunk = up.read(1 << 16)
-                    if not chunk:
-                        return
+                    if not chunk:  # the end, or less than upstream promised: the connection closes below
+                        break
                     self.wfile.write(chunk)
                 except OSError:  # the browser left (BrokenPipe, reset) or the source stalled
                     break

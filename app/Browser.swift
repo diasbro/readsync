@@ -38,34 +38,51 @@ enum Browser {
         return AEDeterminePermissionToAutomateTarget(&target, typeWildCard, typeWildCard, ask) == noErr
     }
 
+    /// The browser is asked off the main thread: a busy or hung one never freezes the menu.
     static func open(_ url: URL) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            if reusesTab, mayAutomate(ask: false), focus(url) { return }
+            DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+        }
+    }
+
+    /// The same, waiting for the browser: for `--open`, which has no menu to keep responsive.
+    static func openNow(_ url: URL) {
         if reusesTab, mayAutomate(ask: false), focus(url) { return }
         NSWorkspace.shared.open(url)
     }
 
-    /// True when a tab showing this address was brought to the front.
+    /// True when a tab showing this address was brought to the front. The browser gets five seconds.
     private static func focus(_ url: URL) -> Bool {
         guard let browser = defaultBrowser, let script = script(for: browser, url: url) else { return false }
-        var error: NSDictionary?
-        let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
-        if let error {  // the browser said no: the caller opens the address the usual way
-            log("could not look through the tabs: \(error[NSAppleScript.errorMessage] ?? error)")
+        let (code, out) = run("/usr/bin/osascript", ["-e", script], timeout: 5)
+        let answer = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if code != 0 {  // the browser said no or did not answer: the caller opens the address the usual way
+            log("could not look through the tabs: \(answer)")
             return false
         }
-        return result?.booleanValue ?? false
+        return answer == "true"
     }
 
     /// The script for this browser, or nil when it has no way to tell us about its tabs.
     /// With no url this only answers whether such a script exists.
     private static func script(for browser: String, url: URL?) -> String? {
-        let prefix = url?.absoluteString ?? ""
+        // a string for the script: a quote or a backslash in the address cannot end it early
+        let prefix = (url?.absoluteString ?? "").replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        // the library is the bare address, and a reader tab (`?book=`) starts with it too. A book's address is
+        // the whole of it, or it followed by more of the query or a fragment: `?book=a` is not `?book=a-2`
+        let match =
+            url?.query == nil
+            ? "(URL of t) starts with \"\(prefix)\" and (URL of t) does not contain \"?book=\""
+            : "((URL of t) is \"\(prefix)\" or (URL of t) starts with \"\(prefix)&\" or (URL of t) starts with \"\(prefix)#\")"
         if browser == "com.apple.safari" {
             return """
                 tell application "Safari"
                   repeat with w in windows
                     repeat with t in tabs of w
                       try
-                        if (URL of t) starts with "\(prefix)" then
+                        if \(match) then
                           set current tab of w to t
                           set index of w to 1
                           activate
@@ -92,7 +109,7 @@ enum Browser {
                 repeat with t in tabs of w
                   set i to i + 1
                   try
-                    if (URL of t) starts with "\(prefix)" then
+                    if \(match) then
                       set active tab index of w to i
                       set index of w to 1
                       set found to true

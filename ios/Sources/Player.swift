@@ -19,11 +19,11 @@ final class Player: NSObject, ObservableObject {
     /// `isPlaying` as the views see it: told by the player, not asked of it on every draw.
     @Published private(set) var playing = false
     @Published private(set) var progress = 0.0
-    /// The lock screen shows the sentence being spoken instead of the book's title.
-    @Published var lockText = AppSettings.lockText {
+    /// The lock screen shows the sentence being spoken instead of the book's title: the reader's setting,
+    /// told here each time the page saves its settings.
+    var lockText = AppSettings.lockText {
         didSet {
             guard lockText != oldValue else { return }
-            AppSettings.lockText = lockText
             if lockText { loadText() } else { text = nil }  // the book's text is held only while it is shown
             updateNowPlaying()
         }
@@ -60,28 +60,71 @@ final class Player: NSObject, ObservableObject {
     private var pagesOn = false  // the reader shows pages: the lock screen must not start the narrator under them
     private var rate: Float = 1
     private var lastSave: Task<Void, Never>?
+    private var writes: [UUID: Task<Void, Never>] = [:]  // session and «Прочитана» writes on their way
+    private var held: (page: String, src: String)?  // a page's book not loaded over the one playing: read as pages
     private var autoplay: String?  // «Слушать» in the library: this book plays once it is loaded and in place
     private var lastTick: Double?  // the time of the last tick while playing: a step from it is listening, a jump is not
     private var isDone = false  // the book is read, by its merged state: no mark is made on it
     private var markedOnce = false  // the end of the text was crossed with this item: after an undo, only the file's end marks
+    private var unsaved: [Session] = []  // listening sessions not written yet: tried again with the next save
 
     /// Wait for the last position write and the reader's own writes: the library reads them right after a
     /// book is closed.
     func flush() async {
         await lastSave?.value
+        for task in Array(writes.values) { await task.value }
         await Bridge.flushWrites()
+    }
+
+    /// A write `flush` waits for.
+    private func track(_ task: Task<Void, Never>) {
+        let id = UUID()
+        writes[id] = task
+        Task {
+            await task.value
+            writes[id] = nil
+        }
     }
 
     /// The book the narrator is loaded with.
     var slug: String? { book?.slug }
+
+    /// The library folder moved (into iCloud Drive): the book's state is written to its new place.
+    func libraryMoved() {
+        if let book { sharedDir = Shelf.shared.sharedDir(book.slug) }
+    }
 
     /// The book open in the reader now, audio or not.
     var pageSlug: String? { web == nil ? nil : webSlug }
 
     /// «Слушать»: the narrator starts as soon as the reader has the book loaded, from its saved place.
     func playWhenOpened(_ slug: String) {
-        if book?.slug == slug, !pagesOn { return play() }
+        if book?.slug == slug, !pagesOn { return resume() }
         autoplay = slug
+    }
+
+    /// The download «Слушать» waited for failed or was called off: the book does not play on a later opening.
+    func dropAutoplay(_ slug: String) {
+        if autoplay == slug { autoplay = nil }
+    }
+
+    /// Play on, paused and loaded: from a place another device saved since, if it did. Left in the
+    /// foreground, the narrator would otherwise start from its own old place and save it over the newer one.
+    func resume() {
+        guard let book, let sharedDir, stateLoaded, !posDirty, !isPlaying else { return play() }
+        let known = storedPos.at, gen = itemGen
+        Task.detached {
+            let merged = ReadingState.load(shared: sharedDir, edition: book.edition)
+            await MainActor.run {
+                let p = Player.shared
+                guard p.itemGen == gen, !p.isPlaying else { return }
+                let at = ReadingState.num(merged["posAt"])
+                guard at > known, !p.posDirty else { return p.play() }
+                p.storedPos = (ReadingState.num(merged["pos"]), at)
+                p.seek(p.storedPos.t, chosen: false)
+                p.play(rewind: false)  // the newer place as it was saved: no step back from the old one
+            }
+        }
     }
 
     /// The asked-for start, once the item can play and the saved place is known.
@@ -110,6 +153,7 @@ final class Player: NSObject, ObservableObject {
     /// One the reader left under pages was never listened to and goes.
     func readerClosed(_ slug: String) {
         autoplay = nil
+        held = nil
         if slug == book?.slug, pagesOn { return stop() }
         savePosition()
     }
@@ -123,8 +167,13 @@ final class Player: NSObject, ObservableObject {
     func handle(_ msg: [String: Any], from page: String) {
         let cmd = msg["cmd"] as? String
         if cmd == "load" {
-            if let src = msg["src"] as? String { load(src) }
+            if let src = msg["src"] as? String { load(src, from: page) }
             return
+        }
+        // a page held back switched to listening: its book is loaded now, over the other one
+        if cmd == "pages", (msg["on"] as? Bool) == false, let h = held, h.page == page {
+            held = nil
+            load(h.src)
         }
         guard page == book?.slug else { return }
         switch cmd {
@@ -143,6 +192,24 @@ final class Player: NSObject, ObservableObject {
         }
     }
 
+    /// A page's `load` while another book is loaded: the page asks for its audio before it turns to pages,
+    /// so the book's saved mode decides. Read as pages, it is held and the narrator goes on with its own
+    /// book; listened to, it is loaded as before.
+    private func load(_ src: String, from page: String) {
+        guard let other = book?.slug, other != page, src != self.src else { return load(src) }
+        held = (page, src)
+        let dir = Shelf.shared.sharedDir(page)
+        Task.detached {
+            let pages = dir.map { ReadingState.load(shared: $0, edition: "")["mode"] as? String == "pages" } ?? false
+            await MainActor.run {
+                let p = Player.shared
+                guard !pages, let h = p.held, h.page == page, h.src == src else { return }
+                p.held = nil
+                p.load(src)
+            }
+        }
+    }
+
     /// `src` is the reader's path, /books/<slug>/<file>; the file is the app's own copy.
     func load(_ src: String) {
         if src == self.src, player != nil {
@@ -154,7 +221,10 @@ final class Player: NSObject, ObservableObject {
             return
         }
         let parts = src.split(separator: "/").map(String.init)
-        guard parts.count == 3, parts[0] == "books", let book = Shelf.localCopy(parts[1]) else {
+        // a book's own file, never a path out of its folder
+        guard parts.count == 3, parts[0] == "books", Shelf.isPlainName(parts[1]), Shelf.isPlainName(parts[2]),
+            let book = Shelf.localCopy(parts[1])
+        else {
             return emit("error", error: "нет аудио", toAnyPage: true)
         }
         stop()  // the last book's place, words and session go with it
@@ -288,12 +358,18 @@ final class Player: NSObject, ObservableObject {
     }
 
     private func setRate(_ r: Float) {
-        guard r > 0 else { return }
+        guard let r = Self.clampRate(r) else { return }
         rate = r
         player?.defaultRate = r  // a paused player stays paused: setting `rate` would start it
         if isPlaying { player?.rate = r }
         emit("ratechange")
         updateNowPlaying()
+    }
+
+    /// A rate the page asks for, kept to 0.5…3; none for one that is no number.
+    nonisolated static func clampRate(_ r: Float) -> Float? {
+        guard r.isFinite, r > 0 else { return nil }
+        return min(max(r, 0.5), 3)
     }
 
     func stop() {
@@ -390,6 +466,7 @@ final class Player: NSObject, ObservableObject {
     // ---- saving, off the main thread: iCloud's file coordination can take a moment ----
 
     func savePosition() {
+        saveSessions()
         guard posDirty, let book, let sharedDir else { return }
         let t = time, at = ReadingState.nowMs
         storedPos = (t, at)
@@ -414,13 +491,32 @@ final class Player: NSObject, ObservableObject {
     }
 
     private func endSession() {
-        guard let start = sessionStart, let book, let sharedDir else { return }
+        guard let start = sessionStart, let book, sharedDir != nil else { return }
         sessionStart = nil
         let sec = Date().timeIntervalSince(start.at)
         let words = Double(max(0, wordIndex(time) - start.word))
-        _ = background {
-            _ = ReadingState.addSession(shared: sharedDir, edition: book.edition, day: ReadingState.today, sec: sec, words: words)
-        }
+        unsaved.append(Session(slug: book.slug, day: ReadingState.today, sec: sec, words: words))
+        saveSessions()
+    }
+
+    /// Sessions written to their books' folders where the library is now; one that could not be (a write cut
+    /// off by a move of the library, say) is kept and tried again with the next save.
+    private func saveSessions() {
+        guard !unsaved.isEmpty else { return }
+        let batch = unsaved.map { (session: $0, dir: Shelf.shared.sharedDir($0.slug)) }
+        unsaved = []
+        track(background {
+            var failed: [Session] = []
+            for (s, dir) in batch {
+                guard let dir, ReadingState.session(shared: dir, day: s.day, sec: s.sec, words: s.words) else {
+                    failed.append(s)
+                    continue
+                }
+            }
+            if failed.isEmpty { return }
+            let retry = failed
+            await MainActor.run { Player.shared.unsaved = retry + Player.shared.unsaved }
+        })
     }
 
     private func wordIndex(_ t: Double) -> Int {
@@ -481,7 +577,7 @@ final class Player: NSObject, ObservableObject {
         guard !isDone, AppSettings.markRead, let book, let sharedDir else { return }
         isDone = true
         let gen = itemGen, day = ReadingState.today, at = ReadingState.nowMs
-        _ = background {
+        track(background {
             let merged = ReadingState.load(shared: sharedDir, edition: book.edition)
             // read already on another device, or by its old place at the end: no second date
             guard ReadingState.status(merged, audio: true, atEnd: false).status != .done else { return }
@@ -496,7 +592,7 @@ final class Player: NSObject, ObservableObject {
                 if ok { p.emit("finished") } else { p.isDone = false }  // not written: the next crossing tries again
             }
             await Shelf.shared.remeasure(book)
-        }
+        })
     }
 
     // ---- the sentence on the lock screen ----
@@ -509,8 +605,13 @@ final class Player: NSObject, ObservableObject {
             let text = BookText(file)
             await MainActor.run {
                 let p = Player.shared
-                guard p.itemGen == gen, p.lockText else { return }
+                // the flag drops whatever came of it: left up, no text would ever be loaded again
                 p.loadingText = false
+                guard p.lockText else { return }
+                guard p.itemGen == gen else {
+                    p.loadText()  // the narrator took up its item again meanwhile (the page reattached)
+                    return
+                }
                 p.text = text
                 p.updateNowPlaying()
             }
@@ -534,8 +635,9 @@ final class Player: NSObject, ObservableObject {
         guard let web, toAnyPage || webSlug == book?.slug else { return }
         var s: [String: Any] = ["event": event, "t": time, "paused": !isPlaying, "rate": rate]
         if let d = player?.currentItem?.duration.seconds.finite, d > 0 { s["duration"] = d }
+        if let pausedAt { s["pausedAt"] = pausedAt.timeIntervalSince1970 * 1000 }  // the page's rewind counts from it
         if let error { s["error"] = error }
-        guard let data = try? JSONSerialization.data(withJSONObject: s), let json = String(data: data, encoding: .utf8)
+        guard let data = JSONSafe.data(s), let json = String(data: data, encoding: .utf8)
         else { return }
         web.evaluateJavaScript("window.nativeAudio && window.nativeAudio._update(\(json))")
     }
@@ -609,12 +711,13 @@ final class Player: NSObject, ObservableObject {
         nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { _ in
             Task { @MainActor in
                 let p = Player.shared
-                let src = p.src, t = p.time, pages = p.pagesOn
+                let src = p.src, t = p.time, pages = p.pagesOn, was = p.playIntent
                 guard !src.isEmpty else { return }
                 p.stop()  // saves a dirty position first
                 p.load(src)
                 p.pagesOn = pages
                 p.seek(t, chosen: false)  // taken once the new item is ready
+                if was { p.play(rewind: false) }  // a narrator that was playing plays on
             }
         }
     }
@@ -665,6 +768,14 @@ final class Player: NSObject, ObservableObject {
     static func forgetMissingCovers() { noCover.removeAll() }
 }
 
+/// A listening session to be added to a book's statistics.
+struct Session: Sendable {
+    let slug: String
+    let day: String
+    let sec: Double
+    let words: Double
+}
+
 /// timing.json's words, as small numbers: `[block, charStart, charEnd, t0, t1]` each.
 struct Words: Sendable {
     var starts: [Double] = []
@@ -712,7 +823,8 @@ struct BookText: Sendable {
 
     /// The sentence the word at `from..<to` of `block` is in: the block's own span, or, without spans, as far
     /// as the sentence-ending marks either side. A long one is shown a piece at a time, the piece the word is in.
-    func sentence(block b: Int, at from: Int, to: Int, limit: Int = 160) -> String? {
+    /// `limit`: what one line of the lock screen's player holds; a longer sentence goes by in pieces of that.
+    func sentence(block b: Int, at from: Int, to: Int, limit: Int = 26) -> String? {
         guard b >= 0, b < blocks.count else { return nil }
         let s = blocks[b] as NSString
         let n = s.length
@@ -743,7 +855,7 @@ struct BookText: Sendable {
         let r = s.rangeOfComposedCharacterSequences(for: NSRange(location: a, length: z - a))
         let body = s.substring(with: r).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return nil }
-        return (a > start ? "…" : "") + body + (z < end ? "…" : "")
+        return body  // pieces follow the voice one after another: no ellipses eating the line
     }
 }
 

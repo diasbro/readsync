@@ -11,6 +11,9 @@ let srcDir = support.appendingPathComponent("src")
 let booksDir = support.appendingPathComponent("books")
 let libsDir = support.appendingPathComponent("pylibs")  // only for a package the app does not carry
 let portFile = support.appendingPathComponent("port")
+let serverPidFile = support.appendingPathComponent("server.pid")
+/// Python's compiled files go here, never next to the code: the bundled Python sits inside the signed app.
+let pycacheDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/readsync/pycache")
 
 /// Where the library is right now: the running server writes its port down.
 var libraryURL: URL {
@@ -49,6 +52,7 @@ func run(_ tool: String, _ args: [String], cwd: URL? = nil, timeout: TimeInterva
     // nothing here may wait for a person: git and ssh fail instead of asking for a password or a host key
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
+    env["PYTHONPYCACHEPREFIX"] = pycacheDir.path
     task.environment = env
     let pipe = Pipe()
     task.standardOutput = pipe
@@ -70,6 +74,45 @@ func run(_ tool: String, _ args: [String], cwd: URL? = nil, timeout: TimeInterva
     }
     _ = read.wait(timeout: .now() + 5)
     return (task.isRunning ? -1 : task.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+}
+
+/// When a process started and who its parent is, or nil when no process has that number.
+func processDetails(_ pid: pid_t) -> (start: Date, parent: pid_t)? {
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+    let t = info.kp_proc.p_un.__p_starttime
+    return (Date(timeIntervalSince1970: Double(t.tv_sec) + Double(t.tv_usec) / 1e6), info.kp_eproc.e_ppid)
+}
+
+/// Whether the process that wrote its pid into this file still runs: a number the system has since given
+/// to another process (after a reboot, say) started after the file was written.
+func holds(_ file: URL) -> pid_t? {
+    guard let text = try? String(contentsOf: file, encoding: .utf8),
+        let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+        let written = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date,
+        let started = processDetails(pid)?.start, started <= written.addingTimeInterval(1)
+    else { return nil }
+    return pid
+}
+
+/// Whether the server answers within so many seconds, asked again and again. Off the main thread.
+func answers(_ url: URL, within seconds: TimeInterval) -> Bool {
+    final class Box: @unchecked Sendable { var up = false }
+    let box = Box()
+    let deadline = Date().addingTimeInterval(seconds)
+    while !box.up && Date() < deadline {
+        let answered = DispatchSemaphore(value: 0)
+        let request = URLRequest(url: url.appendingPathComponent("api/books"), timeoutInterval: 1)
+        URLSession.shared.dataTask(with: request) { _, response, _ in
+            box.up = (response as? HTTPURLResponse)?.statusCode == 200
+            answered.signal()
+        }.resume()
+        _ = answered.wait(timeout: .now() + 2)
+        if !box.up { usleep(250_000) }
+    }
+    return box.up
 }
 
 /// The Python inside the app, for this processor. Nothing is installed on the Mac it runs on.

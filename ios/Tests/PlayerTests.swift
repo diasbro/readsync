@@ -27,4 +27,35 @@ final class PlayerTests: XCTestCase {
         XCTAssertEqual(Player.readThreshold(old, duration: 39_624), 39_564)
         XCTAssertNil(Player.readThreshold(old, duration: 0))
     }
+
+    // the rate the page asks for: 0.5…3, and none that is no number
+    func testRateIsClamped() {
+        XCTAssertEqual(Player.clampRate(1.5), 1.5)
+        XCTAssertEqual(Player.clampRate(10), 3)
+        XCTAssertEqual(Player.clampRate(0.1), 0.5)
+        XCTAssertNil(Player.clampRate(0))
+        XCTAssertNil(Player.clampRate(.infinity))
+        XCTAssertNil(Player.clampRate(.nan))
+        XCTAssertNil(Player.clampRate(-1))
+    }
+
+    // the reader's paths name a book's own file: one out of its folder is not served
+    func testPathsStayInTheBook() async {
+        XCTAssertTrue(Shelf.isPlainName("audio.m4a"))
+        XCTAssertFalse(Shelf.isPlainName(".."))
+        XCTAssertFalse(Shelf.isPlainName("a/b"))
+        XCTAssertFalse(Shelf.isPlainName(".hidden"))
+        XCTAssertFalse(Shelf.isPlainName(""))
+        XCTAssertFalse(Shelf.isPlainName("x..y"))
+        let (status, _, _) = await Files.respond(path: "/api/state/../settings", slug: "a")
+        XCTAssertEqual(status, 404)
+        let (nested, _, _) = await Files.respond(path: "/api/state/a/b", slug: "a")
+        XCTAssertEqual(nested, 404)
+    }
+
+    // «в 2026 — N» counts by the UTC year, as the days a book was finished on are UTC days
+    func testYearIsUTC() {
+        XCTAssertEqual(Shelf.utcYear(Date(timeIntervalSince1970: 1_767_225_600 - 1800)), "2025")  // 2025-12-31 23:30 UTC
+        XCTAssertEqual(Shelf.utcYear(Date(timeIntervalSince1970: 1_767_225_600 + 1800)), "2026")  // 2026-01-01 00:30 UTC
+    }
 }

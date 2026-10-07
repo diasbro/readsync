@@ -9,13 +9,17 @@ final class Menu: NSObject, NSApplicationDelegate {
     private let server = Server()
     private let menu = NSMenu()
     private var python: String?
-    private var toolsBusy = false
+    // Three long jobs, one at a time: the tools being installed, git (`busy`), the library moving (`cloudBusy`).
+    // While one runs the server is not started from the menu, and a job that ends under another leaves the
+    // start to the last one to end (`startWhenFree`).
+    private var toolsBusy = false { didSet { startWhenFree() } }
     private var behind = 0
-    private var busy: String?  // what git is doing right now, while it is doing it
-    private var updated: String?  // what the last update brought, said for a minute after it
-    private var cloudBusy: String?  // the iCloud switch looking at the library before it asks
+    private var busy: String? { didSet { startWhenFree() } }  // what git is doing right now, while it is doing it
+    private var updated = false  // an update just landed, said for a minute after it
+    private var cloudBusy: String? { didSet { startWhenFree() } }  // «Синхронизация» looking at the library or moving it
+    private var occupied: Bool { toolsBusy || busy != nil || cloudBusy != nil }
+    private var startPending = false  // a job stopped the server, or needs it started again, once nothing else runs
     private var reading: (title: String, slug: String)?
-    private var checkTimer: Timer?
     private let gitQueue = DispatchQueue(label: "readsync.git")  // one at a time, never on the main thread
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -24,8 +28,19 @@ final class Menu: NSObject, NSApplicationDelegate {
         menu.delegate = self
         menu.autoenablesItems = false  // the update item says «занято» by being disabled, so AppKit must not decide
         log("menu bar item ready, visible=\(item.isVisible), icon=\(item.button?.image?.size ?? .zero)")
-        Payload.install()
-        python = findPython()
+        build()
+        // copying the code out and trying each Python take seconds: off the main thread, the menu opens meanwhile
+        DispatchQueue.global(qos: .userInitiated).async {
+            Payload.install()
+            let python = findPython()
+            DispatchQueue.main.async { self.ready(python) }
+        }
+    }
+
+    /// The rest of the launch, once a Python is known. Updates are looked for only when the reader asks
+    /// (the menu item): nothing goes to the network on its own.
+    private func ready(_ python: String?) {
+        self.python = python
         guard let python else {
             alert(
                 "Нужен Python 3.12 или новее",
@@ -34,15 +49,17 @@ final class Menu: NSObject, NSApplicationDelegate {
             return
         }
         toolsBusy = true
-        Payload.ensureTools(python: python) { [weak self] _ in self?.toolsBusy = false }
+        Payload.ensureTools(python: python) { [weak self] installed in
+            guard let self else { return }
+            if installed { self.startPending = true }  // the server finds the new packages only when it starts
+            self.toolsBusy = false
+            self.build()
+        }
         server.start(python: python)
         build()
+        openFirstTime()
         // asked once the server is up, so the first opening of the menu already knows the book
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.lookForReading() }
-        lookForUpdates()
-        checkTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
-            self?.lookForUpdates()
-        }
     }
 
     func applicationWillTerminate(_ notification: Notification) { server.stop() }
@@ -76,13 +93,13 @@ final class Menu: NSObject, NSApplicationDelegate {
         }
         menu.addItem(.separator())
         if !server.isRunning {
-            add("Сервер не запущен, запустить", "", #selector(restart))
+            add("Сервер не запущен, запустить", "", #selector(restart)).isEnabled = !occupied
         }
         let updateItem = add(
             busy ?? (behind > 0 ? "Обновить: есть новое (\(behind))" : "Проверить обновления…"), "", #selector(update))
-        updateItem.isEnabled = busy == nil
-        if let updated, busy == nil {
-            menu.addItem(withTitle: "Обновлено: \(updated). Открытую вкладку перезагрузи", action: nil, keyEquivalent: "")
+        updateItem.isEnabled = !occupied
+        if updated, busy == nil {
+            menu.addItem(withTitle: "Обновлено. Открытую вкладку перезагрузи", action: nil, keyEquivalent: "")
                 .isEnabled = false
         }
         let settings = NSMenuItem(title: "Настройки", action: nil, keyEquivalent: "")
@@ -101,21 +118,25 @@ final class Menu: NSObject, NSApplicationDelegate {
             sub.addItem(withTitle: "Ставлю инструменты импорта…", action: nil, keyEquivalent: "").isEnabled = false
         }
         sub.addItem(.separator())
-        let login = add("Запускать при входе", "", #selector(toggleLogin), to: sub)
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        // turned on but not yet allowed: the switch says where to allow it, and a click opens that place
+        let status = SMAppService.mainApp.status
+        let login = add(
+            status == .requiresApproval ? "Запускать при входе: разреши в настройках «Объекты входа»…" : "Запускать при входе",
+            "", #selector(toggleLogin), to: sub)
+        login.state = status == .enabled ? .on : status == .requiresApproval ? .mixed : .off
         if Browser.canReuseTab {
             let reuse = add("Открывать в той же вкладке", "", #selector(toggleReuse), to: sub)
             reuse.state = Browser.reusesTab ? .on : .off
         }
         if Cloud.isAvailable {
-            let cloud = add(cloudBusy ?? "Библиотека в iCloud", "", #selector(toggleCloud), to: sub)
+            let cloud = add(cloudBusy ?? "Синхронизация", "", #selector(toggleCloud), to: sub)
             cloud.state = Cloud.isOn ? .on : .off
-            cloud.isEnabled = cloudBusy == nil
+            cloud.isEnabled = !occupied
         }
         sub.addItem(.separator())
         add("Показать книги в Finder", "", #selector(showBooks), to: sub)
         add("Открыть журнал", "", #selector(showLog), to: sub)
-        add("Перезапустить сервер", "", #selector(restart), to: sub)
+        add("Перезапустить сервер", "", #selector(restart), to: sub).isEnabled = !occupied
         return sub
     }
 
@@ -131,6 +152,27 @@ final class Menu: NSObject, NSApplicationDelegate {
 
     @objc private func open() { Browser.open(server.url) }
 
+    /// The very first launch opens the library by itself once the server answers (up to ten seconds),
+    /// so a new reader sees where to start rather than a dot in the menu bar. Never again after that,
+    /// and never for a library that already has books: its reader knows the way.
+    private func openFirstTime() {
+        let key = "opened"
+        guard !UserDefaults.standard.bool(forKey: key), server.isRunning else { return }
+        let books = (try? FileManager.default.contentsOfDirectory(atPath: booksDir.resolvingSymlinksInPath().path)) ?? []
+        if books.contains(where: { !$0.hasPrefix(".") }) {
+            UserDefaults.standard.set(true, forKey: key)
+            return
+        }
+        let url = server.url
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard answers(url, within: 10) else { log("the server did not answer: the library opens next launch"); return }
+            DispatchQueue.main.async {
+                UserDefaults.standard.set(true, forKey: key)
+                Browser.open(url)
+            }
+        }
+    }
+
     @objc private func openReading() {
         guard let slug = reading?.slug else { return }
         guard let url = URL(string: "\(server.url.absoluteString)?book=\(slug)") else { return }
@@ -138,16 +180,32 @@ final class Menu: NSObject, NSApplicationDelegate {
     }
 
     @objc private func restart() {
+        guard !occupied else { return }  // a long job holds the server: it starts it again when it ends
+        reading = nil  // asked again at the next opening, from the server that runs now
         if let python { server.start(python: python) }
+        build()
+    }
+
+    /// The server a job asked for, started once no long job runs any more.
+    private func startWhenFree() {
+        guard startPending, !occupied, let python else { return }
+        startPending = false
+        reading = nil
+        server.start(python: python)
         build()
     }
 
     @objc private func toggleLogin() {
         do {
-            if SMAppService.mainApp.status == .enabled {
+            switch SMAppService.mainApp.status {
+            case .enabled:
                 try SMAppService.mainApp.unregister()
-            } else {
+            case .requiresApproval:
+                SMAppService.openSystemSettingsLoginItems()
+            default:
                 try SMAppService.mainApp.register()
+                // registered, but the system wants the reader's yes first: show where to give it
+                if SMAppService.mainApp.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
             }
         } catch {
             alert("Не вышло изменить автозапуск", "\(error.localizedDescription)")
@@ -175,10 +233,10 @@ final class Menu: NSObject, NSApplicationDelegate {
     /// and shows what is going on in grey. «Проверка обновлений…» while it is not yet known whether
     /// there is anything; «Обновление…» only once there is. A window appears only when something failed.
     @objc private func update() {
-        guard busy == nil else { return }
+        guard !occupied else { return }
         let known = behind > 0
         busy = known ? "Обновление…" : "Проверка обновлений…"
-        updated = nil
+        updated = false
         build()
         let url = server.isRunning ? server.url : nil
         gitQueue.async {
@@ -204,21 +262,30 @@ final class Menu: NSObject, NSApplicationDelegate {
                 }
                 return
             }
-            let result = Payload.update()
+            var stopped = false
+            let result = Payload.update {
+                // the server stops before the code changes, so no book starts loading between this look and
+                // the reset; a job outlives the server and holds its work dir
+                if let old = DispatchQueue.main.sync(execute: { self.server.halt() }) { Server.reap(old) }
+                stopped = true
+                let held = Menu.heldJobs()
+                return held.isEmpty ? nil : "Книги ещё загружаются: \(held.joined(separator: ", ")). Обнови, когда закончится."
+            }
             DispatchQueue.main.async {
-                self.behind = 0
+                if stopped { self.startPending = true }
                 self.busy = nil
                 switch result {
                 case .updated(let what):
                     log("updated: \(what)")
-                    if let python = self.python { self.server.start(python: python) }
-                    self.updated = what
+                    self.behind = 0
+                    self.updated = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
-                        self.updated = nil
+                        self.updated = false
                         self.build()
                     }
                 case .upToDate:
                     log("already up to date")
+                    self.behind = 0
                 case .failed(let why):
                     self.alert("Обновиться не вышло", why)
                 }
@@ -232,15 +299,18 @@ final class Menu: NSObject, NSApplicationDelegate {
     /// takes time before the question (running jobs, the library's size, the room in iCloud) is asked off
     /// the main thread, the menu saying so in grey meanwhile.
     @objc private func toggleCloud() {
-        guard python != nil, cloudBusy == nil else { return }
-        cloudBusy = "Библиотека в iCloud: проверяю…"
+        guard python != nil, !occupied else { return }
+        cloudBusy = "Синхронизация: проверяю…"
         build()
         let url = server.isRunning ? server.url : nil
-        let moving = !Cloud.isOn && !Cloud.hasLibrary  // only a move into iCloud needs the sizes
+        // a move into iCloud needs the sizes, measured for any turning on, since what iCloud holds may change
+        // before the question; so does a turning off that copies the library here
+        let moving = !Cloud.isOn
+        let copying = Cloud.isOn && !Cloud.isAdopted
         DispatchQueue.global(qos: .userInitiated).async {
             let jobs = Menu.runningJobs(at: url)
-            let need = moving ? Cloud.localBytes : 0
-            let free = moving ? Cloud.freeBytes : nil
+            let need = moving || copying ? Cloud.localBytes : 0
+            let free = moving ? Cloud.freeBytes : copying ? Cloud.localFreeBytes : nil
             DispatchQueue.main.async {
                 self.cloudBusy = nil
                 self.build()
@@ -250,57 +320,90 @@ final class Menu: NSObject, NSApplicationDelegate {
     }
 
     private func switchCloud(jobs: [String], need: Int64, free: Int64?) {
-        guard let python else { return }
+        guard python != nil else { return }
         // a job writes into the library while it runs and outlives the server: the folder stays put until it ends
         if !jobs.isEmpty {
-            alert("Книги ещё загружаются", "Библиотеку можно перенести, когда закончится: \(jobs.joined(separator: ", ")).")
+            alert("Книги ещё загружаются", "Синхронизацию можно переключить, когда закончится: \(jobs.joined(separator: ", ")).")
             return
         }
+        let work: () -> Cloud.Move
+        let failure: String
+        var after: (() -> Void)?
         if Cloud.isOn {
+            if !Cloud.isAdopted, let free, free < need {
+                alert("Недостаточно места", "Чтобы скопировать книги сюда, нужно \(Menu.size(need)), свободно \(Menu.size(free)).")
+                return
+            }
             let sure =
                 Cloud.isAdopted
                 ? confirm(
-                    "Отключить библиотеку iCloud на этом Mac?",
-                    "Книги останутся в iCloud Drive и на iPhone, этот Mac снова откроет свои прежние книги.",
-                    yes: "Отключить")
+                    "Выключить синхронизацию?",
+                    "Книги останутся в iCloud Drive, здесь снова откроются прежние.",
+                    yes: "Выключить")
                 : confirm(
-                    "Вернуть книги на этот Mac?", "Библиотека переедет из iCloud Drive обратно. На iPhone книги пропадут.",
-                    yes: "Вернуть книги")
+                    "Выключить синхронизацию?", "Книги останутся в iCloud Drive, а сюда скопируются и больше не будут синхронизироваться.",
+                    yes: "Скопировать книги")
             guard sure else { return }
-            server.stop()
-            if case .failed(let why) = Cloud.turnOff() { alert("Не вышло вернуть книги", why) }
+            work = Cloud.turnOff
+            failure = "Не вышло скопировать книги"
         } else if Cloud.hasLibrary {
             guard confirm(
-                "В iCloud уже есть библиотека readsync",
-                "Открыть её на этом Mac? Здешние книги останутся на месте и вернутся, если выключить iCloud.",
+                "В iCloud Drive уже есть библиотека readsync",
+                "Открыть её? Здешние книги останутся на месте и вернутся, если выключить синхронизацию.",
                 yes: "Открыть")
             else { return }
-            server.stop()
-            if case .failed(let why) = Cloud.turnOn(adopt: true) { alert("Не вышло открыть библиотеку", why) }
+            work = { Cloud.turnOn(adopt: true) }
+            failure = "Не вышло открыть библиотеку"
         } else {
             if let free, free < need {
                 alert("В iCloud не хватает места", "Нужно \(Menu.size(need)), свободно \(Menu.size(free)).")
                 return
             }
             guard confirm(
-                "Перенести библиотеку в iCloud Drive?",
-                "Книги (\(Menu.size(need))) переедут в iCloud Drive/readsync и будут видны на iPhone.",
+                "Включить синхронизацию?",
+                "Книги (\(Menu.size(need))) переедут в iCloud Drive/readsync.",
                 yes: "Перенести")
             else { return }
-            server.stop()
-            if case .failed(let why) = Cloud.turnOn(adopt: false) {
-                alert("Не вышло перенести книги", why)
-            } else if confirm(
-                "Библиотека в iCloud",
-                "Чтобы macOS не выгружала аудио с этого Mac, в Finder нажми на iCloud Drive/readsync "
-                    + "правой кнопкой и выбери «Не выгружать».",
-                yes: "Показать в Finder", no: "Готово")
-            {
-                NSWorkspace.shared.activateFileViewerSelecting([Cloud.library.deletingLastPathComponent()])
+            work = { Cloud.turnOn(adopt: false) }
+            failure = "Не вышло перенести книги"
+            after = {
+                if self.confirm(
+                    "Синхронизация включена",
+                    "Чтобы аудио не выгружалось с диска, в Finder нажми на iCloud Drive/readsync "
+                        + "правой кнопкой и выбери «Не выгружать».",
+                    yes: "Показать в Finder", no: "Готово")
+                {
+                    NSWorkspace.shared.activateFileViewerSelecting([Cloud.library.deletingLastPathComponent()])
+                }
             }
         }
-        server.start(python: python)
+        // the server stops and the books move off the main thread, the menu saying so in grey meanwhile
+        let old = server.halt()
+        reading = nil  // the library changes: asked again from the one served next
+        startPending = true  // started again once the books have moved, or once whatever else runs then ends
+        cloudBusy = "Синхронизация: переношу книги…"
         build()
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let old { Server.reap(old) }
+            // a book started loading while the question was open: it holds its work dir, the folder waits for it
+            let held = Menu.heldJobs()
+            let result = held.isEmpty ? work() : nil
+            DispatchQueue.main.async {
+                self.cloudBusy = nil
+                self.build()
+                switch result {
+                case nil:
+                    self.alert(
+                        "Книги ещё загружаются",
+                        "Синхронизацию можно переключить, когда закончится: \(held.joined(separator: ", ")).")
+                case .failed(let why):
+                    self.alert(failure, why)
+                case .done:
+                    after?()
+                    self.build()
+                }
+            }
+        }
     }
 
     /// Books being loaded right now, by slug: the ones the server reports, and the ones whose job holds its
@@ -324,15 +427,12 @@ final class Menu: NSObject, NSApplicationDelegate {
     }
 
     /// Work dirs a live job holds: each job writes its pid there (pipeline/tidy.py `claim`).
-    private static func heldJobs() -> [String] {
+    static func heldJobs() -> [String] {
         let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/readsync/jobs")
         let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
         return names.filter { name in
             let file = root.appendingPathComponent(name).appendingPathComponent("pid")
-            guard let text = try? String(contentsOf: file, encoding: .utf8),
-                let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
-            else { return false }
-            return kill(pid, 0) == 0 || errno == EPERM
+            return holds(file) != nil  // a pid the system has given to another process since does not count
         }
     }
 
@@ -365,42 +465,31 @@ final class Menu: NSObject, NSApplicationDelegate {
 
     // ---- what the menu knows, asked in the background so opening it never waits ----
 
-    private func lookForUpdates() {
-        guard busy == nil else { return }
-        busy = "Проверка обновлений…"
-        build()
-        gitQueue.async {
-            let count = Payload.behindBy()
-            DispatchQueue.main.async {
-                self.busy = nil
-                self.behind = count
-                if count > 0 { log("\(count) new commits upstream") }
-                self.build()
-            }
-        }
-    }
-
-    /// The book on the shelf «читаю сейчас», so it is one click away from the menu bar. The shelf as the
-    /// library page counts it (reader/library.js `shelfOf`): one put there by hand, or one read for more
-    /// than ten minutes and neither finished nor moved off it.
+    /// The book on the shelf «Читаю сейчас», so it is one click away from the menu bar: the one the library
+    /// page puts first there (reader/library.js `paint`), by the status the server gives each book, the most
+    /// recently opened (or added) first.
     private func lookForReading() {
-        guard server.isRunning else { return }
+        guard server.isRunning else {
+            reading = nil
+            return
+        }
         let url = server.url.appendingPathComponent("api/books")
         URLSession.shared.dataTask(with: url) { data, _, _ in
             guard let data,
                 let books = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
-            else { return }
-            let now = books.filter { book in
-                let state = book["state"] as? [String: Any]
-                let shelf = state?["shelf"] as? String ?? ""
-                let seconds = (state?["seconds"] as? Double) ?? 0
-                let finished = (state?["finished"] as? Bool) ?? false
-                let reading = shelf.isEmpty ? !finished && seconds > 600 : shelf == "reading"
-                return reading && (book["ready"] as? Bool) == true
+            else {
+                DispatchQueue.main.async { self.reading = nil }  // no answer: no book to offer, not an old one
+                return
             }
-            let newest = now.max { a, b in
-                let opened = { (x: [String: Any]) in ((x["state"] as? [String: Any])?["opened"] as? Double) ?? 0 }
-                return opened(a) < opened(b)
+            let now = books.filter { book in
+                (book["state"] as? [String: Any])?["status"] as? String == "reading" && (book["ready"] as? Bool) == true
+            }
+            let at = { (x: [String: Any]) -> Double in
+                let opened = ((x["state"] as? [String: Any])?["opened"] as? Double) ?? 0
+                return opened != 0 ? opened : (x["added"] as? Double) ?? 0
+            }
+            let newest = now.min { a, b in
+                at(a) != at(b) ? at(a) > at(b) : ((a["title"] as? String) ?? "").localizedCompare((b["title"] as? String) ?? "") == .orderedAscending
             }
             let title = newest?["title"] as? String
             let slug = newest?["slug"] as? String

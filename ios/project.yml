@@ -48,6 +48,24 @@ targets:
         CFBundleLocalizations: [ru]
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # «Открыть в readsync» from Files, Mail, Telegram, Safari: text books become books of the library
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: org.gribuser.fictionbook
+            UTTypeDescription: FictionBook
+            UTTypeConformsTo: [public.xml]
+            UTTypeTagSpecification:
+              public.filename-extension: [fb2]
+              public.mime-type: [application/x-fictionbook+xml]
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Книга
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - org.gribuser.fictionbook
+              - org.idpf.epub-container
+              - com.adobe.pdf
+              - public.plain-text
+              - public.zip-archive
   ReadsyncTests:
     type: bundle.unit-test
     platform: iOS
@@ -56,6 +74,10 @@ targets:
       - path: ../tests/state_vectors.json
         buildPhase: resources
       - path: ../tests/status_vectors.json
+        buildPhase: resources
+      # made-up books in every format the phone imports, and what the pipeline makes of them
+      - path: ../tests/import_vectors
+        type: folder
         buildPhase: resources
     dependencies:
       - target: Readsync

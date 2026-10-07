@@ -20,7 +20,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install
-        run: pip install beautifulsoup4 lxml numpy pytest ruff==0.16.6
+        run: pip install beautifulsoup4 lxml numpy pypdf pytest ruff==0.16.9 fonttools brotli
       - name: Lint
         run: ruff check . && ruff format --check .
       - name: Test

@@ -56,7 +56,8 @@ ios-sim:
 ios-device:
 	ios/reinstall.sh --now
 
-# reinstall on the iPhone every 3 days while it is reachable, so a free signature never runs out
+# reinstall on the iPhone every 3 days while it is reachable, so a free signature never runs out. It builds
+# the menu-bar app's copy of main when there is one, not whatever this working tree holds right now.
 AGENT := $(HOME)/Library/LaunchAgents/io.github.diasbro.readsync.ios.plist
 ios-autoinstall:
 	mkdir -p "$(dir $(AGENT))"
@@ -64,7 +65,10 @@ ios-autoinstall:
 	  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
 	  '<plist version="1.0"><dict>' \
 	  '<key>Label</key><string>io.github.diasbro.readsync.ios</string>' \
-	  '<key>ProgramArguments</key><array><string>$(CURDIR)/ios/reinstall.sh</string></array>' \
+	  '<key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string>' \
+	  '<string>f="$$HOME/Library/Application Support/readsync/src/ios/reinstall.sh"; [ -x "$$f" ] || f="$(CURDIR)/ios/reinstall.sh"; exec "$$f"</string></array>' \
+	  '<key>StandardOutPath</key><string>$(HOME)/Library/Logs/readsync-ios.log</string>' \
+	  '<key>StandardErrorPath</key><string>$(HOME)/Library/Logs/readsync-ios.log</string>' \
 	  '<key>StartInterval</key><integer>3600</integer>' \
 	  '<key>RunAtLoad</key><true/>' \
 	  '<key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer>' \

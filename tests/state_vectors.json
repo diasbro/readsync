@@ -24,7 +24,7 @@
       {"sent": 500, "sentAt": 90, "sentPct": 40, "sentEdition": "e1"},
       {"sent": 12, "sentAt": 10, "sentPct": 1, "sentEdition": "e2"}
     ],
-    "merged": {"sent": 12, "sentAt": 10, "sentPct": 1}
+    "merged": {"sent": 12, "sentAt": 10, "sentPct": 1, "sentEdition": "e2"}
   },
   {
     "name": "sentPct travels with the sent that wins",
@@ -33,7 +33,7 @@
       {"sent": 5, "sentAt": 100, "sentPct": 3, "sentEdition": "e1"},
       {"sent": 900, "sentAt": 50, "sentPct": 99, "sentEdition": "e1"}
     ],
-    "merged": {"sent": 5, "sentAt": 100, "sentPct": 3}
+    "merged": {"sent": 5, "sentAt": 100, "sentPct": 3, "sentEdition": "e1"}
   },
   {
     "name": "keys outside the merge, such as old per-book settings, do not come through",
@@ -76,5 +76,65 @@
       {"shelf": "done", "shelfAt": 30, "finished": ["2026-10-07"], "finishedAt": 30}
     ],
     "merged": {"shelf": "reading", "shelfAt": 40, "finished": ["2026-10-07"], "finishedAt": 30}
+  },
+  {
+    "name": "a sentence from an edition editions.json maps is translated and counts as the current edition's",
+    "edition": "e3",
+    "editions": {"edition": "e3", "maps": {"e1": [0, 0, 1, 4, 4, 7], "e2": [0, 2, 3]}},
+    "files": [
+      {"sent": 3, "sentAt": 90, "sentPct": 40, "sentEdition": "e1"},
+      {"sent": 1, "sentAt": 10, "sentPct": 1, "sentEdition": "e3"}
+    ],
+    "merged": {"sent": 4, "sentAt": 90, "sentPct": 40, "sentEdition": "e3"}
+  },
+  {
+    "name": "a sentence past the end of the map takes the map's last place",
+    "edition": "e3",
+    "editions": {"edition": "e3", "maps": {"e2": [0, 2, 3]}},
+    "files": [{"sent": 50, "sentAt": 20, "sentPct": 99, "sentEdition": "e2"}],
+    "merged": {"sent": 3, "sentAt": 20, "sentPct": 99, "sentEdition": "e3"}
+  },
+  {
+    "name": "a sentence from an edition the map does not name is still dropped",
+    "edition": "e3",
+    "editions": {"edition": "e3", "maps": {"e2": [0, 2, 3]}},
+    "files": [
+      {"sent": 1, "sentAt": 90, "sentPct": 5, "sentEdition": "e1"},
+      {"sent": 7, "sentAt": 10, "sentPct": 2, "sentEdition": "e3"}
+    ],
+    "merged": {"sent": 7, "sentAt": 10, "sentPct": 2, "sentEdition": "e3"}
+  },
+  {
+    "name": "a merge in an edition the map names, an older copy's, does not use the map",
+    "edition": "e1",
+    "editions": {"edition": "e2", "maps": {"e1": [0, 5, 9]}},
+    "files": [
+      {"sent": 2, "sentAt": 10, "sentPct": 3, "sentEdition": "e1"},
+      {"sent": 9, "sentAt": 90, "sentPct": 80, "sentEdition": "e2"}
+    ],
+    "merged": {"sent": 2, "sentAt": 10, "sentPct": 3, "sentEdition": "e1"}
+  },
+  {
+    "name": "a sentence that names no edition is taken as it is, map or not",
+    "edition": "e2",
+    "editions": {"edition": "e2", "maps": {"e1": [5]}},
+    "files": [{"sent": 0, "sentAt": 5, "sentPct": 0}],
+    "merged": {"sent": 0, "sentAt": 5, "sentPct": 0, "sentEdition": "e2"}
+  },
+  {
+    "name": "maps leading to another edition than the book's (a text replaced since) are not used",
+    "edition": "e3",
+    "editions": {"edition": "e2", "maps": {"e1": [0, 5, 9, 12]}},
+    "files": [
+      {"sent": 2, "sentAt": 50, "sentPct": 10, "sentEdition": "e1"},
+      {"sent": 7, "sentAt": 10, "sentPct": 3, "sentEdition": "e3"}
+    ],
+    "merged": {"sent": 7, "sentAt": 10, "sentPct": 3, "sentEdition": "e3"}
+  },
+  {
+    "name": "the merged sentence names the edition it counts in, none for a book without one",
+    "edition": "",
+    "files": [{"sent": 4, "sentAt": 5, "sentPct": 1, "sentEdition": "e1"}],
+    "merged": {"sent": 4, "sentAt": 5, "sentPct": 1, "sentEdition": ""}
   }
 ]

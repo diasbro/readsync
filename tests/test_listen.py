@@ -40,6 +40,14 @@ class Upstream(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if name == "short":  # promises more than it sends, then hangs up
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            self.wfile.write(DATA[:100])
+            self.close_connection = True
+            return
         if name.startswith("slow"):  # an endless source: only a closed connection stops it
             self.send_response(200)
             self.send_header("Content-Type", "audio/mpeg")
@@ -128,7 +136,7 @@ def test_range_passes_through_and_nothing_is_written(proxy):
 
 def test_client_going_away_closes_the_source(proxy):
     s = socket.create_connection(("127.0.0.1", proxy), timeout=10)
-    s.sendall(b"GET /api/audio/listen?ref=ia:slow&part=0 HTTP/1.1\r\nHost: x\r\n\r\n")
+    s.sendall(f"GET /api/audio/listen?ref=ia:slow&part=0 HTTP/1.1\r\nHost: 127.0.0.1:{proxy}\r\n\r\n".encode())
     got = 0
     while got < 200_000:
         got += len(s.recv(65536))
@@ -138,7 +146,7 @@ def test_client_going_away_closes_the_source(proxy):
 
 def test_another_recording_ends_the_one_playing(proxy):
     s = socket.create_connection(("127.0.0.1", proxy), timeout=10)
-    s.sendall(b"GET /api/audio/listen?ref=ia:slow1&part=0 HTTP/1.1\r\nHost: x\r\n\r\n")
+    s.sendall(f"GET /api/audio/listen?ref=ia:slow1&part=0 HTTP/1.1\r\nHost: 127.0.0.1:{proxy}\r\n\r\n".encode())
     s.recv(65536)
     t = threading.Thread(target=get, args=(proxy, "/api/audio/listen?ref=ia:range&part=0", {"Range": "bytes=0-9"}))
     t.start()
@@ -161,3 +169,14 @@ def test_unknown_ref_is_a_400(proxy, query):
     r, _ = get(proxy, "/api/audio/listen?" + query)
     assert r.status == 400
     assert Upstream.ranges == []  # nothing was asked of any source
+
+
+def test_a_body_cut_short_upstream_closes_the_connection(proxy):
+    """The browser was promised 1000 bytes and got 100: it must see the end, not wait on a kept-alive socket."""
+    s = socket.create_connection(("127.0.0.1", proxy), timeout=3)
+    s.sendall(f"GET /api/audio/listen?ref=ia:short&part=0 HTTP/1.1\r\nHost: 127.0.0.1:{proxy}\r\n\r\n".encode())
+    got = b""
+    while chunk := s.recv(65536):  # a socket.timeout here is the browser left waiting
+        got += chunk
+    s.close()
+    assert got.endswith(DATA[:100]) and b"Content-Length: 1000" in got

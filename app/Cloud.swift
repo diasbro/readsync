@@ -40,6 +40,13 @@ enum Cloud {
         return total
     }
 
+    /// Room left on the disk the books are copied back to when syncing is turned off, when the system will say.
+    static var localFreeBytes: Int64? {
+        let local = URL(fileURLWithPath: UserDefaults.standard.string(forKey: localKey) ?? link.path)
+        let values = try? local.deletingLastPathComponent().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
+    }
+
     /// Room left in the iCloud account, when the system will say.
     static var freeBytes: Int64? {
         let out = run("/usr/bin/brctl", ["quota"], timeout: 15).1
@@ -58,20 +65,33 @@ enum Cloud {
 
     /// Moves are all or nothing: a name already taken at a destination stops them before anything
     /// moves, and a failure partway (in the moves or in `then`) puts back what had moved, so the
-    /// library is never split between this Mac and iCloud.
-    private static func move(_ moves: [(from: URL, to: URL)], then finish: () throws -> Void) throws {
+    /// library is never split between this Mac and iCloud. `copying` leaves the originals in place;
+    /// a failure then removes the copies, half-made ones too.
+    private static func move(
+        _ moves: [(from: URL, to: URL)], copying: Bool = false, then finish: () throws -> Void
+    ) throws {
         let fm = FileManager.default
         let taken = moves.filter { fm.fileExists(atPath: $0.to.path) }.map(\.to.lastPathComponent)
         if !taken.isEmpty { throw Refusal("Там уже есть: \(taken.joined(separator: ", "))") }
         var done: [(from: URL, to: URL)] = []
         do {
             for m in moves {
-                try fm.moveItem(at: m.from, to: m.to)
+                if copying {
+                    try fm.copyItem(at: m.from, to: m.to)
+                } else {
+                    try fm.moveItem(at: m.from, to: m.to)
+                }
                 done.append(m)
             }
             try finish()
         } catch {
             var stuck: [String] = []
+            if copying {  // nothing was at these places before: whatever is there now is a copy
+                for m in moves where fm.fileExists(atPath: m.to.path) {
+                    if (try? fm.removeItem(at: m.to)) == nil { stuck.append(m.to.path) }
+                }
+                done = []
+            }
             for m in done.reversed() {
                 try? fm.createDirectory(at: m.from.deletingLastPathComponent(), withIntermediateDirectories: true)
                 if (try? fm.moveItem(at: m.to, to: m.from)) == nil { stuck.append(m.to.path) }
@@ -113,7 +133,7 @@ enum Cloud {
         }
     }
 
-    /// Bring the books back to the folder they came from and serve them there.
+    /// Serve the books from this Mac again: the folder they came from, with a copy of the iCloud library.
     static func turnOff() -> Move {
         let fm = FileManager.default
         let local = URL(fileURLWithPath: UserDefaults.standard.string(forKey: localKey) ?? link.path)
@@ -124,10 +144,14 @@ enum Cloud {
                 unlinked = true
             }
             try fm.createDirectory(at: local, withIntermediateDirectories: true)
-            // a library another Mac keeps in iCloud stays there; only this Mac's own books come back
+            // a library another Mac keeps in iCloud stays there; only this Mac's own books come back.
+            // Even the books this Mac moved in are shared by now: the phone and other Macs add books
+            // and keep their reading state inside every book, and what of it is this Mac's own cannot
+            // be told apart cleanly. So nothing leaves iCloud: this Mac takes a copy of all of it and
+            // stops syncing, the other devices go on reading as before.
             let adopted = UserDefaults.standard.bool(forKey: adoptedKey)
             let books = adopted ? [] : entries(library).map { ($0, local.appendingPathComponent($0.lastPathComponent)) }
-            try move(books) { try pointBooks(at: local) }
+            try move(books, copying: true) { try pointBooks(at: local) }
             log("library back on this Mac: \(local.path)")
             return .done
         } catch {
@@ -153,8 +177,10 @@ enum Cloud {
             try fm.removeItem(at: link)
         } else if fm.fileExists(atPath: link.path) {
             if same(target, link) { return }  // the books are served right from this folder, even an empty one
-            // a real folder that still holds books is never replaced; leftovers go with it
-            let left = entries(link).map(\.lastPathComponent)
+            // a real folder that still holds books is never replaced, nor one with a half-written file
+            // (*.tmp) in it; only Finder's notes and the placeholder go with it
+            let left = ((try? fm.contentsOfDirectory(atPath: link.path)) ?? [])
+                .filter { $0 != ".gitkeep" && $0 != ".DS_Store" }
             if !left.isEmpty { throw Refusal("В \(link.path) остались: \(left.joined(separator: ", "))") }
             try fm.removeItem(at: link)
         }

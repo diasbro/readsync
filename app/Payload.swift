@@ -82,25 +82,43 @@ enum Payload {
 
     /// An update is a pull, so only what changed comes down the wire. A copied payload is turned
     /// into a checkout on the first update, which is why no disk image is needed for the next one.
-    static func update() -> Update {
+    /// `beforeReset` runs once the new code is fetched, right before it replaces the old; a reason it
+    /// returns stops the update there.
+    static func update(beforeReset: () -> String? = { nil }) -> Update {
         guard !repoURL.isEmpty else {
             return .failed("в приложении не записано, откуда обновляться")
         }
         guard let git = gitPath else {
             return .failed("для обновления нужен git, поставь его командой xcode-select --install")
         }
-        if !isCheckout {
+        // a checkout made here and not yet reset to upstream is taken back on any failure: a `.git` without a
+        // commit would count as a checkout, and the copy of the code would never again be replaced by a newer
+        // one the app brings (`install`)
+        let made = !isCheckout
+        let failed = { (why: String) -> Update in
+            if made { try? FileManager.default.removeItem(at: srcDir.appendingPathComponent(".git")) }
+            return .failed(why)
+        }
+        if made {
             log("turning the copied code into a checkout")
-            for args in [["init", "-q"], ["remote", "add", "origin", repoURL]] {
-                _ = run(git, args, cwd: srcDir)
-            }
+            let (icode, iout) = run(git, ["init", "-q"], cwd: srcDir)
+            if icode != 0 { return failed(reason(iout)) }
+        }
+        // the address this app was built with wins: an older one (ssh, say) may need a key this Mac lacks
+        let (ocode, origin) = run(git, ["remote", "get-url", "origin"], cwd: srcDir)
+        if ocode != 0 || origin.trimmingCharacters(in: .whitespacesAndNewlines) != repoURL {
+            let (rcode, rout) = run(git, ["remote", ocode != 0 ? "add" : "set-url", "origin", repoURL], cwd: srcDir)
+            if rcode != 0 { return failed(reason(rout)) }
         }
         let before = run(git, ["rev-parse", "--short", "HEAD"], cwd: srcDir).1
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let (code, out) = run(git, ["fetch", "--quiet", "origin", "main"], cwd: srcDir, timeout: 180)
-        if code != 0 { return .failed(reason(out)) }
+        if code != 0 { return failed(reason(out)) }
+        if let why = beforeReset() { return failed(why) }
         let (rcode, rout) = run(git, ["reset", "--hard", "--quiet", "origin/main"], cwd: srcDir)
-        if rcode != 0 { return .failed(reason(rout)) }
+        if rcode != 0 { return failed(reason(rout)) }
+        // files the copied payload had and upstream has since deleted would stay forever, untracked
+        _ = run(git, ["clean", "-fdq", "-e", ".payload-version"], cwd: srcDir)
         let after = run(git, ["rev-parse", "--short", "HEAD"], cwd: srcDir).1
             .trimmingCharacters(in: .whitespacesAndNewlines)
         try? after.write(to: srcDir.appendingPathComponent(".payload-version"), atomically: true, encoding: .utf8)
@@ -110,9 +128,10 @@ enum Payload {
         return .updated(subject)
     }
 
-    /// git says a lot; the reader needs the one line that says what to do about it.
+    /// git says a lot; the reader needs the one line that says what to do about it. What git said goes to the log.
     private static func reason(_ out: String) -> String {
         let text = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        log("git: \(text)")
         // the precise complaints first: git repeats "Could not read from remote" after every one of them
         if text.contains("Repository not found") || text.contains("does not exist") {
             return "репозиторий не найден: \(repoURL)"
@@ -124,12 +143,8 @@ enum Payload {
             || text.contains("Connection refused") || text.contains("timed out") {
             return "нет связи с репозиторием, проверь интернет и попробуй позже"
         }
-        return text.isEmpty ? "git не объяснил, что пошло не так" : text
+        return "обновить код не вышло, подробности в журнале"
     }
-
-    /// Is there anything new upstream? Asked quietly in the background, so the menu can say so
-    /// without the reader ever going to look.
-    static func behindBy() -> Int { behind() ?? 0 }
 
     /// How many commits upstream is ahead, or nil when that could not be learned (no checkout yet,
     /// no git, no network).
@@ -142,10 +157,12 @@ enum Payload {
 
     /// The importers need beautifulsoup4, lxml and pypdf. The app carries them; this only matters
     /// on a Mac whose own Python is standing in, or after an update that asked for something new.
-    static func ensureTools(python: String, done: @escaping (Bool) -> Void) {
-        let check = ["-c", "import bs4, lxml.etree, pypdf"]
+    /// `done` is told whether tools were installed just now: the server sees them only after a restart.
+    static func ensureTools(python: String, done: @escaping (_ installed: Bool) -> Void) {
+        // with libsDir on the path, as the server has it: what an earlier launch installed there counts
+        let check = ["-c", "import sys; sys.path.insert(0, sys.argv[1]); import bs4, lxml.etree, pypdf", libsDir.path]
         DispatchQueue.global(qos: .utility).async {
-            if run(python, check, timeout: 30).0 == 0 { DispatchQueue.main.async { done(true) }; return }
+            if run(python, check, timeout: 30).0 == 0 { DispatchQueue.main.async { done(false) }; return }
             log("installing the import tools next to the books")
             let (code, out) = run(
                 python,

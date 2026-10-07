@@ -67,6 +67,7 @@ def ask(
     Each request is retried while its failure is transient (`TRIES`). Sources in `skip` sit the round out;
     the names of the ones that failed even so come back with the errors."""
     cancel = cancel or threading.Event()
+    over = threading.Event()  # the round's own end, a cancel's or its deadline's: tries still running stop at it
     hits: list[dict] = []
     by_author: list[dict] = []
     errors: list[str] = []
@@ -79,13 +80,14 @@ def ask(
         if s.name in skip:
             continue
         for query in queries:
-            futures[ex.submit(retrying, s.search, query, cancel)] = (s.name, "title")
+            futures[ex.submit(retrying, s.search, query, over)] = (s.name, "title")
         for author_query in author_queries:
-            futures[ex.submit(retrying, s.author_books, author_query, cancel)] = (s.name, "author")
+            futures[ex.submit(retrying, s.author_books, author_query, over)] = (s.name, "author")
     # wait in short steps, so «отменить» ends the round at once and not when the slowest mirror gives up
     deadline, late = time.monotonic() + ROUND_SECONDS, set(futures)
     while late and not cancel.is_set() and time.monotonic() < deadline:
         _, late = wait(late, timeout=min(0.25, max(0.0, deadline - time.monotonic())))
+    over.set()
     ex.shutdown(wait=False, cancel_futures=True)
     if cancel.is_set():
         raise Cancelled
