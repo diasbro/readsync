@@ -1,25 +1,47 @@
 // The narrator, played natively: AVPlayer keeps going on a locked screen, answers the lock screen and
 // headphones, pauses for a call. The reader in the web view drives it through the `audio` messages and
 // hears back through window.nativeAudio._update. While the screen is locked no JavaScript runs, so the
-// position and the listening sessions are kept here, not in the reader.
+// position and the listening sessions are kept here, not in the reader. Closing the reader leaves the
+// narrator as it was: the library shows it in its mini player.
 
 import AVFoundation
+import Combine
 import MediaPlayer
 import UIKit
 import WebKit
 
 @MainActor
-final class Player: NSObject {
+final class Player: NSObject, ObservableObject {
     static let shared = Player()
+
+    /// The book the narrator is loaded with, playing or not.
+    @Published private(set) var book: Book?
+    /// `isPlaying` as the views see it: told by the player, not asked of it on every draw.
+    @Published private(set) var playing = false
+    @Published private(set) var progress = 0.0
+    /// The lock screen shows the sentence being spoken instead of the book's title.
+    @Published var lockText = AppSettings.lockText {
+        didSet {
+            guard lockText != oldValue else { return }
+            AppSettings.lockText = lockText
+            if lockText { loadText() } else { text = nil }  // the book's text is held only while it is shown
+            updateNowPlaying()
+        }
+    }
 
     private var player: AVPlayer?
     private var observations: [NSKeyValueObservation] = []
     private var endObserver: NSObjectProtocol?
+    private var timeObserver: Any?
     private var src = ""
-    private var book: Book?
     private var sharedDir: URL?
-    private var wordStarts: [Double] = []  // word start times, to count the words a session heard
-    weak var web: WKWebView?
+    private var words = Words()  // when each word starts (sessions count the words heard) and where it sits
+    private var text: BookText?  // only while the lock screen shows the sentence
+    private var loadingText = false
+    private var shownLine: String?
+    private weak var web: WKWebView?
+    private var webSlug: String?  // the book of the page in the web view, which may be one without audio
+    private var reattached = false  // the reader came back to the narrator it left: its position stands
 
     private var posDirty = false {  // only a position that was played or chosen is worth saving
         didSet { if posDirty { dirtyMark += 1 } }
@@ -49,17 +71,44 @@ final class Player: NSObject {
     /// The book the narrator is loaded with.
     var slug: String? { book?.slug }
 
+    /// The reader's page for `slug` is on screen and hears the narrator from now on.
+    func attach(_ web: WKWebView, slug: String) {
+        self.web = web
+        webSlug = slug
+    }
+
+    func detach(_ web: WKWebView) {
+        if self.web === web { self.web = nil }
+    }
+
+    /// The reader is closed: the narrator stays as it was, and its place is saved for the library to read.
+    /// One the reader left under pages was never listened to and goes.
+    func readerClosed(_ slug: String) {
+        if slug == book?.slug, pagesOn { return stop() }
+        savePosition()
+    }
+
     var time: Double { player?.currentTime().seconds.finite ?? 0 }
     var isPlaying: Bool { player?.timeControlStatus == .playing || player?.timeControlStatus == .waitingToPlayAtSpecifiedRate }
 
     // ---- commands from the reader ----
 
-    func handle(_ msg: [String: Any]) {
-        switch msg["cmd"] as? String {
-        case "load": if let src = msg["src"] as? String { load(src) }
+    /// `page`: the book the reader shows. A book without audio, read while this one plays, does not drive it.
+    func handle(_ msg: [String: Any], from page: String) {
+        let cmd = msg["cmd"] as? String
+        if cmd == "load" {
+            if let src = msg["src"] as? String { load(src) }
+            return
+        }
+        guard page == book?.slug else { return }
+        switch cmd {
         case "play": play(rewind: false)  // the reader has already gone back to the sentence start
         case "pause": pause()
-        case "seek": seek(ReadingState.num(msg["t"]), chosen: (msg["chosen"] as? Bool) ?? true)
+        case "seek":
+            let chosen = (msg["chosen"] as? Bool) ?? true
+            // the place a reopened reader puts back was read from a file a save may still be on its way to
+            if !chosen, reattached { return emit("seeked") }
+            seek(ReadingState.num(msg["t"]), chosen: chosen)
         case "rate": setRate(Float(ReadingState.num(msg["rate"])))
         case "pages": pagesOn = (msg["on"] as? Bool) ?? false
         default: break
@@ -69,14 +118,16 @@ final class Player: NSObject {
     /// `src` is the reader's path, /books/<slug>/<file>; the file is the app's own copy.
     func load(_ src: String) {
         if src == self.src, player != nil {
-            // the same book again: the page was reloaded (iOS dropped it in the background), the narrator plays on
+            // the same book again: reopened from the library, or the page was reloaded (iOS dropped it in the
+            // background); the narrator plays on
+            reattached = true
             emit("loadedmetadata")
             emit(isPlaying ? "play" : "pause")
             return
         }
         let parts = src.split(separator: "/").map(String.init)
         guard parts.count == 3, parts[0] == "books", let book = Shelf.localCopy(parts[1]) else {
-            return emit("error", error: "нет аудио")
+            return emit("error", error: "нет аудио", toAnyPage: true)
         }
         stop()  // the last book's place, words and session go with it
         let gen = itemGen
@@ -86,16 +137,17 @@ final class Player: NSObject {
         sharedDir = shared
         let local = Shelf.localDir(book.slug)
         Task.detached {
-            let starts = Player.wordStarts(local.appendingPathComponent("timing.json"))
+            let words = Words(local.appendingPathComponent("timing.json"))
             let merged = shared.map { ReadingState.load(shared: $0, edition: book.edition) } ?? [:]
             await MainActor.run {
                 let p = Player.shared
                 guard p.itemGen == gen else { return }
-                p.wordStarts = starts
+                p.words = words
                 p.storedPos = (ReadingState.num(merged["pos"]), ReadingState.num(merged["posAt"]))
                 p.stateLoaded = true
                 // it began to play before the words were known: the session starts now, from where it is
-                if p.sessionStart == nil, p.isPlaying, !starts.isEmpty { p.sessionStart = (Date(), p.wordIndex(p.time)) }
+                if p.sessionStart == nil, p.isPlaying, !words.starts.isEmpty { p.sessionStart = (Date(), p.wordIndex(p.time)) }
+                p.tick()
             }
         }
         let item = AVPlayerItem(url: local.appendingPathComponent(parts[2]))
@@ -118,6 +170,14 @@ final class Player: NSObject {
                 }
             },
         ]
+        // once a second while it plays (and on every jump): the mini player's line and the lock screen's sentence
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 10), queue: .main) {
+            _ in
+            MainActor.assumeIsolated {
+                guard Player.shared.itemGen == gen else { return }
+                Player.shared.tick()
+            }
+        }
         endObserver = NotificationCenter.default.addObserver(
             forName: AVPlayerItem.didPlayToEndTimeNotification, object: item, queue: .main
         ) { _ in
@@ -129,6 +189,7 @@ final class Player: NSObject {
             }
         }
         setupRemote()
+        loadText()
         updateNowPlaying()
     }
 
@@ -140,6 +201,7 @@ final class Player: NSObject {
                 seek(t, chosen: false)
             }
             emit("loadedmetadata")
+            tick()
         } else if status == .failed {
             emit("error", error: error ?? "аудио не открылось")
         }
@@ -183,7 +245,8 @@ final class Player: NSObject {
             Task { @MainActor in
                 let p = Player.shared
                 guard p.itemGen == gen else { return }
-                if playing, p.isPlaying, !p.wordStarts.isEmpty { p.sessionStart = (Date(), p.wordIndex(p.time)) }
+                if playing, p.isPlaying, !p.words.starts.isEmpty { p.sessionStart = (Date(), p.wordIndex(p.time)) }
+                p.progress = p.fraction
                 p.emit("seeked")
                 p.updateNowPlaying()
             }
@@ -205,6 +268,8 @@ final class Player: NSObject {
         savePosition()
         saveTimer?.invalidate()
         itemGen += 1
+        if let timeObserver { player?.removeTimeObserver(timeObserver) }
+        timeObserver = nil
         observations = []
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
@@ -220,8 +285,14 @@ final class Player: NSObject {
         wasPlayingBeforeInterruption = false
         stateLoaded = false
         storedPos = (0, 0)
-        wordStarts = []
+        words = Words()
+        text = nil
+        loadingText = false
+        shownLine = nil
+        reattached = false
         sessionStart = nil
+        playing = false
+        progress = 0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
@@ -234,7 +305,7 @@ final class Player: NSObject {
             posDirty = true
             playedSinceLoad = true
             pausedAt = nil
-            if sessionStart == nil, !wordStarts.isEmpty { sessionStart = (Date(), wordIndex(time)) }  // else when they come
+            if sessionStart == nil, !words.starts.isEmpty { sessionStart = (Date(), wordIndex(time)) }  // else when they come
             saveTimer?.invalidate()
             saveTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
                 Task { @MainActor in Player.shared.savePosition() }
@@ -250,6 +321,7 @@ final class Player: NSObject {
         default:
             break
         }
+        playing = isPlaying
         updateNowPlaying()
     }
 
@@ -315,26 +387,59 @@ final class Player: NSObject {
     }
 
     private func wordIndex(_ t: Double) -> Int {
-        var lo = 0, hi = wordStarts.count
+        var lo = 0, hi = words.starts.count
         while lo < hi {
             let mid = (lo + hi) / 2
-            if wordStarts[mid] <= t { lo = mid + 1 } else { hi = mid }
+            if words.starts[mid] <= t { lo = mid + 1 } else { hi = mid }
         }
         return lo
     }
 
-    nonisolated static func wordStarts(_ timing: URL) -> [Double] {
-        guard let data = try? Data(contentsOf: timing),
-            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-            let words = obj["words"] as? [[Any]]
-        else { return [] }
-        return words.map { $0.count > 3 ? ReadingState.num($0[3]) : 0 }
+    private var fraction: Double {
+        guard let d = player?.currentItem?.duration.seconds.finite, d > 0 else { return 0 }
+        return min(1, time / d)
+    }
+
+    /// Once a second: the mini player moves on, and the lock screen follows a new sentence.
+    private func tick() {
+        let f = fraction
+        if abs(f - progress) > 0.0005 { progress = f }  // a hair on the bar: no redraw for less
+        if lockText, line()?.text != shownLine { updateNowPlaying() }
+    }
+
+    // ---- the sentence on the lock screen ----
+
+    private func loadText() {
+        guard lockText, text == nil, !loadingText, let book else { return }
+        loadingText = true
+        let gen = itemGen, file = Shelf.localDir(book.slug).appendingPathComponent("book.json")
+        Task.detached {
+            let text = BookText(file)
+            await MainActor.run {
+                let p = Player.shared
+                guard p.itemGen == gen, p.lockText else { return }
+                p.loadingText = false
+                p.text = text
+                p.updateNowPlaying()
+            }
+        }
+    }
+
+    /// The sentence being spoken now, and its chapter.
+    private func line() -> (text: String, chapter: String)? {
+        guard let text else { return nil }
+        let i = wordIndex(time) - 1
+        guard i >= 0, i < words.block.count else { return nil }
+        let b = Int(words.block[i])
+        guard let s = text.sentence(block: b, at: Int(words.from[i]), to: Int(words.to[i])) else { return nil }
+        return (s, text.chapter(b))
     }
 
     // ---- telling the reader ----
 
-    private func emit(_ event: String, error: String? = nil) {
-        guard let web else { return }
+    /// `toAnyPage`: an answer to the page that asked, whichever book the narrator holds.
+    private func emit(_ event: String, error: String? = nil, toAnyPage: Bool = false) {
+        guard let web, toAnyPage || webSlug == book?.slug else { return }
         var s: [String: Any] = ["event": event, "t": time, "paused": !isPlaying, "rate": rate]
         if let d = player?.currentItem?.duration.seconds.finite, d > 0 { s["duration"] = d }
         if let error { s["error"] = error }
@@ -424,13 +529,16 @@ final class Player: NSObject {
 
     private func updateNowPlaying() {
         guard let book else { return }
+        let line = lockText ? line() : nil
+        shownLine = line?.text
         var info: [String: Any] = [
-            MPMediaItemPropertyTitle: book.title,
-            MPMediaItemPropertyArtist: book.author,
+            MPMediaItemPropertyTitle: line?.text ?? book.title,
+            MPMediaItemPropertyArtist: line == nil ? book.author : book.title,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: time,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(rate) : 0,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: Double(rate),
         ]
+        if let line, !line.chapter.isEmpty { info[MPMediaItemPropertyAlbumTitle] = line.chapter }
         if let d = player?.currentItem?.duration.seconds.finite { info[MPMediaItemPropertyPlaybackDuration] = d }
         if let cover = Player.cover(book.slug) {
             info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: cover.size) { _ in cover }
@@ -463,6 +571,88 @@ final class Player: NSObject {
 
     /// Covers may have come in with a refresh: the books without one are looked at again.
     static func forgetMissingCovers() { noCover.removeAll() }
+}
+
+/// timing.json's words, as small numbers: `[block, charStart, charEnd, t0, t1]` each.
+struct Words: Sendable {
+    var starts: [Double] = []
+    var block: [Int32] = []
+    var from: [Int32] = []
+    var to: [Int32] = []
+
+    init() {}
+
+    init(_ timing: URL) {
+        guard let data = try? Data(contentsOf: timing),
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let words = obj["words"] as? [[Any]]
+        else { return }
+        let int = { (w: [Any], i: Int) in Int32(clamping: Int(w.count > i ? ReadingState.num(w[i]) : 0)) }
+        starts = words.map { $0.count > 3 ? ReadingState.num($0[3]) : 0 }
+        block = words.map { int($0, 0) }
+        from = words.map { int($0, 1) }
+        to = words.map { int($0, 2) }
+    }
+}
+
+/// What the lock screen needs of book.json: each block's text and sentences, and where chapters begin.
+struct BookText: Sendable {
+    private var blocks: [String] = []
+    private var sentences: [[Int32]] = []  // per block: start, end, start, end… in UTF-16 units, as the reader counts
+    private var chapters: [(block: Int, title: String)] = []
+
+    init?(_ file: URL) {
+        guard let data = try? Data(contentsOf: file),
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let blocks = obj["blocks"] as? [[String: Any]]
+        else { return nil }
+        for b in blocks {
+            self.blocks.append(b["text"] as? String ?? "")
+            let spans = b["sentences"] as? [[Any]] ?? []
+            sentences.append(spans.flatMap { $0.prefix(2).map { Int32(clamping: Int(ReadingState.num($0))) } })
+        }
+        for c in obj["chapters"] as? [[String: Any]] ?? [] where (c["hidden"] as? Bool) != true {
+            chapters.append((Int(ReadingState.num(c["first_block"])), c["title"] as? String ?? ""))
+        }
+    }
+
+    func chapter(_ block: Int) -> String { chapters.last { $0.block <= block }?.title ?? "" }
+
+    /// The sentence the word at `from..<to` of `block` is in: the block's own span, or, without spans, as far
+    /// as the sentence-ending marks either side. A long one is shown a piece at a time, the piece the word is in.
+    func sentence(block b: Int, at from: Int, to: Int, limit: Int = 160) -> String? {
+        guard b >= 0, b < blocks.count else { return nil }
+        let s = blocks[b] as NSString
+        let n = s.length
+        guard from >= 0, from <= n else { return nil }
+        var start = 0, end = n
+        let spans = sentences[b]
+        if let k = stride(from: 0, to: spans.count - 1, by: 2).first(where: { from >= Int(spans[$0]) && from < Int(spans[$0 + 1]) }) {
+            (start, end) = (Int(spans[k]), min(n, Int(spans[k + 1])))
+        } else {
+            let enders = Set(".!?…".utf16), closers = Set("\"»”’)]".utf16)
+            start = from
+            while start > 0, !enders.contains(s.character(at: start - 1)) { start -= 1 }
+            end = max(from, min(to, n))
+            while end < n, !enders.contains(s.character(at: end)) { end += 1 }
+            while end < n, enders.contains(s.character(at: end)) || closers.contains(s.character(at: end)) { end += 1 }
+        }
+        // a long one in pieces of up to `limit`, cut at a space: the line changes once per piece, not per word
+        var a = start, z = end
+        while z - a > limit {
+            let r = s.range(of: " ", options: .backwards, range: NSRange(location: a + 1, length: limit - 1))
+            let cut = r.location == NSNotFound ? a + limit : r.location
+            if from < cut {
+                z = cut
+                break
+            }
+            a = cut
+        }
+        let r = s.rangeOfComposedCharacterSequences(for: NSRange(location: a, length: z - a))
+        let body = s.substring(with: r).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return nil }
+        return (a > start ? "…" : "") + body + (z < end ? "…" : "")
+    }
 }
 
 /// The time iOS grants a write to finish once the app is off the screen.

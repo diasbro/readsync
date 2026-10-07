@@ -34,6 +34,7 @@ struct LibraryView: View {
     @State private var reading: String?
     @State private var openWhenReady: String?  // tapped while not on the phone yet: opens as soon as it is
     @State private var picking = false
+    @State private var lockText = Player.shared.lockText
 
     var body: some View {
         NavigationStack {
@@ -50,6 +51,8 @@ struct LibraryView: View {
                     Menu {
                         Button("Выбрать папку библиотеки", systemImage: "folder") { picking = true }
                         Button("Обновить", systemImage: "arrow.clockwise") { Task { await shelf.refresh() } }
+                        Button("Скачать все книги", systemImage: "icloud.and.arrow.down") { Task { await shelf.fetchAll() } }
+                        Toggle("Текст на экране блокировки", systemImage: "lock.iphone", isOn: $lockText)
                         Text("Папка: \(shelf.folderName)")
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -60,6 +63,7 @@ struct LibraryView: View {
                 if case .success(let url) = result { shelf.choose(folder: url) }
             }
             .task { await shelf.refresh() }
+            .onChange(of: lockText) { _, on in Player.shared.lockText = on }
             .onChange(of: shelf.copies) { _, copies in
                 if let slug = openWhenReady, copies[slug] == .here {
                     openWhenReady = nil
@@ -68,7 +72,7 @@ struct LibraryView: View {
             }
             .fullScreenCover(item: Binding(get: { reading.map(Slug.init) }, set: { reading = $0?.id })) { item in
                 ReaderView(slug: item.id) {
-                    Player.shared.stop()  // saved here, before the library reads the place back
+                    Player.shared.readerClosed(item.id)  // saved here, before the library reads the place back
                     reading = nil
                     Task {
                         await Player.shared.flush()
@@ -109,6 +113,18 @@ struct LibraryView: View {
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 0)  // the section titles are rows: no 44-point floor under them
         .refreshable { await shelf.refresh() }
+        .safeAreaInset(edge: .bottom) {
+            MiniPlayer {
+                openWhenReady = nil
+                reading = $0
+            } close: {
+                Player.shared.stop()  // saves the place
+                Task {
+                    await Player.shared.flush()
+                    await shelf.refresh()
+                }
+            }
+        }
     }
 
     private func row(_ book: Book) -> some View {
@@ -206,6 +222,55 @@ struct NowReading: View {
     }
 }
 
+// ---- the narrator the reader left playing: a bar over the list ----
+
+/// Its own view, observing the player: the list is not redrawn every second the narrator plays.
+struct MiniPlayer: View {
+    let open: (String) -> Void
+    let close: () -> Void
+    @ObservedObject private var player = Player.shared
+
+    var body: some View {
+        if let book = player.book {
+            HStack(spacing: 12) {
+                Cover(book: book, width: 30)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(book.title)
+                        .font(.system(.subheadline, design: .serif, weight: .semibold))
+                        .lineLimit(1)
+                    ProgressBar(value: player.progress, height: 2)
+                }
+                Button {
+                    if player.playing { player.pause() } else { player.play() }
+                } label: {
+                    Image(systemName: player.playing ? "pause.fill" : "play.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 40, height: 40)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel(player.playing ? "Пауза" : "Слушать")
+                Button(action: close) {
+                    Image(systemName: "xmark")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, height: 40)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Остановить")
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 8)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.primary.opacity(0.06)))
+            .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .onTapGesture { open(book.slug) }
+            .padding(.horizontal, 12).padding(.bottom, 6)
+        }
+    }
+}
+
 // ---- one book in the list ----
 
 struct BookRow: View {
@@ -299,14 +364,15 @@ struct Cover: View {
 
 struct ProgressBar: View {
     let value: Double
+    var height: CGFloat = 4
     var body: some View {
         GeometryReader { g in
             ZStack(alignment: .leading) {
                 Capsule().fill(.quaternary)
-                Capsule().fill(Color.accentColor).frame(width: max(4, g.size.width * value))
+                Capsule().fill(Color.accentColor).frame(width: max(height, g.size.width * value))
             }
         }
-        .frame(height: 4)
+        .frame(height: height)
     }
 }
 

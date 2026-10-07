@@ -78,6 +78,8 @@ final class Shelf: ObservableObject {
     private let fm = FileManager.default
     private var scoped: URL?
     private var folderLost = false  // a folder was chosen but cannot be reached now
+    private var fetchingAll = false
+    private var launched = false  // the first refresh has run: `-fetchAll YES` acts once, after it
     private let bookmarkKey = "libraryBookmark"
     private let folderLostMessage = "Нет доступа к папке библиотеки: выбери её снова"
 
@@ -111,6 +113,7 @@ final class Shelf: ObservableObject {
 
     init() {
         restoreFolder()
+        sweepStaging()
     }
 
     // ---- the folder ----
@@ -197,6 +200,11 @@ final class Shelf: ObservableObject {
         }.value
         Player.forgetMissingCovers()
         progress = measured
+        if !launched {
+            launched = true
+            // launched with `-fetchAll YES`: every book onto the phone, as the menu's «Скачать все книги»
+            if UserDefaults.standard.bool(forKey: "fetchAll"), booksRoot != nil { Task { await fetchAll() } }
+        }
     }
 
     private func isFetching(_ slug: String) -> Bool {
@@ -265,15 +273,19 @@ final class Shelf: ObservableObject {
 
     // ---- getting a copy ----
 
-    func fetch(_ book: Book) {
-        if case .fetching = copy(of: book.slug) { return }
+    /// The task ends once the copy is in or has failed.
+    @discardableResult
+    func fetch(_ book: Book) -> Task<Void, Never>? {
+        if case .fetching = copy(of: book.slug) { return nil }
         guard let root = booksRoot else {
             message = folderLostMessage
-            return
+            return nil
         }
+        if Player.shared.slug == book.slug { Player.shared.stop() }  // its files are about to be swapped under it
+        sweepStaging()
         copies[book.slug] = .fetching(0)
         let source = root.appendingPathComponent(book.slug, isDirectory: true)
-        Task.detached {
+        return Task.detached {
             let result = Self.copyBook(book.slug, from: source) { done in
                 Task { @MainActor in
                     if Shelf.shared.isFetching(book.slug) { Shelf.shared.copies[book.slug] = .fetching(done) }
@@ -291,6 +303,31 @@ final class Shelf: ObservableObject {
                     shelf.message = why.message
                 }
             }
+        }
+    }
+
+    /// Every book not on the phone, or not as the Mac has it now, one after another: all at once, iCloud
+    /// would download every book's audio side by side and none would be readable for a long while.
+    func fetchAll() async {
+        guard !fetchingAll else { return }
+        fetchingAll = true
+        defer { fetchingAll = false }
+        for book in books {
+            switch copy(of: book.slug) {
+            case .absent, .failed: break
+            case .outdated where book.slug != Player.shared.slug: break  // the one loaded waits for its own swipe
+            default: continue
+            }
+            await fetch(book)?.value
+        }
+    }
+
+    /// Staging folders (`.<slug>.new`) a fetch left when the app was killed in the middle of it: hundreds of
+    /// megabytes each. The one a fetch is filling now stays.
+    private func sweepStaging() {
+        for name in (try? fm.contentsOfDirectory(atPath: Self.localRoot.path)) ?? []
+        where name.hasPrefix(".") && name.hasSuffix(".new") && !isFetching(String(name.dropFirst().dropLast(4))) {
+            try? fm.removeItem(at: Self.localRoot.appendingPathComponent(name, isDirectory: true))
         }
     }
 
@@ -360,6 +397,7 @@ final class Shelf: ObservableObject {
     }
 
     func remove(_ slug: String) {
+        if Player.shared.slug == slug { Player.shared.stop() }  // the narrator must not play a file that is gone
         try? fm.removeItem(at: Self.localDir(slug))
         copies[slug] = Copy.absent
     }
