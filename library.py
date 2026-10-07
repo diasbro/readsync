@@ -18,6 +18,7 @@ import urllib.parse
 from pathlib import Path
 
 import state
+from sources.audio import BadRef, parse_ref
 
 ROOT = Path(__file__).resolve().parent
 READER = ROOT / "reader"
@@ -466,6 +467,14 @@ def start_job(form: dict) -> tuple[dict | None, str]:
     slug = val("slug") or (slugify(title) if title else slug_from_source(form_values(form, "text_url")))
     if not SLUG_RE.match(slug):
         return None, "bad slug"
+    audio_ref = val("audio_ref")
+    if audio_ref:  # a recording found by the audio search: the pipeline resolves its parts itself
+        try:
+            parse_ref(audio_ref)
+        except BadRef as e:
+            return None, str(e)
+        if form_values(form, "audio_url") or (form.get("audio_file") or {}).get("filename"):
+            return None, "либо найденная озвучка, либо своя ссылка или файл"
     d = BOOKS / slug
     if slug in JOBS and JOBS[slug]["proc"].poll() is None:
         return None, f"книга {slug} уже загружается"
@@ -500,7 +509,7 @@ def start_job(form: dict) -> tuple[dict | None, str]:
         ext = os.path.splitext(af["filename"])[1].lower() or ".m4a"
         (d / ("upload" + ext)).write_bytes(af["data"])
         audios.append(str(d / ("upload" + ext)))
-    if attach_audio and not audios:
+    if attach_audio and not audios and not audio_ref:
         return None, "нужна ссылка на аудио или файл"
     if not all(allowed(a) for a in audios):
         return None, "ссылка на аудио должна начинаться с http(s)"
@@ -510,6 +519,8 @@ def start_job(form: dict) -> tuple[dict | None, str]:
         cmd += ["--text", t]
     for a in audios:
         cmd += ["--audio", a]
+    if audio_ref:
+        cmd += ["--audio-ref", audio_ref]
     if val("align") != "on":
         cmd.append("--no-align")
     flags = (

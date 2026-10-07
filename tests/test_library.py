@@ -129,3 +129,37 @@ def test_stop_kills_the_whole_group(tmp_path, monkeypatch, work_root):
         if job.poll() is None:
             os.killpg(job.pid, 9)
             job.wait()
+
+
+def test_audio_ref_becomes_a_pipeline_flag(tmp_path, monkeypatch):
+    """A recording picked from the audio search reaches add_book as --audio-ref, the narrator beside it."""
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "book.json").write_text("{}", encoding="utf-8")
+    launched = []
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: launched.append((slug, cmd)))
+    ref = "knigavuhe:50486:puteshestvie-na-zapad-1"
+    form = {"slug": {"value": "b"}, "audio_ref": {"value": ref}, "narrator": {"value": "Кир Дмитриев"}}
+
+    job, err = library.start_job(form)
+
+    assert (job, err) == ({"slug": "b"}, "")
+    ((slug, cmd),) = launched
+    assert slug == "b"
+    assert cmd[cmd.index("--audio-ref") + 1] == ref
+    assert cmd[cmd.index("--narrator") + 1] == "Кир Дмитриев"
+    assert "--audio" not in cmd
+
+
+def test_a_bad_audio_ref_is_rejected(tmp_path, monkeypatch):
+    """Only a ref the audio sources know is passed on: anything else is the client's mistake."""
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "book.json").write_text("{}", encoding="utf-8")
+    launched = []
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: launched.append(cmd))
+    for ref in ("https://evil.example/a.mp3", "knigavuhe:1:../x", "yt:short", "ia:"):
+        job, err = library.start_job({"slug": {"value": "b"}, "audio_ref": {"value": ref}})
+        assert job is None and err, ref
+    assert launched == []
+    assert sorted(p.name for p in (tmp_path / "b").iterdir()) == ["book.json"]

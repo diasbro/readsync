@@ -27,6 +27,8 @@
           <option value="plex">IBM Plex Sans</option><option value="system">Системный</option>
         </select>
         <div class="muted small" style="margin-top:6px">Шрифт текста и остальное — в настройках внутри книги.</div>
+        <div class="popup-title" style="margin-top:14px">Озвучки</div>
+        <label class="switch"><input type="checkbox" id="lib-audio-search"> искать и слушать озвучки в карточке книги</label>
         <div class="popup-title" style="margin-top:14px">Кнопка для панели закладок</div>
         <div class="muted small">Перетащи <a id="bookmarklet" href="#" class="bm">+ readsync</a> на панель закладок браузера.
           Нажмёшь её на странице любой книги — название сохранится сюда, текст найдёшь потом.</div>
@@ -52,6 +54,7 @@
     </div>
     <div id="library-list" class="lib-grid"></div>
   </section>
+  <audio id="listen" preload="none"></audio>
 </div>
 
 <div id="app" hidden>

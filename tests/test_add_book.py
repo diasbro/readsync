@@ -142,3 +142,99 @@ def test_sigterm_runs_tidy(tmp_path, work_root):
     assert not (work_root / "b").exists()
     assert not [*d.glob("part*"), *d.glob("upload_*")]
     assert (d / "book.json").exists()
+
+
+def test_audio_ref_downloads_parts_into_work_dir(tmp_path, monkeypatch, work_root):
+    """A found recording is resolved, downloaded part by part into the work dir and built there: the book
+    folder gets nothing new until the finished audio and timing land."""
+    monkeypatch.setattr(add_book, "BOOKS", tmp_path)
+    d = tmp_path / "b"
+    d.mkdir()
+    (d / "book.json").write_text(json.dumps({"title": "B", "blocks": []}), encoding="utf-8")
+    (d / "book.toml").write_text(f'title = "B"\nid = "{"a" * 32}"\nedition = "e1"\n', encoding="utf-8")
+    before = sorted(p.name for p in d.iterdir())
+    ref = "knigavuhe:50486:puteshestvie-na-zapad-1"
+    parts = [
+        {"title": f"{i:02d}", "duration": 60.0, "url": f"https://s1.knigavuhe.org/{i}.mp3", "size": None}
+        for i in (1, 2)
+    ]
+    monkeypatch.setattr(add_book, "recording", lambda r: ("knigavuhe", parts) if r == ref else pytest.fail(r))
+    downloads, seen_in_book = [], []
+
+    def download(url, dst):
+        assert dst.parent == work_root / "b"
+        downloads.append(url)
+        seen_in_book.append(sorted(p.name for p in d.iterdir()))
+        dst.write_bytes(b"mp3")
+
+    def run(cmd, **kw):
+        if cmd[0] == "ffmpeg":
+            Path(cmd[-1]).write_bytes(b"audio")
+        elif str(cmd[1]).endswith("timing_from_anchors.py"):
+            (Path(cmd[2]) / "timing.json").write_text('{"words": []}', encoding="utf-8")
+        seen_in_book.append(sorted(p.name for p in d.iterdir()))
+
+    land_audio = add_book.land_audio
+
+    def landing(w, book):
+        seen_in_book.append(sorted(p.name for p in d.iterdir()))
+        assert sorted(p.name for p in w.glob("part*")) == []  # the parts went once joined
+        land_audio(w, book)
+
+    monkeypatch.setattr(add_book, "download", download)
+    monkeypatch.setattr(add_book, "run", run)
+    monkeypatch.setattr(add_book, "duration_of", lambda p: 60.0)
+    monkeypatch.setattr(add_book, "aac_args", lambda: [])
+    monkeypatch.setattr(add_book, "land_audio", landing)
+    monkeypatch.setattr(add_book.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        sys, "argv", ["add_book.py", "b", "--audio-ref", ref, "--narrator", "Кир Дмитриев", "--no-align"]
+    )
+
+    add_book.main()
+
+    assert downloads == [p["url"] for p in parts]
+    assert seen_in_book and all(names == before for names in seen_in_book)
+    assert {"audio.m4a", "timing.json"} <= {p.name for p in d.iterdir()}
+    meta = tomllib.loads((d / "book.toml").read_text(encoding="utf-8"))
+    assert meta["audio_source"] == ref and meta["narrator"] == "Кир Дмитриев"
+    assert not (work_root / "b").exists()
+
+
+def test_download_resumes_a_cut_part(tmp_path, monkeypatch):
+    """A connection cut mid-part is picked up by Range; the part is renamed only once it is whole."""
+    body = bytes(range(100))
+    ranges = []
+
+    class Resp:
+        def __init__(self, data, status, length, cut):
+            self.data, self.status, self.cut = data, status, cut
+            self.headers = {"Content-Length": str(length)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            if not self.data and self.cut:
+                raise ConnectionResetError("reset")
+            out, self.data = self.data[:n], self.data[n:]
+            return out
+
+    def urlopen(req, timeout):
+        rng = req.get_header("Range")
+        ranges.append(rng)
+        if rng is None:  # the first try is cut after 40 bytes
+            return Resp(body[:40], 200, len(body), cut=True)
+        start = int(rng.removeprefix("bytes=").rstrip("-"))
+        return Resp(body[start:], 206, len(body) - start, cut=False)
+
+    monkeypatch.setattr(add_book.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(add_book.time, "sleep", lambda s: None)
+    dst = tmp_path / "part01.mp3"
+    add_book.download("https://s1.knigavuhe.org/1.mp3", dst)
+    assert dst.read_bytes() == body
+    assert ranges == [None, "bytes=40-"]
+    assert not (tmp_path / "part01.mp3.part").exists()

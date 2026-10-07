@@ -5,16 +5,20 @@ Usage:
   python pipeline/add_book.py <slug> --text <url|file> [--text <url|file> ...] [--audio <url|file> ...]
       [--title T] [--author A] [--narrator N] [--lang ru] [--no-align] [--whisper-model small]
   python pipeline/add_book.py <slug> --audio <url|file> [...]      # attach audio to an existing text-only book
+  python pipeline/add_book.py <slug> --audio-ref <ref> [--narrator N]   # a recording the audio search found
 
 Text sources: fantasy-worlds reader pages, any HTML page, FB2 / FB2.zip, EPUB, TXT (local files or
 direct download links). Several --text values are volumes of one book and are merged in order.
 Audio sources: YouTube URLs or local files; several --audio values are parts and are joined in order.
+--audio-ref names a recording of sources.audio (knigavuhe, YouTube, archive.org): its parts are resolved
+right before downloading, since their links expire; mp3 parts are fetched one at a time with resume.
 Without captions the audio is transcribed with faster-whisper for coarse anchoring.
 """
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -22,6 +26,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -39,6 +44,16 @@ BOOKS = Path(os.environ.get("READSYNC_BOOKS") or (APP_BOOKS if APP_BOOKS.exists(
 PY = sys.executable
 PIPE = ROOT / "pipeline"
 UA = {"User-Agent": "Mozilla/5.0"}
+# what a recording costs on disk while it is built, per second of audio: the source (mp3 at 128 kbit/s
+# where its size is unknown), our AAC-LC mono 48 kbit/s copy, and the 16 kHz mono WAV for the timing
+SOURCE_BPS = 128_000 // 8
+OURS_BPS = 48_000 // 8
+WAV_BPS = 16_000 * 2
+
+
+def say(msg: str) -> None:
+    """A step of the job for its log (stdout and stderr both go there), apart from the commands echoed."""
+    print(msg, file=sys.stderr, flush=True)
 
 
 def run(cmd: list[str], **kw) -> None:
@@ -209,9 +224,84 @@ def duration_of(path: Path) -> float:
     return float(out or 0)
 
 
+def recording(ref: str) -> tuple[str, list[dict]]:
+    """The kind of a recording ref and its parts as they are now: [{title, duration, url, size}]."""
+    if str(ROOT) not in sys.path:
+        sys.path.append(str(ROOT))
+    from sources import audio
+
+    kind, _ = audio.parse_ref(ref)
+    return kind, audio.parts(ref)
+
+
+def check_space(parts: list[dict], w: Path) -> None:
+    """Stop before the first byte if the parts, our copy and the WAV would not fit."""
+    need = 0.0
+    for p in parts:
+        dur = float(p.get("duration") or 0)
+        need += (p.get("size") or dur * SOURCE_BPS) + dur * (OURS_BPS + WAV_BPS)
+    free = shutil.disk_usage(w).free
+    if need > free:
+        raise SystemExit(f"не хватает места на диске: нужно ~{need / 1e9:.1f} ГБ, свободно {free / 1e9:.1f} ГБ")
+
+
+def download(url: str, dst: Path, tries: int = 3) -> None:
+    """One file over HTTP into `dst`: written as `dst.part`, checked against Content-Length, renamed.
+    A dropped connection resumes from where it stopped (Range), up to `tries` times."""
+    tmp = dst.with_name(dst.name + ".part")
+    tmp.unlink(missing_ok=True)
+    for attempt in range(tries + 1):
+        have = tmp.stat().st_size if tmp.exists() else 0
+        headers = {**UA, **({"Range": f"bytes={have}-"} if have else {})}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
+                resumed = have and r.status == 206
+                length = r.headers.get("Content-Length")
+                total = (have if resumed else 0) + int(length) if length else None
+                with tmp.open("ab" if resumed else "wb") as f:
+                    while chunk := r.read(1 << 16):
+                        f.write(chunk)
+            got = tmp.stat().st_size
+            if total is not None and got != total:
+                raise OSError(f"пришло {got} из {total} байт")
+            os.replace(tmp, dst)
+            return
+        except (OSError, http.client.HTTPException) as e:  # urllib's errors are OSErrors; a cut body is not
+            if attempt == tries:
+                raise SystemExit(f"{dst.name} не скачался: {e}") from None
+            say(f"{dst.name}: {e}, докачиваю")
+            time.sleep(2)
+
+
+def fetch_recording(ref: str, w: Path) -> list[str]:
+    """The parts of a found recording, as sources for build_audio: YouTube links (yt-dlp downloads them
+    with their captions) or mp3 files downloaded here into the work dir, one at a time."""
+    kind, parts = recording(ref)
+    if not parts:
+        raise SystemExit("у озвучки нет частей")
+    check_space(parts, w)
+    if kind == "yt":
+        return [p["url"] for p in parts]
+    out = []
+    for i, p in enumerate(parts, 1):
+        if not str(p.get("url", "")).startswith("https://"):
+            raise SystemExit("источник дал ссылку не по https")
+        if i > 1:
+            time.sleep(0.5)  # one part after another, never in parallel: the site is a library, not a CDN
+        say(f"часть {i}/{len(parts)}")
+        dst = w / f"part{i:02d}.mp3"
+        download(p["url"], dst)
+        out.append(str(dst))
+    return out
+
+
 def build_audio(sources: list[str], w: Path, lang: str) -> None:
     """Everything in the work dir: audio.m4a, audio16k.wav and the joined captions, if any."""
-    parts = [fetch_audio(src, w, i, lang) for i, src in enumerate(sources, 1)]
+    parts = []
+    for i, src in enumerate(sources, 1):
+        if is_url(src) and len(sources) > 1:
+            say(f"часть {i}/{len(sources)}")
+        parts.append(fetch_audio(src, w, i, lang))
     offsets, total = [], 0.0
     for p in parts:
         offsets.append(total)
@@ -220,6 +310,7 @@ def build_audio(sources: list[str], w: Path, lang: str) -> None:
     # the timing is measured on the sources, so it does not depend on the encoder
     lst = w / "parts.txt"
     lst.write_text("".join(f"file '{p.resolve()}'\n" for p in parts), encoding="utf-8")
+    say("склеиваю")
     concat = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst), "-vn"]
     run([*concat, *aac_args(), str(w / "audio.m4a")])
     run([*concat, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(w / "audio16k.wav")])
@@ -272,6 +363,7 @@ def main() -> None:
     ap.add_argument("slug")
     ap.add_argument("--text", action="append", default=[], help="text source; repeat for volumes")
     ap.add_argument("--audio", action="append", default=[], help="audio source; repeat for parts")
+    ap.add_argument("--audio-ref", default="", help="a recording found by the audio search (sources.audio)")
     ap.add_argument("--title", default="")
     ap.add_argument("--author", default="")
     ap.add_argument("--narrator", default="")
@@ -304,18 +396,21 @@ def build(args: argparse.Namespace, d: Path, w: Path) -> None:
     # new text under existing captions (an edition replaced): the word timing is rebuilt from them
     has_captions = any(d.glob("yt.*.json3")) or (d / "whisper.json3").exists()
     has_audio = any((d / name).exists() for name in PLAYABLE)
-    retime = bool(args.text) and not args.audio and has_captions and has_audio
-    if args.text and (retime or args.audio):
+    new_audio = bool(args.audio or args.audio_ref)
+    retime = bool(args.text) and not new_audio and has_captions and has_audio
+    if args.text and (retime or new_audio):
         (d / "timing.json").unlink(missing_ok=True)  # it times the old text, which is gone already
     if retime:
         run([PY, str(PIPE / "anchors.py"), str(d), "--work", str(w)])
         run([PY, str(PIPE / "timing_from_anchors.py"), str(w)])
-    if args.audio:
+    if new_audio:
         # the old audio, timing and book.toml stay as they are until everything new is ready in w
-        build_audio(args.audio, w, args.lang)
+        sources = fetch_recording(args.audio_ref, w) if args.audio_ref else args.audio
+        build_audio(sources, w, args.lang)
         if not (w / "yt.merged.json3").exists():
-            print("no captions: transcribing with faster-whisper (slow)", flush=True)
+            say("распознаю речь: субтитров нет, это долго")
             run([PY, str(PIPE / "transcribe.py"), str(w), "--model", args.whisper_model, "--lang", args.lang])
+        say("размечаю")
         run([PY, str(PIPE / "anchors.py"), str(d), "--work", str(w)])
         run([PY, str(PIPE / "timing_from_anchors.py"), str(w)])
 
@@ -335,10 +430,9 @@ def build(args: argparse.Namespace, d: Path, w: Path) -> None:
         meta["translator"] = args.translator
         meta["year"] = args.year
         meta["fragment_note"] = fragment_note(book)
-    if args.audio:
-        meta["audio_source"] = " | ".join(args.audio)
+    if new_audio:
+        meta["audio_source"] = args.audio_ref or " | ".join(args.audio)
         meta["narrator"] = args.narrator or meta.get("narrator", "")
-    if args.audio:
         land_audio(w, d)
     elif retime:
         land(w / "timing.json", d / "timing.json")
@@ -349,10 +443,10 @@ def build(args: argparse.Namespace, d: Path, w: Path) -> None:
     stamp(d, new_edition=bool(args.text))
 
     print(
-        f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)"),
+        f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if new_audio else "  (text only)"),
         flush=True,
     )
-    if (args.audio or retime) and not args.no_align:
+    if (new_audio or retime) and not args.no_align:
         print("running precise MMS alignment (about 15 min per hour of audio, low priority)...", flush=True)
         run([PY, str(PIPE / "align.py"), str(d), "--work", str(w)])
         print("done: precise timing", flush=True)

@@ -15,6 +15,7 @@
   function syncPrefsUI() {
     document.querySelectorAll("#lib-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
     $("#lib-ui").value = settings.ui;
+    $("#lib-audio-search").checked = settings.audioSearch !== false;
   }
   onSettingsSynced = syncPrefsUI;
   syncPrefsUI();
@@ -22,6 +23,7 @@
   addEventListener("click", (e) => { if (!e.target.closest("#lib-prefs, #lib-settings")) prefs.hidden = true; });
   $("#lib-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); persistSettings(); syncPrefsUI(); });
   $("#lib-ui").addEventListener("input", (e) => { settings.ui = e.target.value; applySettings(); persistSettings(); syncPrefsUI(); });
+  $("#lib-audio-search").addEventListener("change", (e) => { settings.audioSearch = e.target.checked; applySettings(); persistSettings(); paint(); });
   $("#bookmarklet").href = "javascript:(function(){window.open('" + location.origin + "/?wish='+encodeURIComponent(document.title),'_blank')})()";
 
   // ---- header line: the sentence you stopped at in the current book, the word highlight walking along it ----
@@ -79,7 +81,8 @@
   // card that waits in the catalog. Every card opens in place (⚙) for its text and audio.
   let books = [], wishes = [], jobs = {}, open = null, confirmDel = null;  // open: id of the card opened in place; confirmDel: awaiting "delete?"
   const READING_SEC = 600;
-  const SOURCE = { "fantasy-worlds": "fantasy-worlds", flibusta: "Flibusta", coollib: "Coollib" };
+  const SOURCE = { "fantasy-worlds": "fantasy-worlds", flibusta: "Flibusta", coollib: "Coollib", "standard-ebooks": "Standard Ebooks",
+    gutenberg: "Gutenberg", wikisource: "Wikisource", bia: "Buddhadasa Archives" };
   const SOURCES_LABEL = Object.values(SOURCE).join(", ");
   const LOADABLE = new Set(["fb2", "epub", "pdf", "txt", "html"]);
   const searching = new Map();  // card id -> {busy, t0} | {status}: this session's search state
@@ -87,7 +90,8 @@
   const idOf = (x) => x.slug || x.id;
   const isShell = (x) => !x.slug;
   const shelfOf = (b) => (b.state.shelf ? b.state.shelf : b.state.finished ? "library" : b.state.seconds > READING_SEC ? "reading" : "library");
-  const sourceOf = (url) => { const h = (url || "").split("|")[0].trim(); for (const k in SOURCE) if (h.includes(k.replace("-", "-"))) return SOURCE[k]; return h && !isUrl(h) ? "файл" : h ? new URL(h).hostname.replace(/^www\./, "") : ""; };
+  const REF_SOURCE = { knigavuhe: "knigavuhe", yt: "YouTube", ia: "archive.org" };  // a recording loaded by its ref
+  const sourceOf = (url) => { const h = (url || "").split("|")[0].trim(); const ref = /^(knigavuhe|yt|ia):/.exec(h); if (ref) return REF_SOURCE[ref[1]]; for (const k in SOURCE) if (h.includes(k.replace("-", "-"))) return SOURCE[k]; return h && !isUrl(h) ? "файл" : h ? new URL(h).hostname.replace(/^www\./, "") : ""; };
   const kb = (n) => (n == null ? "" : n >= 1000 ? (n / 1024).toFixed(1).replace(".", ",") + " МБ" : n + " КБ");
   const facts = (b) => [b.author, b.translator ? "пер. " + b.translator : null, b.year, b.has_audio ? (b.narrator ? "читает " + b.narrator : "с аудио") : null].filter(Boolean).join(" · ");
 
@@ -125,6 +129,127 @@
     return `<div class="cands">${hits.length ? rowsHtml(hits, current) : ""}${byAuthor.length ? `<div class="hd">у автора ${esc(author.name)}</div>${rowsHtml(byAuthor, current)}` : ""}</div>`;
   }
 
+  // ---- recordings: found by title, listened to before loading, loaded by their ref (settings.audioSearch) ----
+  // Nothing of a listen reaches the disk: the server streams it through and the browser is told not to cache.
+  const AUDIO_SOURCE = { knigavuhe: "knigavuhe", youtube: "YouTube", archive: "archive.org" };
+  const AUDIO_LABEL = Object.values(AUDIO_SOURCE).join(", ");
+  const OURS_PER_H = 21.6e6;  // what the pipeline keeps: AAC-LC mono 48 kbit/s
+  const LISTEN_FROM = 120;  // the first part opens with «Аудиокнига… читает…»: the voice starts past it
+  const audioFinding = new Map();  // slug -> {busy, t0, ctrl, query} | {query, hits, note | status}
+  const audioHits = new Map();  // ref -> recording, for the buttons of the rows on screen
+  let audioConfirm = null;  // ref of the row asking "load?"
+  let listening = null;  // {ref, parts, part, from}: the recording in the shared <audio id="listen">
+  const audioOn = () => settings.audioSearch !== false && !bridge;  // the phone has no server to search with
+  const plural = (n, one, few, many) => { const m = n % 100, k = n % 10; return n + " " + (m > 10 && m < 15 ? many : k === 1 ? one : k > 1 && k < 5 ? few : many); };
+  const hm = (s) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h} ч${m ? ` ${m} мин` : ""}` : `${m || 1} мин`; };
+  const bytes = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1).replace(".", ",") + " ГБ" : Math.max(1, Math.round(n / 1e6)) + " МБ");
+  const oursOf = (h) => (h.duration_s ? (h.duration_s / 3600) * OURS_PER_H : 0);
+  const sizeOf = (h) => (oursOf(h) ? (h.size_bytes ? `~${bytes(h.size_bytes)} → ` : "") + `~${bytes(oursOf(h))} у нас` : "");
+  const audioMeta = (h) => [h.author, h.narrator ? "читает " + h.narrator : "", h.duration_s ? hm(h.duration_s) : "",
+    h.parts > 1 ? plural(h.parts, "часть", "части", "частей") : "", sizeOf(h), AUDIO_SOURCE[h.source] || h.source].filter(Boolean).join(" · ");
+  function audioRowHtml(h, b) {
+    audioHits.set(h.ref, h);
+    const r = esc(h.ref), ours = oursOf(h);
+    const right = audioConfirm === h.ref
+      ? `<div class="acts confirm">${b.has_audio ? "заменить" : "загрузить"}${ours ? " ~" + bytes(ours) : ""}${h.captions ? "" : " и распознать речь"}? <button data-act="audioYes" data-ref="${r}">да</button> <button data-act="audioNo">нет</button></div>`
+      : `${icon("listen", "▶", "Послушать")}<button class="btn sm" data-act="audioPick">${b.has_audio ? "Заменить" : "Загрузить"}</button>`;
+    return `<div class="cand" data-ref="${r}"><div class="ct">${esc(h.title)}<div class="cm">${esc(audioMeta(h))}</div>
+      <div class="cm">${h.captions ? "с субтитрами — синхронизация быстрая" : "без субтитров — распознавание речи, долго"}</div></div>${right}</div>`;
+  }
+  function audioRowsHtml(hits, b) {
+    // one book read by several narrators folds into one line, as editions do
+    const groups = [];
+    hits.forEach((h) => { const key = norm(h.title) + "|" + norm(h.author); const g = groups.find((x) => x.key === key); if (g) g.rows.push(h); else groups.push({ key, rows: [h] }); });
+    const asking = (g) => g.rows.some((h) => h.ref === audioConfirm);
+    const one = (g) => (g.rows.length === 1 ? audioRowHtml(g.rows[0], b)
+      : `<details class="eds"${asking(g) ? " open" : ""}><summary><span class="ct">${esc(g.rows[0].title)}<div class="cm">${esc([g.rows[0].author, plural(g.rows.length, "озвучка", "озвучки", "озвучек")].filter(Boolean).join(" · "))}</div></span><span class="link-btn">озвучки</span></summary><div class="cands">${g.rows.map((h) => audioRowHtml(h, b)).join("")}</div></details>`);
+    const rest = groups.slice(SHOW);
+    return `<div class="cands">${groups.slice(0, SHOW).map(one).join("")}${rest.length ? `<details class="more"${rest.some(asking) ? " open" : ""}><summary>ещё ${rest.length}</summary><div class="cands">${rest.map(one).join("")}</div></details>` : ""}</div>`;
+  }
+  function audioFindHtml(b) {
+    const s = audioOn() && audioFinding.get(b.slug);
+    if (!s) return "";
+    const status = s.busy ? `<div class="m status"><span class="spin"></span>ищу в ${AUDIO_LABEL}… <span class="asecs">${Math.round((Date.now() - s.t0) / 1000)}</span> с<button class="link-btn" data-act="stopAudioFind">отменить</button></div>`
+      : s.status ? `<div class="m status warn">${esc(s.status)}</div>` : s.note ? `<div class="m">${esc(s.note)}</div>` : "";
+    return `<div class="own afind"><input class="afind-input" value="${esc(s.query)}" spellcheck="false" aria-label="Что искать в ${AUDIO_LABEL}" placeholder="Название, автор, чтец"><button class="btn sm" data-act="findAudioGo">Искать</button></div>
+      ${status}${s.hits?.length ? audioRowsHtml(s.hits, b) : ""}`;
+  }
+  async function findAudio(b, query) {
+    query = (query || "").trim();
+    if (!query) return;
+    audioFinding.get(b.slug)?.ctrl?.abort();  // asked again: the answer to the old words is not wanted
+    const t0 = Date.now(), ctrl = new AbortController(), s0 = { busy: true, t0, ctrl, query };
+    audioFinding.set(b.slug, s0); audioConfirm = null; paint();
+    const ticker = setInterval(() => { const el = document.querySelector(`.card[data-key="${CSS.escape(b.slug)}"] .asecs`); if (el) el.textContent = Math.round((Date.now() - t0) / 1000); }, 1000);
+    const killer = setTimeout(() => ctrl.abort(), 60000);  // the server gives all sources 30 s together
+    let next;
+    try {
+      const res = await fetch("/api/audio/search?q=" + q(query), { signal: ctrl.signal }).then((r) => r.json());
+      if (res.error) throw new Error(res.error);
+      const failed = (res.errors || []).map((e) => AUDIO_SOURCE[e.split(":")[0]] || e.split(":")[0]);
+      const failedNote = failed.length ? `${failed.join(", ")} не ответил${failed.length > 1 ? "и" : ""}` : "";
+      next = { query, hits: res.hits || [] };
+      if (!next.hits.length) next.status = failedNote ? failedNote + ", попробуй ещё раз" : "озвучек не нашлось";
+      else if (failedNote) next.note = failedNote;
+    } catch (e) {
+      next = { query, status: e.name === "AbortError" ? "источники не ответили, попробуй позже" : "поиск не удался: " + e.message };
+    } finally { clearInterval(ticker); clearTimeout(killer); }
+    if (audioFinding.get(b.slug) !== s0) return;  // called off, or asked again meanwhile
+    audioFinding.set(b.slug, next); paint();
+  }
+
+  // listening: one shared <audio>, one recording at a time. Stopping detaches the source, which closes the
+  // connection: a stopped listen fetches nothing more
+  const listenEl = $("#listen");
+  const player = () => document.querySelector(".lplay");
+  const playerSays = (text) => { const el = player()?.querySelector(".lst"); if (el) el.textContent = text; };
+  function stopListen() {
+    if (!listening && !listenEl.getAttribute("src")) return;
+    listening = null;
+    listenEl.pause(); listenEl.removeAttribute("src"); listenEl.load();
+    document.querySelectorAll(".lplay").forEach((el) => el.remove());
+    document.querySelectorAll(".cand.on").forEach((row) => { row.classList.remove("on"); const btn = row.querySelector('[data-act="listen"]'); if (btn) { btn.textContent = "▶"; btn.title = "Послушать"; } });
+  }
+  function playPart(part, from) {
+    Object.assign(listening, { part, from });
+    listenEl.src = `/api/audio/listen?ref=${q(listening.ref)}&part=${part}`;
+    listenEl.currentTime = from;  // before any data: where playback starts
+    listenEl.play().catch(() => {});
+    playerSays("готовлю…");
+    const sel = player()?.querySelector(".lpart"); if (sel) sel.value = String(part);
+  }
+  function startListen(row, h) {
+    stopListen();
+    listening = { ref: h.ref, parts: h.parts || 1, part: 0, from: LISTEN_FROM };
+    row.classList.add("on");
+    const btn = row.querySelector('[data-act="listen"]'); btn.textContent = "■"; btn.title = "Остановить";
+    row.insertAdjacentHTML("afterend", `<div class="lplay"><button class="ic" data-act="listenToggle" title="Пауза">${iconSvg("pause")}</button>
+      <button class="link-btn" data-act="listenSkip" data-d="-30">−30 с</button><button class="link-btn" data-act="listenSkip" data-d="30">+30 с</button>
+      <span class="lst"></span><span class="ltime"></span><div class="lbar"><i></i></div></div>`);
+    playPart(0, LISTEN_FROM);
+    // a search row may not know its parts: the list the proxy streams from says (cached on the server)
+    const now = listening;
+    fetch("/api/audio/parts?ref=" + q(h.ref)).then((r) => r.json()).then((ps) => {
+      if (listening !== now || !Array.isArray(ps)) return;
+      now.parts = ps.length;
+      if (ps.length < 2) return;
+      player()?.querySelector(".lst").insertAdjacentHTML("beforebegin", `<select class="lpart" aria-label="Часть">${ps.map((_, i) => `<option value="${i}"${i === now.part ? " selected" : ""}>часть ${i + 1}</option>`).join("")}</select>`);
+    }).catch(() => {});
+  }
+  // a part shorter than the skipped intro is played from its start
+  listenEl.addEventListener("loadedmetadata", () => { if (listening && listening.from && isFinite(listenEl.duration) && listenEl.duration < listening.from + 30) listenEl.currentTime = 0; });
+  listenEl.addEventListener("playing", () => playerSays(""));
+  listenEl.addEventListener("waiting", () => playerSays("готовлю…"));
+  listenEl.addEventListener("error", () => { if (listening) playerSays("не играет: источник не отдаёт звук"); });
+  ["play", "pause"].forEach((ev) => listenEl.addEventListener(ev, () => { const b = player()?.querySelector('[data-act="listenToggle"]'); if (b) { b.innerHTML = iconSvg(listenEl.paused ? "play" : "pause"); b.title = listenEl.paused ? "Слушать" : "Пауза"; } }));
+  listenEl.addEventListener("timeupdate", () => {
+    const p = player(), d = listenEl.duration, t = listenEl.currentTime;
+    if (!p || !listening) return;
+    p.querySelector(".ltime").textContent = fmt(t) + (isFinite(d) ? " / " + fmt(d) : "");
+    p.querySelector(".lbar i").style.width = (isFinite(d) && d ? Math.min(100, (t / d) * 100) : 0) + "%";
+  });
+  listenEl.addEventListener("ended", () => { if (listening && listening.part + 1 < listening.parts) playPart(listening.part + 1, 0); });
+
   // ---- the card: collapsed, or opened in place with its sections ----
   let renaming = null;  // id of the card whose title is being edited
   let finding = null;  // id of the card whose search query is being typed
@@ -155,9 +280,11 @@
   function audioSection(b) {
     const now = b.has_audio ? [b.narrator ? "читает " + b.narrator : "", sourceOf(b.audio_source), b.timing_source === "mms" ? "точное выравнивание" : "разметка по субтитрам"].filter(Boolean).join(" · ") : "нет";
     const align = b.has_audio && b.timing_source !== "mms" ? `<button class="link-btn" data-act="align">выровнять точно (долго)</button>` : "";
-    return `<div class="sec"><h5>Аудио<span class="now">· ${esc(now)}</span>${align}</h5>
+    const find = audioOn() ? `<button class="link-btn" data-act="findAudio">${b.has_audio ? "заменить озвучку" : "искать озвучки"}</button>` : "";
+    return `<div class="sec"><h5>Аудио<span class="now">· ${esc(now)}</span>${find}${align}</h5>
+      ${audioFindHtml(b)}
       <div class="own"><input name="audio_url" placeholder="${b.has_audio ? "Заменить: " : ""}ссылка на YouTube, части по одной через пробел"><label class="file">или <u>файл</u><input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3" hidden></label><input name="narrator" class="narr" placeholder="Чтец"><button class="btn sm" data-act="audioGo">Загрузить</button></div>
-      ${b.has_audio ? "" : `<div class="m">Голос выбери сам: <a target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${q((b.title || "") + " аудиокнига")}">YouTube</a></div>`}</div>`;
+      ${b.has_audio || audioOn() ? "" : `<div class="m">Голос выбери сам: <a target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${q((b.title || "") + " аудиокнига")}">YouTube</a></div>`}</div>`;
   }
   function headHtml(x) {
     if (finding === idOf(x)) {
@@ -219,6 +346,7 @@
   }
   // paint() lays out what is already loaded; renderLibrary() fetches first
   function paint() {
+    stopListen();  // the rows and the player are drawn anew: a listen never outlives the row it started from
     const draft = keepDraft();
     const byActivity = (a, b) => (b.at || 0) - (a.at || 0) || (a.title || "").localeCompare(b.title || "", "ru");
     const entry = (b) => ({ at: b.state.opened || b.added || 0, title: b.title, html: cardHtml(b) });
@@ -237,9 +365,10 @@
   // a repaint (a finished job, a search coming back) must not wipe a name that is being typed.
   // The field is remembered by name: a half-typed title must not reappear in the search line.
   function keepDraft() {
-    const el = document.querySelector(".rename-input, .find-input");
+    const all = [...document.querySelectorAll(".rename-input, .find-input, .afind-input")];
+    const el = all.find((x) => x === document.activeElement) || all[0];
     if (!el) return null;
-    const on = el.classList.contains("rename-input") ? ".rename-input" : ".find-input";
+    const on = "." + ["rename-input", "find-input", "afind-input"].find((c) => el.classList.contains(c));
     return { on, value: el.value, from: el.selectionStart, to: el.selectionEnd, focused: document.activeElement === el };
   }
   function restoreDraft(d) {
@@ -265,6 +394,7 @@
     else if (!any || e.metaKey || e.ctrlKey) addTitle(query);
   });
   addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && listening) { stopListen(); return; }  // the first Esc silences, the next closes
     if (e.key === "Escape") { prefs.hidden = true; if (renaming || finding) { renaming = finding = null; paint(); } else if (open) { open = null; paint(); } }
     if (e.key === "/" && !(e.target instanceof Element && e.target.matches("input, textarea, select"))) { e.preventDefault(); showOmni(true); }
   });
@@ -363,7 +493,7 @@
   }
   // the rename and search fields belong to the card they were opened on: they close with it, or the
   // next card to open shows a field for a name nobody is editing
-  const closeCard = () => { open = renaming = finding = null; };
+  const closeCard = () => { open = renaming = finding = audioConfirm = null; stopListen(); };
   // load a picked edition or an own link/file: a shell becomes the book, a ready book gets its text replaced
   async function loadText(x, fields) {
     // the catalog names the book: a picked edition brings its own title, an own file keeps the card's
@@ -461,6 +591,34 @@
       const ok = await startAdd({ slug: x.slug, audio_url: urls, audio_file: file, narrator: row.querySelector("[name=narrator]").value.trim() });
       if (ok) { closeCard(); renderLibrary(); }
     },
+    // the field opens with "<title> <author>" and the search starts at once; asked again, it takes the field
+    findAudio: (b) => {
+      const typed = document.querySelector(".card.open .afind-input")?.value.trim();
+      findAudio(b, typed || [b.title, b.author].filter(Boolean).join(" "));
+      const el = document.querySelector(".card.open .afind-input"); el?.focus(); el?.select();
+    },
+    findAudioGo: (b, btn) => findAudio(b, btn.closest(".afind").querySelector(".afind-input").value),
+    stopAudioFind: (b) => {
+      const s = audioFinding.get(b.slug);
+      if (!s?.busy) return;
+      s.ctrl.abort(); audioFinding.set(b.slug, { query: s.query }); paint();
+    },
+    listen: (b, btn) => {
+      const row = btn.closest(".cand"), h = audioHits.get(row.dataset.ref);
+      if (!h) return;
+      if (listening?.ref === h.ref) stopListen(); else startListen(row, h);  // another recording stops this one
+    },
+    listenToggle: () => { if (!listening) return; if (listenEl.paused) listenEl.play().catch(() => {}); else listenEl.pause(); },
+    listenSkip: (b, btn) => { if (listening) listenEl.currentTime = Math.max(0, listenEl.currentTime + Number(btn.dataset.d)); },
+    audioPick: (b, btn) => { audioConfirm = btn.closest(".cand").dataset.ref; paint(); },
+    audioNo: () => { audioConfirm = null; paint(); },
+    audioYes: async (b, btn) => {
+      const h = audioHits.get(btn.dataset.ref);
+      audioConfirm = null;
+      if (!h) { paint(); return; }
+      const ok = await startAdd({ slug: b.slug, audio_ref: h.ref, narrator: h.narrator || "" });
+      if (ok) { closeCard(); renderLibrary(); } else paint();
+    },
     align: async (x) => {
       const r = await api("POST", "/api/align/" + x.slug).catch((err) => ({ error: String(err) }));
       if (r.error) toast("Ошибка: " + r.error); else { closeCard(); toast("Точное выравнивание запущено, это долго"); pollJobs(); renderLibrary(); }
@@ -475,6 +633,10 @@
   });
   $("#library").addEventListener("keydown", (e) => {
     if (!(e.target instanceof Element)) return;
+    if (e.target.classList.contains("afind-input")) {
+      if (e.key === "Enter") { e.preventDefault(); e.target.closest(".afind")?.querySelector('[data-act="findAudioGo"]')?.click(); }
+      return;
+    }
     const rename = e.target.classList.contains("rename-input"), find = e.target.classList.contains("find-input");
     if (!rename && !find) return;
     const act = rename ? "renameYes" : "findGo";
@@ -483,6 +645,7 @@
   });
   // "или файл": the label shows the chosen name
   $("#library").addEventListener("change", (e) => {
+    if (e.target.matches(".lpart")) { if (listening) playPart(Number(e.target.value), 0); return; }
     if (e.target.type !== "file") return;
     const l = e.target.closest("label"), name = e.target.files[0]?.name;
     if (l) l.querySelector("u").textContent = name || "файл";
