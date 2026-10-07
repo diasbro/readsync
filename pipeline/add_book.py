@@ -65,6 +65,26 @@ def is_url(s: str) -> bool:
     return s.startswith(("http://", "https://"))
 
 
+def unwrap(data: bytes, hint: str) -> tuple[bytes, str]:
+    """A catalog may pack one file in a zip, and that zip in another («book.pdf.zip» inside a zip): a
+    single-file archive is opened, twice at most, so what is inside gets sniffed. An epub is itself a
+    zip and an fb2.zip is read as it is; both stay packed."""
+    for _ in range(2):
+        if data[:2] != b"PK":
+            break
+        try:
+            z = zipfile.ZipFile(__import__("io").BytesIO(data))
+            # an .fbd beside a pdf is the catalog's description of it, not a second book
+            files = [i for i in z.infolist() if not i.is_dir() and not i.filename.lower().endswith(".fbd")]
+        except zipfile.BadZipFile:
+            break
+        names = [i.filename for i in files]
+        if "META-INF/container.xml" in names or len(files) != 1 or names[0].lower().endswith(".fb2"):
+            break
+        data, hint = z.read(files[0]), names[0]
+    return data, hint
+
+
 def sniff(data: bytes, hint: str) -> str:
     """Return one of html, fb2, fb2zip, epub, pdf, txt."""
     head = data[:4096].lstrip()
@@ -97,12 +117,12 @@ def fetch_text(src: str, part_dir: Path) -> str:
         with urllib.request.urlopen(req, timeout=120) as r:
             data = r.read()
             final = r.geturl()
+        data, final = unwrap(data, final)
         kind = sniff(data, final)
     else:
         p = Path(src).expanduser()
-        data = p.read_bytes()
-        kind = sniff(data, p.name)
-        final = p.name
+        data, final = unwrap(p.read_bytes(), p.name)
+        kind = sniff(data, final)
     name = {
         "html": "book.html",
         "fb2": "book.fb2",

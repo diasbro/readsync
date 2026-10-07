@@ -238,3 +238,26 @@ def test_download_resumes_a_cut_part(tmp_path, monkeypatch):
     assert dst.read_bytes() == body
     assert ranges == [None, "bytes=40-"]
     assert not (tmp_path / "part01.mp3.part").exists()
+
+
+def test_a_file_packed_twice_is_unpacked():
+    """coollib serves a pdf as a zip inside a zip; an fb2 in a zip stays packed for its own reader."""
+    import io
+    import zipfile
+
+    def packed(name: str, data: bytes) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr(name, data)
+        return buf.getvalue()
+
+    pdf = b"%PDF-1.4 a book"
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as z:
+        z.writestr("book.pdf", pdf)
+        z.writestr("book.fbd", b"<FictionBook/>")  # the catalog's description beside it
+    data, name = add_book.unwrap(packed("book.zip", inner.getvalue()), "https://x/b/1/fb2")
+    assert (data, name) == (pdf, "book.pdf")
+    assert add_book.sniff(data, name) == "pdf"
+    fb2zip = packed("book.fb2", b"<FictionBook/>")
+    assert add_book.unwrap(fb2zip, "b.fb2.zip") == (fb2zip, "b.fb2.zip")
