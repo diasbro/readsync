@@ -448,6 +448,18 @@ body.hide-player .player.peek { opacity: 1; transform: none; pointer-events: aut
 #app::after { content: ""; position: fixed; z-index: 19; left: 0; right: 0; bottom: 0; pointer-events: none;
   height: calc(var(--player-h) + 28px); background: linear-gradient(transparent, var(--bg) 55%); transition: opacity .35s; }
 body.pages #app::after, body.hide-player:not(:has(.player.peek)) #app::after { opacity: 0; }
+/* With the bars put away, the island's ears say where the reader is: the chapter on the left, the page
+   (or what is left of the chapter, listening) on the right. The page number leaves the foot, and the
+   text takes that margin too. */
+#ears-info { display: none; }
+.ears #ears-info { display: flex; position: fixed; z-index: 21; top: 0; left: 0; right: 0; height: var(--safe-t);
+  align-items: center; justify-content: space-between; padding: 0 max(24px, var(--safe-r)) 0 max(24px, var(--safe-l));
+  font: 12px/1 var(--ui); color: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none;
+  opacity: 0; transition: opacity .25s ease; }
+.ears #ears-info span { max-width: calc(50% - 82px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ears body.pages.immersive.bare #ears-info, .ears body:not(.pages).playing.idle #ears-info { opacity: .9; }
+.ears body.pages.immersive .pg-foot { display: none; }
+.ears { --page-b: max(16px, calc(var(--safe-b) - 4px)); }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 /* ---------- drawers ---------- */

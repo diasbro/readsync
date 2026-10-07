@@ -29,6 +29,7 @@
   const insetProbe = document.body.appendChild(Object.assign(document.createElement("div"), { style: "position:fixed;top:0;height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none" }));
   const fitEars = () => document.documentElement.classList.toggle("ears", native && insetProbe.offsetHeight >= 24);
   fitEars(); new ResizeObserver(fitEars).observe(insetProbe);  // the web view learns its insets after the first paint
+  const earsInfo = (left, right) => { $("#ears-info .ear-l").textContent = left; $("#ears-info .ear-r").textContent = right; };
   const audio = window.nativeAudio || $("#audio"), textEl = $("#text");
   const pgCur = $("#pg-cur"), pgTotal = $("#pg-total"), pgRead = $("#pg-read");
   let book, wB, wT0, wT1, wS, sFirst, sLast, sBlock, sWordsCum = [], chapStartWord = [], chapStartTime = [], duration = 0, hasAudio = false;
@@ -260,6 +261,7 @@
       const chEnd = chapStartTime.find((x, i) => i > curChap && !book.chapters[i].hidden && isFinite(x)) ?? duration;
       const rate = audio.playbackRate || 1;
       $("#time-chap").textContent = "глава −" + fmt((chEnd - t) / rate);
+      earsInfo($("#chapter-title").textContent, "−" + fmt((chEnd - t) / rate));
       $("#time-left").textContent = "−" + fmt((duration - t) / rate);
     }
   }
@@ -504,8 +506,8 @@
   function paintPager() {
     pgTotal.textContent = pages.total;
     // with the top bar in the island's ears there is no room for the chapter up there: it reads at the foot
-    const chap = document.documentElement.classList.contains("ears") ? $("#chapter-title").textContent : "";
-    $("#pg-foot").textContent = (chap ? chap + " · " : "") + `${pages.cur + 1} / ${pages.total}`;
+    $("#pg-foot").textContent = `${pages.cur + 1} / ${pages.total}`;
+    earsInfo($("#chapter-title").textContent, `${pages.cur + 1} / ${pages.total}`);
     pgCur.style.width = String(pages.total).length + 2 + "ch";
     if (!pgTyping) pgCur.value = pages.cur + 1;
     $("#pg-prev").disabled = pages.cur <= 0; $("#pg-next").disabled = pages.cur >= pages.total - 1;  // the ends say so
