@@ -307,8 +307,10 @@ enum HTMLText {
     /// bs4's string containers: their text is no NavigableString, which the pipeline's text walks skip.
     static let containers: Set<String> = ["rt", "rp", "style", "script", "template"]
     static let preserve: Set<String> = ["pre", "textarea"]  // whitespace-only text is kept as it is in these
+    /// html.parser's CDATA_CONTENT_ELEMENTS: raw text up to their own end tag.
+    static let rawText: Set<String> = ["script", "style", "xmp", "iframe", "noembed", "noframes"]
 
-    /// A document read as BeautifulSoup(markup, "html.parser") would (Python 3.12's html.parser, bs4 4.15): the
+    /// A document read as BeautifulSoup(markup, "html.parser") would (html.parser of Python 3.12.15, bs4 4.15): the
     /// root holds the top-level nodes. Doctypes, declarations and processing instructions are not kept.
     static func parse(_ text: String) -> Node {
         let p = HTMLParser(Array(text.unicodeScalars))
@@ -752,14 +754,17 @@ enum HTMLText {
     }
 }
 
-/// Python 3.12's `html.parser.HTMLParser` with `convert_charrefs=False`, driving the tree BeautifulSoup builds:
-/// the same tokens, the same giving up on what never ends (a quote, a comment), the same text.
+/// Python's `html.parser.HTMLParser` as of 3.12.15 (the HTML5 tokenizer rules backported to 3.12, 3.13 and 3.14)
+/// with `convert_charrefs=False`, driving the tree BeautifulSoup builds: the same tokens, the same handling of
+/// what never ends (a quote drops the rest, a comment runs to the end), the same text.
 private final class HTMLParser {
     typealias S = Unicode.Scalar
     let s: [S]
     let n: Int
     var i = 0
-    var cdata: [S]? = nil  // inside script or style: only their end tag ends them
+    var cdata: [S]? = nil  // inside script, style, title and the like: only their end tag ends them
+    var escapable = false  // title, textarea: their references are read
+    var plaintext = false  // nothing ends it
 
     let root = Node("#document")
     struct Open {
@@ -884,7 +889,8 @@ private final class HTMLParser {
     func isLetter(_ c: S) -> Bool { ("a"..."z").contains(c) || ("A"..."Z").contains(c) }
     func isAlnum(_ c: S) -> Bool { isLetter(c) || ("0"..."9").contains(c) }
     func isHex(_ c: S) -> Bool { ("0"..."9").contains(c) || ("a"..."f").contains(c) || ("A"..."F").contains(c) }
-    func space(_ c: S) -> Bool { Py.isSpace(c) }
+    /// `[\t\n\r\f ]`: the only whitespace inside a tag.
+    func blank(_ c: S) -> Bool { c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\u{0C}" }
 
     func at(_ k: Int, _ t: String) -> Bool {
         var j = k
@@ -904,27 +910,38 @@ private final class HTMLParser {
         return nil
     }
 
+    func find(_ t: String, from k: Int) -> Int? {
+        guard let first = t.unicodeScalars.first else { return k }
+        var j = k
+        while let f = find(first, from: j) {
+            if at(f, t) { return f }
+            j = f + 1
+        }
+        return nil
+    }
+
     func lower(_ k: Int, _ e: Int) -> String { Py.string(Array(s[k..<e])).lowercased() }
 
-    /// `</\s*name\s*>` without regard to case, from `k`: where it starts.
+    /// Where the raw text of the open script, style (and the like) or title/textarea stops, from `k`:
+    /// `</name(?=[\t\n\r\f />])` without regard to ASCII case, and in title/textarea also an `&`.
     func cdataEnd(from k: Int, _ name: [S]) -> Int? {
+        if plaintext { return n }
         var j = k
-        while let lt = find("<", from: j) {
-            j = lt + 1
-            guard j < n, s[j] == "/" else { continue }
-            var m = j + 1
-            while m < n, space(s[m]) { m += 1 }
-            var ok = true
-            for c in name {
-                guard m < n, String(s[m]).lowercased() == String(c) else {
-                    ok = false
-                    break
+        while j < n {
+            if escapable, s[j] == "&" { return j }
+            if s[j] == "<", j + 1 < n, s[j + 1] == "/" {
+                var m = j + 2
+                var ok = true
+                for c in name {
+                    guard m < n, s[m].isASCII, String(s[m]).lowercased() == String(c) else {
+                        ok = false
+                        break
+                    }
+                    m += 1
                 }
-                m += 1
+                if ok, m < n, blank(s[m]) || s[m] == "/" || s[m] == ">" { return j }
             }
-            guard ok else { continue }
-            while m < n, space(s[m]) { m += 1 }
-            if m < n, s[m] == ">" { return lt }
+            j += 1
         }
         return nil
     }
@@ -954,7 +971,7 @@ private final class HTMLParser {
                     k = parsePI(i)
                 } else if at(i, "<!") {
                     k = parseDeclaration(i)
-                } else if i + 1 < n {
+                } else if i + 1 < n || end {
                     handleData("<")
                     k = i + 1
                 } else {
@@ -962,12 +979,8 @@ private final class HTMLParser {
                 }
                 if k < 0 {
                     guard end else { break loop }
-                    if let gt = find(">", from: i + 1) {
-                        k = gt + 1
-                    } else {
-                        k = find("<", from: i + 1) ?? (i + 1)
-                    }
-                    handleData(s[i..<k])
+                    unterminated(i)
+                    k = n
                 }
                 i = k
             } else if at(i, "&#") {
@@ -976,7 +989,7 @@ private final class HTMLParser {
                     i = s[e - 1] == ";" ? e : e - 1
                     continue
                 }
-                if find(";", from: i) != nil {
+                if find(";" as S, from: i) != nil {
                     handleData("&#")
                     i += 2
                 }
@@ -998,9 +1011,39 @@ private final class HTMLParser {
                 }
             }
         }
-        if end, i < n, cdata == nil {
+        if end, i < n {
             handleData(s[i..<n])
             i = n
+        }
+    }
+
+    /// At the end, a construct at `i` that never ends: a tag is dropped with everything after it, a comment, a
+    /// declaration or an instruction runs to the end.
+    func unterminated(_ i: Int) {
+        if i + 1 < n, isLetter(s[i + 1]) { return }
+        if at(i, "</") {
+            if i + 2 == n {
+                handleData("</")
+            } else if !isLetter(s[i + 2]) {
+                comment(s[(i + 2)...])
+            }
+        } else if at(i, "<!--") {
+            var j = n
+            for suffix in ["--!", "--", "-"] where n - (i + 4) >= suffix.unicodeScalars.count {
+                if Py.string(Array(s[(n - suffix.unicodeScalars.count)...])) == suffix {
+                    j -= suffix.unicodeScalars.count
+                    break
+                }
+            }
+            comment(s[(i + 4)..<j])
+        } else if at(i, "<![CDATA[") {
+            section(s[(i + 3)...])
+        } else if i + 9 <= n, lower(i, i + 9) == "<!doctype" {
+            other()
+        } else if at(i, "<!") {
+            comment(s[(i + 2)...])
+        } else if at(i, "<?") {
+            other()
         }
     }
 
@@ -1026,75 +1069,63 @@ private final class HTMLParser {
         return (Py.string(Array(s[(k + 1)..<q])), q + 1)
     }
 
-    /// `(?:\s|/(?!>))*` from `k`.
+    /// `(?:[\t\n\r\f ]|/(?!>))*` from `k`.
     func skipJunk(_ k: Int) -> Int {
         var j = k
-        while j < n, space(s[j]) || (s[j] == "/" && !(j + 1 < n && s[j + 1] == ">")) { j += 1 }
+        while j < n, blank(s[j]) || (s[j] == "/" && !(j + 1 < n && s[j + 1] == ">")) { j += 1 }
         return j
     }
 
-    /// The tag name of `[a-zA-Z][^\t\n\r\f />\x00]*` at `k`: its end.
+    /// `[\t\n\r\f /]*` from `k`.
+    func skipSlashes(_ k: Int) -> Int {
+        var j = k
+        while j < n, blank(s[j]) || s[j] == "/" { j += 1 }
+        return j
+    }
+
+    /// The tag name `[a-zA-Z][^\t\n\r\f />]*` at `k`: its end.
     func tagName(_ k: Int) -> Int {
         var j = k + 1
-        while j < n, !["\t", "\n", "\r", "\u{0C}", " ", "/", ">", "\0"].contains(s[j]) { j += 1 }
+        while j < n, !blank(s[j]), s[j] != "/", s[j] != ">" { j += 1 }
         return j
     }
 
-    /// An attribute at `k`: `((?<=['"\s/])[^\s/>][^\s/=>]*)(\s*=+\s*('[^']*'|"[^"]*"|(?!['"])[^>\s]*))?`, without the
-    /// junk after it: the name's end, and the value's range when there is one.
+    /// An attribute at `k`: `((?<=['"\t\n\r\f /])[^\t\n\r\f />][^\t\n\r\f /=>]*)` and the optional
+    /// `([\t\n\r\f ]*=[\t\n\r\f ]*('[^']*'|"[^"]*"|(?!['"])[^>\t\n\r\f ]*))`: the name's end, the value's range.
     func attribute(_ k: Int) -> (nameEnd: Int, value: Range<Int>?)? {
-        guard k > 0, k < n, s[k - 1] == "'" || s[k - 1] == "\"" || space(s[k - 1]) || s[k - 1] == "/",
-            !space(s[k]), s[k] != "/", s[k] != ">"
+        guard k > 0, k < n, s[k - 1] == "'" || s[k - 1] == "\"" || blank(s[k - 1]) || s[k - 1] == "/",
+            !blank(s[k]), s[k] != "/", s[k] != ">"
         else { return nil }
         var e = k + 1
-        while e < n, !space(s[e]), s[e] != "/", s[e] != "=", s[e] != ">" { e += 1 }
-        // the value: each greedy part gives back, last one first, until an alternative matches
-        var p1 = e
-        while p1 < n, space(s[p1]) { p1 += 1 }
-        var eq = p1
-        while eq < n, s[eq] == "=" { eq += 1 }
-        guard eq > p1 else { return (e, nil) }
-        var w = eq
-        while w < n, space(s[w]) { w += 1 }
-        func alternative(_ p: Int) -> Int? {
-            if p < n, s[p] == "'" || s[p] == "\"" {
-                guard let close = find(s[p], from: p + 1) else { return nil }
-                return close + 1
-            }
-            var v = p
-            while v < n, s[v] != ">", !space(s[v]) { v += 1 }
-            return v
+        while e < n, !blank(s[e]), s[e] != "/", s[e] != "=", s[e] != ">" { e += 1 }
+        var eq = e
+        while eq < n, blank(s[eq]) { eq += 1 }
+        guard eq < n, s[eq] == "=" else { return (e, nil) }
+        var w = eq + 1
+        while w < n, blank(s[w]) { w += 1 }
+        // the value's alternatives at the greedy position; on an unterminated quote the blanks give one back
+        if w < n, s[w] == "'" || s[w] == "\"" {
+            if let close = find(s[w], from: w + 1) { return (e, w..<(close + 1)) }
+            return w > eq + 1 ? (e, (w - 1)..<(w - 1)) : (e, nil)
         }
-        if let v = alternative(w) { return (e, w..<v) }
-        if w > eq { return (e, (w - 1)..<(w - 1)) }
-        if eq - p1 > 1, let v = alternative(eq - 1) { return (e, (eq - 1)..<v) }
-        return (e, nil)
+        var v = w
+        while v < n, s[v] != ">", !blank(s[v]) { v += 1 }
+        return (e, w..<v)
     }
 
-    /// `locatestarttagend_tolerant`'s end.
-    func startTagEnd(_ i: Int) -> Int {
-        var k = tagName(i + 1)
-        while k < n, space(s[k]) || s[k] == "/" { k += 1 }
-        while let a = attribute(k) {
-            k = a.nameEnd
-            if let v = a.value {
-                k = v.upperBound
-                while k < n, space(s[k]) { k += 1 }
-            }
-            k = skipJunk(k)
+    /// `locatetagend` from `k` (a tag's name, its attributes and the `>`): its end.
+    func tagEnd(_ k: Int) -> Int {
+        var j = skipSlashes(tagName(k))
+        while let a = attribute(j) {
+            j = skipSlashes(a.value?.upperBound ?? a.nameEnd)
         }
-        while k < n, space(s[k]) { k += 1 }
-        return k
+        if j < n, s[j] == ">" { j += 1 }
+        return j
     }
 
     func checkForWholeStartTag(_ i: Int) -> Int {
-        let j = startTagEnd(i)
-        guard j < n else { return -1 }
-        let next = s[j]
-        if next == ">" { return j + 1 }
-        if next == "/" { return at(j, "/>") ? j + 2 : -1 }
-        if isLetter(next) || next == "=" { return -1 }
-        return j > i ? j : i + 1
+        let j = tagEnd(i + 1)
+        return j > 0 && s[j - 1] == ">" ? j : -1
     }
 
     func parseStartTag(_ i: Int) -> Int {
@@ -1126,51 +1157,35 @@ private final class HTMLParser {
             endTag(tag)
         } else {
             startTag(tag, attrs, empty: true)
-            if tag == "script" || tag == "style" { cdata = Array(tag.unicodeScalars) }
+            if HTMLText.rawText.contains(tag) || tag == "plaintext" {
+                cdata = Array(tag.unicodeScalars)
+                escapable = false
+                plaintext = tag == "plaintext"
+            } else if tag == "textarea" || tag == "title" {
+                cdata = Array(tag.unicodeScalars)
+                escapable = true
+            }
         }
         return endpos
     }
 
     func parseEndTag(_ i: Int) -> Int {
-        guard let gt = find(">", from: i + 1) else { return -1 }
-        let gtpos = gt + 1
-        // `</\s*([a-zA-Z][-.a-zA-Z0-9:_]*)\s*>`
-        var k = i + 2
-        while k < n, space(s[k]) { k += 1 }
-        var matched: String? = nil
-        if k < n, isLetter(s[k]) {
-            var e = k + 1
-            while e < n, isAlnum(s[e]) || s[e] == "-" || s[e] == "." || s[e] == ":" || s[e] == "_" { e += 1 }
-            var m = e
-            while m < n, space(s[m]) { m += 1 }
-            if m < n, s[m] == ">" { matched = lower(k, e) }
+        guard find(">" as S, from: i + 2) != nil else { return -1 }
+        guard i + 2 < n, isLetter(s[i + 2]) else {
+            if i + 2 < n, s[i + 2] == ">" { return i + 3 }
+            return bogusComment(i)
         }
-        guard let elem = matched else {
-            if cdata != nil {
-                handleData(s[i..<gtpos])
-                return gtpos
-            }
-            guard i + 2 < n, isLetter(s[i + 2]) else {
-                if at(i, "</>") { return i + 3 }
-                return bogusComment(i)
-            }
-            let nameEnd = tagName(i + 2)
-            let tag = lower(i + 2, nameEnd)
-            let close = find(">", from: skipJunk(nameEnd)) ?? gt
-            parsedEndTag(tag)
-            return close + 1
-        }
-        if let c = cdata, elem != Py.string(c) {
-            handleData(s[i..<gtpos])
-            return gtpos
-        }
-        parsedEndTag(elem)
+        let j = tagEnd(i + 2)
+        guard s[j - 1] == ">" else { return -1 }
+        parsedEndTag(lower(i + 2, tagName(i + 2)))
         cdata = nil
-        return gtpos
+        escapable = false
+        plaintext = false
+        return j
     }
 
     func bogusComment(_ i: Int) -> Int {
-        guard let gt = find(">", from: i + 2) else { return -1 }
+        guard let gt = find(">" as S, from: i + 2) else { return -1 }
         comment(s[(i + 2)..<gt])
         return gt + 1
     }
@@ -1181,85 +1196,64 @@ private final class HTMLParser {
         endData(.comment)
     }
 
-    /// `--\s*>` from `k`: where it starts and ends.
-    func commentClose(from k: Int) -> (Int, Int)? {
-        var j = k
-        while j + 1 < n {
+    /// `--!?>` searched from `i + 4`, else `-?>` right there.
+    func parseComment(_ i: Int) -> Int {
+        var j = i + 4
+        while j + 2 < n {
             if s[j] == "-", s[j + 1] == "-" {
-                var m = j + 2
-                while m < n, space(s[m]) { m += 1 }
-                if m < n, s[m] == ">" { return (j, m + 1) }
+                if s[j + 2] == ">" {
+                    comment(s[(i + 4)..<j])
+                    return j + 3
+                }
+                if s[j + 2] == "!", j + 3 < n, s[j + 3] == ">" {
+                    comment(s[(i + 4)..<j])
+                    return j + 4
+                }
             }
             j += 1
         }
-        return nil
-    }
-
-    func parseComment(_ i: Int) -> Int {
-        guard let (a, e) = commentClose(from: i + 4) else { return -1 }
-        comment(s[(i + 4)..<a])
-        return e
+        if i + 4 < n, s[i + 4] == ">" {
+            comment(s[(i + 4)..<(i + 4)])
+            return i + 5
+        }
+        if i + 5 < n, s[i + 4] == "-", s[i + 5] == ">" {
+            comment(s[(i + 4)..<(i + 4)])
+            return i + 6
+        }
+        return -1
     }
 
     func parsePI(_ i: Int) -> Int {
-        guard let gt = find(">", from: i + 2) else { return -1 }
+        guard let gt = find(">" as S, from: i + 2) else { return -1 }
         other()
         return gt + 1
     }
 
     func parseDeclaration(_ i: Int) -> Int {
-        if at(i, "<![") { return markedSection(i) }
+        if at(i, "<![CDATA[") {
+            guard let close = find("]]>", from: i + 9) else { return -1 }
+            section(s[(i + 3)..<close])
+            return close + 3
+        }
         if i + 9 <= n, lower(i, i + 9) == "<!doctype" {
-            guard let gt = find(">", from: i + 9) else { return -1 }
+            guard let gt = find(">" as S, from: i + 9) else { return -1 }
             other()
+            return gt + 1
+        }
+        if at(i, "<![") {
+            guard let gt = find(">" as S, from: i + 3) else { return -1 }
+            if s[gt - 1] == "]" {
+                section(s[(i + 3)..<(gt - 1)])
+            } else {
+                comment(s[(i + 2)..<gt])
+            }
             return gt + 1
         }
         return bogusComment(i)
     }
 
-    /// `<![name ... ]]>`: a CDATA section's text is text. html.parser rejects the whole document for a name it
-    /// does not know (bs4 raises); here such a section is read as a bogus comment.
-    func markedSection(_ i: Int) -> Int {
-        let k = i + 3
-        guard k < n else { return -1 }
-        guard isLetter(s[k]) else { return bogusComment(i) }
-        var e = k + 1
-        while e < n, isAlnum(s[e]) || s[e] == "-" || s[e] == "_" || s[e] == "." { e += 1 }
-        var m = e
-        while m < n, space(s[m]) { m += 1 }
-        if m == n { return -1 }
-        let name = lower(k, e)
-        let double: Bool
-        if ["temp", "cdata", "ignore", "include", "rcdata"].contains(name) {
-            double = true
-        } else if ["if", "else", "endif"].contains(name) {
-            double = false
-        } else {
-            return bogusComment(i)
-        }
-        // `]\s*]\s*>` or `]\s*>`
-        var j = k
-        while j < n {
-            if s[j] == "]" {
-                var m = j + 1
-                while m < n, space(s[m]) { m += 1 }
-                if double {
-                    if m < n, s[m] == "]" {
-                        m += 1
-                        while m < n, space(s[m]) { m += 1 }
-                        if m < n, s[m] == ">" { return section(i, j, m + 1) }
-                    }
-                } else if m < n, s[m] == ">" {
-                    return section(i, j, m + 1)
-                }
-            }
-            j += 1
-        }
-        return -1
-    }
-
-    func section(_ i: Int, _ close: Int, _ end: Int) -> Int {
-        let body = s[(i + 3)..<close]
+    /// bs4's `unknown_decl`: a CDATA section's text is text, any other declaration is not kept.
+    func section(_ body: ArraySlice<S>) {
         if Py.string(Array(body.prefix(6))).uppercased() == "CDATA[" {
             endData()
             handleData(body.dropFirst(6))
@@ -1267,6 +1261,5 @@ private final class HTMLParser {
         } else {
             other()
         }
-        return end
     }
 }
