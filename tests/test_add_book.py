@@ -7,6 +7,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 import add_book  # noqa: E402
 
@@ -44,3 +46,19 @@ def test_new_text_makes_a_new_edition(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["add_book.py", "b", "--text", "x.txt", "--no-align"])
     add_book.main()
     assert edition(d) != "e1"
+
+
+def test_a_failed_text_leaves_no_downloads(tmp_path, monkeypatch):
+    """A site that serves a stub instead of the book stops the run early: its downloads go anyway."""
+    monkeypatch.setattr(add_book, "BOOKS", tmp_path)
+
+    def stub(src, d, t, a):
+        (d / "parts").mkdir()
+        (d / "parts" / "1.fb2").write_text("Книга заблокирована.", encoding="utf-8")
+        raise SystemExit("на сайте вместо книги заглушка")
+
+    monkeypatch.setattr(add_book, "build_text", stub)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "b", "--text", "https://example.org/b"])
+    with pytest.raises(SystemExit):
+        add_book.main()
+    assert not (tmp_path / "b" / "parts").exists()

@@ -304,6 +304,13 @@ def main() -> None:
 
     d = BOOKS / args.slug
     d.mkdir(parents=True, exist_ok=True)
+    try:
+        build(args, d)
+    finally:
+        tidy(d)  # finished, failed or stopped: the downloads and derived audio are not kept
+
+
+def build(args: argparse.Namespace, d: Path) -> None:
     if args.text:
         build_text(args.text, d, args.title, args.author)
     elif not (d / "book.json").exists():
@@ -356,13 +363,10 @@ def main() -> None:
         f"\nready: http://127.0.0.1:8765/?book={args.slug}" + ("  (caption timing)" if args.audio else "  (text only)"),
         flush=True,
     )
-    try:
-        if (args.audio or retime) and not args.no_align:
-            print("running precise MMS alignment (about 15 min per hour of audio, low priority)...", flush=True)
-            run([PY, str(PIPE / "align.py"), str(d)])
-            print("done: precise timing", flush=True)
-    finally:
-        tidy(d)  # whatever the alignment did, the downloads and derived audio are not kept
+    if (args.audio or retime) and not args.no_align:
+        print("running precise MMS alignment (about 15 min per hour of audio, low priority)...", flush=True)
+        run([PY, str(PIPE / "align.py"), str(d)])
+        print("done: precise timing", flush=True)
 
 
 if __name__ == "__main__":
