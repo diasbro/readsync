@@ -38,12 +38,17 @@ struct LibraryView: View {
     @State private var lockText = Player.shared.lockText
     @AppStorage(Shelf.dropReadKey) private var dropRead = false
     @AppStorage(Shelf.syncKey) private var sync = true
+    @AppStorage("libView") private var libView = "list"  // this phone's own: «list» or «covers»
+    @AppStorage("showRead") private var showRead = false
+    @Environment(\.dynamicTypeSize) private var textSize
 
     var body: some View {
         NavigationStack {
             Group {
                 if shelf.books.isEmpty {
                     empty
+                } else if libView == "covers" {
+                    grid
                 } else {
                     list
                 }
@@ -52,6 +57,11 @@ struct LibraryView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
+                        Picker("Вид", selection: $libView) {
+                            Label("Списком", systemImage: "list.bullet").tag("list")
+                            Label("Обложками", systemImage: "square.grid.2x2").tag("covers")
+                        }
+                        .pickerStyle(.palette)
                         Button("Выбрать папку библиотеки", systemImage: "folder") { picking = true }
                         Button("Обновить", systemImage: "arrow.clockwise") { Task { await shelf.refresh() } }
                         Toggle("Синхронизация", systemImage: "arrow.triangle.2.circlepath", isOn: $sync)
@@ -101,77 +111,203 @@ struct LibraryView: View {
     }
 
     private var list: some View {
-        List {
+        let current = shelf.current
+        let (all, read) = Shelf.sections(shelf.books, progress: shelf.progress, current: current?.slug)
+        return List {
             if !shelf.message.isEmpty {
-                Label(shelf.message, systemImage: shelf.folderLost ? "icloud.slash" : "exclamationmark.icloud")
-                    .font(.footnote).foregroundStyle(.secondary)
-                    .listRowSeparator(.hidden)
+                message.listRowSeparator(.hidden)
             }
             // one section with its titles as rows: plain sections would leave a wide gap between them
-            if let current = shelf.current {
+            if let current {
                 SectionTitle("Читаю сейчас")
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 0, trailing: 20))
-                let listen = current.hasAudio && shelf.copy(of: current.slug) != .textOnly
-                    && shelf.progress[current.slug]?.pages != true
-                NowReading(book: current, progress: shelf.progress[current.slug]?.fraction ?? 0, listen: listen) {
-                    if listen { Player.shared.playWhenOpened(current.slug) }
-                    open(current)
-                }
-                .contextMenu { actions(current, shelf.copy(of: current.slug)) }  // a text-only one gets its audio here
-                .modifier(askDelete(current))
+                nowReading(current)
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 12, trailing: 16))
                     .listRowSeparator(.hidden)
                 SectionTitle("Все книги")
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 8, leading: 20, bottom: 0, trailing: 20))
             }
-            ForEach(shelf.books.filter { $0.slug != shelf.current?.slug }) { book in
+            ForEach(all) { book in
                 row(book)
             }
+            if !read.isEmpty {
+                readTitle(read)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 18, leading: 20, bottom: 6, trailing: 20))
+                if showRead {
+                    ForEach(read) { book in
+                        row(book)
+                    }
+                }
+            }
             if !shelf.localBytes.isEmpty {
-                let n = shelf.localBytes.count
-                Text("На iPhone: \(n) \(booksWord(n)) · \(size(shelf.localBytes.values.reduce(0, +)))")
-                    .font(.caption).foregroundStyle(.tertiary).monospacedDigit()
-                    .frame(maxWidth: .infinity)
+                footer
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 14, leading: 20, bottom: 14, trailing: 20))
             }
         }
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 0)  // the section titles are rows: no 44-point floor under them
-        .refreshable { await shelf.refresh() }
-        .safeAreaInset(edge: .bottom) {
-            MiniPlayer {
-                openWhenReady = nil
-                reading = $0
-            } close: {
-                Player.shared.stop()  // saves the place
-                Task {
-                    await Player.shared.flush()
-                    await shelf.refresh()
+        .modifier(chrome)
+    }
+
+    /// «Обложками»: the same library, its books as a grid of covers under «Читаю сейчас».
+    private var grid: some View {
+        let current = shelf.current
+        let (all, read) = Shelf.sections(shelf.books, progress: shelf.progress, current: current?.slug)
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if !shelf.message.isEmpty {
+                    message.padding(.horizontal, 20).padding(.bottom, 12)
+                }
+                if let current {
+                    SectionTitle("Читаю сейчас").padding(.horizontal, 20).padding(.top, 4)
+                    nowReading(current).padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 12)
+                    SectionTitle("Все книги").padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 12)
+                }
+                tiles(all)
+                if !read.isEmpty {
+                    readTitle(read).padding(.horizontal, 20).padding(.top, 28).padding(.bottom, showRead ? 12 : 0)
+                    if showRead { tiles(read) }
+                }
+                if !shelf.localBytes.isEmpty {
+                    footer.padding(.horizontal, 20).padding(.vertical, 14)
                 }
             }
+            .padding(.bottom, 8)
         }
+        .modifier(chrome)
+    }
+
+    /// What both views have around the books: pull to refresh, and the narrator under them.
+    private var chrome: some ViewModifier {
+        Chrome(refresh: { await shelf.refresh() }) {
+            openWhenReady = nil
+            reading = $0
+        }
+    }
+
+    private var message: some View {
+        Label(shelf.message, systemImage: shelf.folderLost ? "icloud.slash" : "exclamationmark.icloud")
+            .font(.footnote).foregroundStyle(.secondary)
+    }
+
+    private func nowReading(_ current: Book) -> some View {
+        let listen = current.hasAudio && shelf.copy(of: current.slug) != .textOnly
+            && shelf.progress[current.slug]?.pages != true
+        return NowReading(book: current, progress: shelf.progress[current.slug]?.fraction ?? 0, listen: listen) {
+            if listen { Player.shared.playWhenOpened(current.slug) }
+            open(current)
+        }
+        .contextMenu {  // a text-only one gets its audio here
+            statusMenu(current)
+            actions(current, shelf.copy(of: current.slug))
+        }
+        .modifier(askDelete(current))
+    }
+
+    private var footer: some View {
+        let n = shelf.localBytes.count
+        return Text("На iPhone: \(n) \(booksWord(n)) · \(size(shelf.localBytes.values.reduce(0, +)))")
+            .font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+            .frame(maxWidth: .infinity)
+    }
+
+    /// «Прочитанные · 12», with how many of them this year: a tap folds them away or out.
+    private func readTitle(_ read: [Book]) -> some View {
+        let year = String(Calendar.current.component(.year, from: Date()))
+        let thisYear = Shelf.readIn(year, read, progress: shelf.progress)
+        return Button {
+            withAnimation(.easeOut(duration: 0.2)) { showRead.toggle() }
+        } label: {
+            HStack(spacing: 8) {
+                SectionTitle("Прочитанные · \(read.count)")
+                Spacer(minLength: 8)
+                if thisYear > 0 {
+                    Text("в \(year) — \(thisYear)").font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(showRead ? 90 : 0))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(showRead ? "развёрнуто" : "свёрнуто")
+    }
+
+    private func tiles(_ books: [Book]) -> some View {
+        let column = GridItem(.adaptive(minimum: textSize.isAccessibilitySize ? 150 : 100, maximum: 170), spacing: 14, alignment: .top)
+        return LazyVGrid(columns: [column], spacing: 20) {
+            ForEach(books) { book in
+                tile(book)
+            }
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private func tile(_ book: Book) -> some View {
+        let copy = shelf.copy(of: book.slug)
+        return BookTile(book: book, copy: copy, progress: shelf.progress[book.slug] ?? Progress()) {
+            open(book)
+        } cancel: {
+            shelf.cancel(book.slug)
+        } actions: {
+            statusMenu(book, title: book.title)  // no title under the cover: the menu names the book
+            actions(book, copy)
+        }
+        .contextMenu {
+            statusMenu(book, title: book.title)
+            actions(book, copy)
+        }
+        .modifier(askDelete(book))
     }
 
     private func row(_ book: Book) -> some View {
         let copy = shelf.copy(of: book.slug)
         // a tap, not a Button: the ring of a download is a button of its own inside the row
-        return BookRow(book: book, copy: copy, progress: shelf.progress[book.slug]?.fraction ?? 0) {
+        return BookRow(book: book, copy: copy, progress: shelf.progress[book.slug] ?? Progress()) {
             shelf.cancel(book.slug)
         }
         .onTapGesture { open(book) }
         .accessibilityAddTraits(.isButton)
         // the first is the full swipe: a new version comes in, nothing goes without the dialog
         .swipeActions(edge: .trailing) { actions(book, copy) }
-        .contextMenu { actions(book, copy) }
+        .contextMenu {
+            statusMenu(book)
+            actions(book, copy)
+        }
         .modifier(askDelete(book))
     }
 
     /// «Удалить»: from this phone only, or from the library on every device. Shown at the book's row.
     private func askDelete(_ book: Book) -> some ViewModifier {
         DeleteDialog(book: book, shown: Binding(get: { deleting?.slug == book.slug }, set: { if !$0 { deleting = nil } }))
+    }
+
+    /// «Читаю · Отложена · Прочитана», the current one ticked, and «Перечитать» for a read book. Written to
+    /// the shared library: with its folder out of reach there is nowhere to write, and the choice is off.
+    @ViewBuilder private func statusMenu(_ book: Book, title: String? = nil) -> some View {
+        let status = shelf.progress[book.slug]?.status ?? .none
+        let mark = { (s: BookStatus) in
+            Binding(get: { status == s }, set: { if $0 { shelf.setStatus(book, s) } })
+        }
+        let items = Group {
+            Toggle("Читаю", systemImage: "book", isOn: mark(.reading))
+            Toggle("Отложена", systemImage: "pause.circle", isOn: mark(.paused))
+            Toggle("Прочитана", systemImage: "checkmark.circle", isOn: mark(.done))
+            if status == .done {
+                Button("Перечитать", systemImage: "arrow.counterclockwise") { shelf.reread(book) }
+            }
+        }
+        .disabled(shelf.sharedDir(book.slug) == nil)
+        if let title {
+            Section(title) { items }
+        } else {
+            Section { items }
+        }
     }
 
     @ViewBuilder private func actions(_ book: Book, _ copy: Copy) -> some View {
@@ -241,6 +377,26 @@ struct DeleteDialog: ViewModifier {
             }
             Button("Отмена", role: .cancel) {}
         }
+    }
+}
+
+/// Pull to refresh, and the mini player under the books: the list and the grid alike.
+struct Chrome: ViewModifier {
+    let refresh: () async -> Void
+    let open: (String) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .refreshable { await refresh() }
+            .safeAreaInset(edge: .bottom) {
+                MiniPlayer(open: open) {
+                    Player.shared.stop()  // saves the place
+                    Task {
+                        await Player.shared.flush()
+                        await refresh()
+                    }
+                }
+            }
     }
 }
 
@@ -370,7 +526,7 @@ struct MiniPlayer: View {
 struct BookRow: View {
     let book: Book
     let copy: Copy
-    let progress: Double
+    let progress: Progress
     let cancel: () -> Void
 
     var body: some View {
@@ -400,21 +556,25 @@ struct BookRow: View {
 
     @ViewBuilder private var status: some View {
         switch copy {
-        case .here where progress > 0:
+        case .here where progress.status == .done:
+            Text(readOn(progress)).font(.caption).foregroundStyle(.secondary)
+        case .here where progress.fraction > 0 || progress.rereading:
             HStack(spacing: 8) {
-                ProgressBar(value: progress).frame(maxWidth: 120)
-                Text(percent(progress)).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                ProgressBar(value: progress.fraction).frame(maxWidth: 120)
+                Text(progressText(progress)).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
             }
         case .textOnly:
             HStack(spacing: 8) {
-                if progress > 0 {
-                    ProgressBar(value: progress).frame(maxWidth: 120)
-                    Text(percent(progress)).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                if progress.status == .done {
+                    Text(readOn(progress)).font(.caption).foregroundStyle(.secondary)
+                } else if progress.fraction > 0 {
+                    ProgressBar(value: progress.fraction).frame(maxWidth: 120)
+                    Text(progressText(progress)).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                 }
                 Label("без звука", systemImage: "text.book.closed").font(.caption2).foregroundStyle(.secondary)
             }
         case .absent:
-            Text("Не скачана · \(size(book.bytes))")
+            Text((progress.status == .done ? readOn(progress) + " · не скачана · " : "Не скачана · ") + size(book.bytes))
                 .font(.caption).foregroundStyle(.secondary)
         case .outdated:
             Text("Есть новая версия").font(.caption).foregroundStyle(Color.accentColor)
@@ -442,32 +602,175 @@ struct BookRow: View {
     }
 }
 
+// ---- one book in the grid: its cover, one line under it ----
+
+struct BookTile<Actions: View>: View {
+    let book: Book
+    let copy: Copy
+    let progress: Progress
+    let open: () -> Void
+    let cancel: () -> Void
+    @ViewBuilder let actions: () -> Actions
+    @Environment(\.dynamicTypeSize) private var textSize
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Cover(book: book)
+                .opacity(fetching != nil ? 0.5 : 1)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: open)
+            HStack(spacing: 4) {
+                status
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    .lineLimit(textSize.isAccessibilitySize ? 2 : 1)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: open)
+                Spacer(minLength: 0)
+                trailing
+            }
+            .frame(minHeight: 28)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, open)
+        .accessibilityActions { actions() }
+    }
+
+    private var fetching: Double? {
+        if case .fetching(let p) = copy { return p }
+        return nil
+    }
+
+    @ViewBuilder private var status: some View {
+        switch copy {
+        case .fetching:
+            Text("Скачивается")
+        case .absent:
+            HStack(spacing: 4) {
+                Image(systemName: "icloud.and.arrow.down").foregroundStyle(Color.accentColor)
+                Text(size(book.bytes))
+            }
+        case .outdated:
+            Text("Новая версия").foregroundStyle(Color.accentColor)
+        case .failed:
+            Text("Не скачалась").foregroundStyle(.orange)
+        case .here, .textOnly:
+            if progress.status == .done {
+                HStack(spacing: 4) {  // «✓ 14 сент.»: the word does not fit under a cover
+                    Image(systemName: "checkmark.circle")
+                    Text(readDate(progress) ?? "Прочитана")
+                }
+            } else {
+                HStack(spacing: 4) {
+                    // what the reader made of it, as a sign: the line under a cover is short
+                    if progress.status == .paused {
+                        Image(systemName: "pause.circle")
+                    } else if progress.rereading {
+                        Image(systemName: "arrow.counterclockwise")
+                    } else if copy == .textOnly {
+                        Image(systemName: "text.book.closed")
+                    } else if book.hasAudio {
+                        Image(systemName: "headphones")
+                    }
+                    if progress.fraction > 0 { Text(percent(progress.fraction)) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var trailing: some View {
+        if let p = fetching {
+            Button(action: cancel) {
+                Ring(value: p, stop: true).frame(width: 22, height: 22).padding(11).contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .padding(-11)
+            .accessibilityLabel("Отменить загрузку")
+        } else {
+            Menu {
+                actions()
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .padding(.trailing, -12)
+            .accessibilityLabel("Действия")
+        }
+    }
+
+    private var label: String {
+        var parts = [book.title, book.author]
+        switch copy {
+        case .absent: parts.append("не скачана")
+        case .fetching: parts.append("скачивается")
+        case .outdated: parts.append("есть новая версия")
+        case .failed: parts.append("не скачалась")
+        case .here, .textOnly:
+            parts.append(progress.status == .done ? readOn(progress) : progress.fraction > 0 ? progressText(progress) : "")
+        }
+        return parts.filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+}
+
 // ---- pieces ----
 
 struct Cover: View {
     let book: Book
-    let width: CGFloat
+    var width: CGFloat?  // none: as wide as its column, in the grid
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: width > 60 ? 8 : 5, style: .continuous)
-        Group {
-            if let img = Player.cover(book.slug) {
-                Image(uiImage: img).resizable().scaledToFill()
-            } else {
-                ZStack {
-                    LinearGradient(
-                        colors: [Color.accentColor.opacity(0.28), Color.accentColor.opacity(0.12)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing)
-                    Text(String(book.title.prefix(1)))
-                        .font(.system(size: width * 0.42, weight: .medium, design: .serif))
-                        .foregroundStyle(Color.accentColor)
+        let big = width.map { $0 > 60 } ?? true
+        let shape = RoundedRectangle(cornerRadius: big ? 8 : 5, style: .continuous)
+        sized(Color.clear)
+            .overlay {
+                if let img = Player.cover(book.slug) {
+                    Image(uiImage: img).resizable().scaledToFill()
+                } else {
+                    ZStack(alignment: .topLeading) {
+                        LinearGradient(
+                            colors: [Color.accentColor.opacity(0.28), Color.accentColor.opacity(0.12)],
+                            startPoint: .topLeading, endPoint: .bottomTrailing)
+                        if let width {
+                            Text(String(book.title.prefix(1)))
+                                .font(.system(size: width * 0.42, weight: .medium, design: .serif))
+                                .foregroundStyle(Color.accentColor)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            placard  // a cover in the grid carries the title the tile does not
+                        }
+                    }
                 }
             }
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(.primary.opacity(0.08)))
+            .shadow(color: .black.opacity(big ? 0.18 : 0.08), radius: big ? 8 : 3, y: 2)
+    }
+
+    @ViewBuilder private func sized(_ base: some View) -> some View {
+        if let width {
+            base.frame(width: width, height: width * 1.45)
+        } else {
+            base.aspectRatio(1 / 1.45, contentMode: .fit)
         }
-        .frame(width: width, height: width * 1.45)
-        .clipShape(shape)
-        .overlay(shape.strokeBorder(.primary.opacity(0.08)))
-        .shadow(color: .black.opacity(width > 60 ? 0.18 : 0.08), radius: width > 60 ? 8 : 3, y: 2)
+    }
+
+    private var placard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(book.title)
+                .font(.system(.footnote, design: .serif, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(5)
+            Spacer(minLength: 0)
+            if !book.author.isEmpty {
+                Text(book.author).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
@@ -503,6 +806,27 @@ struct Ring: View {
 /// «524,5 МБ»: Russian whatever the phone's language, as the rest of the app.
 func size(_ bytes: Int64) -> String {
     bytes.formatted(.byteCount(style: .file).locale(Locale(identifier: "ru_RU")))
+}
+
+/// «прочитана 7 окт.»; «прочитана» when the day is not known.
+func readOn(_ p: Progress) -> String { readDate(p).map { "прочитана \($0)" } ?? "прочитана" }
+
+/// «7 окт.», the day a book was last finished, the year only when it is not this one.
+func readDate(_ p: Progress) -> String? {
+    guard let on = p.finishedOn, let ms = Shelf.day(on) else { return nil }
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "ru_RU")
+    f.timeZone = TimeZone(identifier: "UTC")  // the reader's days are UTC days
+    f.dateFormat = on.hasPrefix(String(Calendar.current.component(.year, from: Date()))) ? "d MMM" : "d MMM yyyy"
+    return f.string(from: Date(timeIntervalSince1970: ms / 1000))
+}
+
+/// «34%», and what the reader made of the book: «отложена · 34%», «перечитываю · 12%».
+func progressText(_ p: Progress) -> String {
+    let pct = percent(p.fraction)
+    if p.status == .paused { return "отложена · \(pct)" }
+    if p.rereading { return p.fraction > 0 ? "перечитываю · \(pct)" : "перечитываю" }
+    return pct
 }
 
 /// A started book never reads «0%»: the first few minutes of a long one are less than a percent.

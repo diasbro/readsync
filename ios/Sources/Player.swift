@@ -61,6 +61,9 @@ final class Player: NSObject, ObservableObject {
     private var rate: Float = 1
     private var lastSave: Task<Void, Never>?
     private var autoplay: String?  // «Слушать» in the library: this book plays once it is loaded and in place
+    private var lastTick: Double?  // the time of the last tick while playing: a step from it is listening, a jump is not
+    private var isDone = false  // the book is read, by its merged state: no mark is made on it
+    private var markedOnce = false  // the end of the text was crossed with this item: after an undo, only the file's end marks
 
     /// Wait for the last position write and the reader's own writes: the library reads them right after a
     /// book is closed.
@@ -170,6 +173,7 @@ final class Player: NSObject, ObservableObject {
                 guard p.itemGen == gen else { return }
                 p.words = words
                 p.storedPos = (ReadingState.num(merged["pos"]), ReadingState.num(merged["posAt"]))
+                p.isDone = ReadingState.status(merged, audio: true, atEnd: false).status == .done
                 p.stateLoaded = true
                 p.startIfAsked()
                 // it began to play before the words were known: the session starts now, from where it is
@@ -212,6 +216,7 @@ final class Player: NSObject, ObservableObject {
                 let p = Player.shared
                 guard p.itemGen == gen else { return }
                 p.playIntent = false  // the end is not a pause a call made: nothing to resume after one
+                p.markRead()  // listened to the very end
                 p.emit("ended")
             }
         }
@@ -274,6 +279,7 @@ final class Player: NSObject, ObservableObject {
                 let p = Player.shared
                 guard p.itemGen == gen else { return }
                 if playing, p.isPlaying, !p.words.starts.isEmpty { p.sessionStart = (Date(), p.wordIndex(p.time)) }
+                p.lastTick = nil  // a jump is not listening across the end of the text
                 p.progress = p.fraction
                 p.emit("seeked")
                 p.updateNowPlaying()
@@ -318,6 +324,9 @@ final class Player: NSObject, ObservableObject {
         loadingText = false
         shownLine = nil
         reattached = false
+        lastTick = nil
+        isDone = false
+        markedOnce = false
         sessionStart = nil
         playing = false
         progress = 0
@@ -428,11 +437,66 @@ final class Player: NSObject, ObservableObject {
         return min(1, time / d)
     }
 
-    /// Once a second: the mini player moves on, and the lock screen follows a new sentence.
+    /// Once a second: the mini player moves on, and the lock screen follows a new sentence. Listening across
+    /// the end of the main text marks the book read, under a locked screen too, where the page does not run.
     private func tick() {
         let f = fraction
         if abs(f - progress) > 0.0005 { progress = f }  // a hair on the bar: no redraw for less
         if lockText, line()?.text != shownLine { updateNowPlaying() }
+        let t = time, playing = isPlaying
+        if let prev = lastTick, !markedOnce, stateLoaded, let book,
+            Self.crossed(prev: prev, now: t, threshold: Self.readThreshold(book, duration: duration), playing: playing, done: isDone)
+        {
+            markedOnce = true
+            markRead()
+        }
+        lastTick = playing ? t : nil
+    }
+
+    /// The book's merged state changed elsewhere (the page's «отменить», the library's status): marks follow it.
+    func stateChanged(_ slug: String, _ merged: [String: Any]) {
+        guard slug == book?.slug else { return }
+        isDone = ReadingState.status(merged, audio: true, atEnd: false).status == .done
+    }
+
+    private var duration: Double { player?.currentItem?.duration.seconds.finite ?? 0 }
+
+    /// Where listening counts as having read the book: half a minute before the end of the main text (the
+    /// timing from captions may be that far off), or a minute before the end of a book stamped without it.
+    nonisolated static func readThreshold(_ book: Book, duration: Double) -> Double? {
+        if let end = book.audioEnd { return end - 30 }
+        return duration > 0 ? duration - 60 : nil
+    }
+
+    /// Playing went across `threshold` in one step of listening: not a jump (more than five seconds), not paused,
+    /// not in a book already read.
+    nonisolated static func crossed(prev: Double, now: Double, threshold: Double?, playing: Bool, done: Bool = false) -> Bool {
+        guard let threshold, playing, !done else { return false }
+        return prev < threshold && now >= threshold && now - prev < 5
+    }
+
+    /// «Прочитана» with today's date, if «Отмечать прочитанной в конце» is on and the book is not read already;
+    /// the page hears `finished`, to offer the undo.
+    private func markRead() {
+        guard !isDone, AppSettings.markRead, let book, let sharedDir else { return }
+        isDone = true
+        let gen = itemGen, day = ReadingState.today, at = ReadingState.nowMs
+        _ = background {
+            let merged = ReadingState.load(shared: sharedDir, edition: book.edition)
+            // read already on another device, or by its old place at the end: no second date
+            guard ReadingState.status(merged, audio: true, atEnd: false).status != .done else { return }
+            let was = merged["finished"] as? [String] ?? []
+            let finished = was.contains(day) ? was : was + [day]  // read twice in one day: one date, as the page keeps it
+            let ok = ReadingState.write(
+                shared: sharedDir, edition: book.edition,
+                patch: ["shelf": "done", "shelfAt": at, "finished": finished, "finishedAt": at])
+            await MainActor.run {
+                let p = Player.shared
+                guard p.itemGen == gen else { return }
+                if ok { p.emit("finished") } else { p.isDone = false }  // not written: the next crossing tries again
+            }
+            await Shelf.shared.remeasure(book)
+        }
     }
 
     // ---- the sentence on the lock screen ----

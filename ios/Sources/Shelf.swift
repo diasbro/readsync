@@ -17,6 +17,10 @@ struct Book: Identifiable, Hashable {
     var bookID = ""
     var edition = ""
     var files: [String: Int64] = [:]
+    /// Where the main text ends, as the pipeline measured it: the first sentence of the back matter, and the
+    /// end of its last word in the narration. None in a book stamped before they were.
+    var textEnd: Int?
+    var audioEnd: Double?
 
     var audioName: String? { ["audio.m4a", "audio.mp3"].first { files[$0] != nil } }
     var hasAudio: Bool { audioName != nil && files["timing.json"] != nil }
@@ -30,6 +34,8 @@ struct Book: Identifiable, Hashable {
         narrator = t["narrator"] ?? ""
         bookID = t["id"] ?? ""
         edition = t["edition"] ?? ""
+        textEnd = t["text_end"].flatMap { Int($0) }
+        audioEnd = t["audio_end"].flatMap { Double($0) }
         for item in (t["files"] ?? "").split(separator: ",") {
             let parts = item.split(separator: ":")
             if parts.count == 2, let n = Int64(parts[1]) { files[String(parts[0])] = n }
@@ -61,6 +67,10 @@ struct Progress: Equatable {
     var fraction = 0.0
     var opened = 0.0
     var pages = false  // last read as pages: the way back in is reading, not listening
+    var status = BookStatus.none
+    var rereading = false
+    var finished: [String] = []
+    var finishedOn: String?  // the day it was last finished, `YYYY-MM-DD`
 }
 
 /// `textOnly`: a copy of an audiobook without its audio, read as pages.
@@ -234,15 +244,7 @@ final class Shelf: ObservableObject {
             for book in all {
                 guard let dir = dirs[book.slug] else { continue }
                 Self.cacheCover(book.slug, from: dir)
-                let st = ReadingState.load(shared: dir, edition: book.edition)
-                var p = Progress(opened: ReadingState.num(st["opened"]), pages: st["mode"] as? String == "pages")
-                let duration = Self.duration(book.slug)
-                if book.hasAudio, duration > 0, st["mode"] as? String != "pages" {
-                    p.fraction = min(1, ReadingState.num(st["pos"]) / duration)
-                } else {
-                    p.fraction = min(1, ReadingState.num(st["sentPct"]) / 100)
-                }
-                out[book.slug] = p
+                out[book.slug] = Self.measure(book, ReadingState.load(shared: dir, edition: book.edition))
             }
             return out
         }.value
@@ -251,7 +253,7 @@ final class Shelf: ObservableObject {
         if defaults.bool(forKey: Self.dropReadKey) {
             let here = Set(copies.filter { $0.value.isReadable }.map(\.key))
             for slug in Self.readToDrop(measured, local: here, loaded: Player.shared.slug, now: ReadingState.nowMs) {
-                removeHere(slug)
+                removeHere(slug, remember: false)  // «Синхронизация» leaves it while it is read
             }
         }
         // launched with `-fetchAll YES`: every book onto the phone once, whatever the toggle says
@@ -282,15 +284,45 @@ final class Shelf: ObservableObject {
         return .outdated
     }
 
-    /// Finished books not opened for a week, whose copies go when «Убирать прочитанные» is on. The reading
-    /// state stays in the shared library; the book the narrator holds stays too.
+    /// How far into a book its merged state is, and what the reader made of it. The local timing gives the
+    /// narration's length: without a copy, the page position is all there is.
+    nonisolated static func measure(_ book: Book, _ st: [String: Any]) -> Progress {
+        var p = Progress(opened: ReadingState.num(st["opened"]), pages: st["mode"] as? String == "pages")
+        let duration = Self.duration(book.slug)
+        let atEnd: Bool
+        if book.hasAudio, duration > 0, st["mode"] as? String != "pages" {
+            let pos = ReadingState.num(st["pos"])
+            p.fraction = min(1, pos / duration)
+            atEnd = pos >= duration - 60
+        } else {
+            p.fraction = min(1, ReadingState.num(st["sentPct"]) / 100)
+            atEnd = p.fraction >= 0.99
+        }
+        (p.status, p.rereading, p.finishedOn) = ReadingState.status(st, audio: book.hasAudio, atEnd: atEnd)
+        p.finished = st["finished"] as? [String] ?? []
+        return p
+    }
+
+    /// Read books finished and last opened a week ago or more, whose copies go when «Убирать прочитанные» is
+    /// on. The reading state stays in the shared library; the book the narrator holds stays too.
     nonisolated static func readToDrop(_ progress: [String: Progress], local: Set<String>, loaded: String?, now: Double)
         -> [String]
     {
         let week = 7 * 86_400_000.0  // `opened` is in milliseconds, as the reader writes it
         return progress.filter { slug, p in
-            local.contains(slug) && slug != loaded && p.fraction >= 0.99 && now - p.opened >= week
+            guard local.contains(slug), slug != loaded, p.status == .done, now - p.opened >= week else { return false }
+            // finished before the dates were kept and never read since: the week of `opened` is all there is
+            return p.finishedOn.flatMap(day).map { now - $0 >= week } ?? true
         }.map(\.key).sorted()
+    }
+
+    /// Midnight UTC of a `YYYY-MM-DD` day, in milliseconds: the days the reader writes are UTC days.
+    nonisolated static func day(_ s: String) -> Double? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.date(from: s).map { $0.timeIntervalSince1970 * 1000 }
     }
 
     func copy(of slug: String) -> Copy { copies[slug] ?? .absent }
@@ -335,15 +367,42 @@ final class Shelf: ObservableObject {
         return Double(head[r].split(separator: ":").last!.trimmingCharacters(in: .whitespaces)) ?? 0
     }
 
-    /// The book to come back to: the last one opened that has a copy on this phone and is begun, not
-    /// finished. A book opened by mistake and closed again does not take its place.
+    /// The book to come back to: the last one opened that has a copy on this phone and is being read.
     var current: Book? {
-        books.filter { copy(of: $0.slug).isReadable }
-            .filter { (progress[$0.slug]?.opened ?? 0) > 0 && Self.inProgress(progress[$0.slug]?.fraction ?? 0) }
+        books.filter { copy(of: $0.slug).isReadable && Self.isCurrent(progress[$0.slug]) }
             .max { (progress[$0.slug]?.opened ?? 0) < (progress[$1.slug]?.opened ?? 0) }
     }
 
+    /// Being read: so marked (a reread from its start too), or, with no status, opened and begun, not finished.
+    /// A book opened by mistake and closed again does not take the place; a read or put-aside one never does.
+    nonisolated static func isCurrent(_ p: Progress?) -> Bool {
+        guard let p else { return false }
+        switch p.status {
+        case .reading: return true
+        case .none: return p.opened > 0 && inProgress(p.fraction)
+        case .paused, .done: return false
+        }
+    }
+
     nonisolated static func inProgress(_ fraction: Double) -> Bool { fraction > 0 && fraction < 0.99 }
+
+    /// The library below «Читаю сейчас»: every book but the current one and the read ones, as `books` orders
+    /// them; then the read ones, the latest finished first.
+    nonisolated static func sections(_ books: [Book], progress: [String: Progress], current: String?)
+        -> (all: [Book], read: [Book])
+    {
+        let done = { (b: Book) in progress[b.slug]?.status == .done }
+        let read = books.filter(done).enumerated().sorted { a, b in
+            let (x, y) = (progress[a.element.slug]?.finishedOn ?? "", progress[b.element.slug]?.finishedOn ?? "")
+            return x != y ? x > y : a.offset < b.offset
+        }.map(\.element)
+        return (books.filter { !done($0) && $0.slug != current }, read)
+    }
+
+    /// The read books last finished in `year` («в 2026 — 7»).
+    nonisolated static func readIn(_ year: String, _ read: [Book], progress: [String: Progress]) -> Int {
+        read.filter { progress[$0.slug]?.finishedOn?.hasPrefix(year + "-") == true }.count
+    }
 
     /// The copy the reader opens: the local one, whatever the shared library says now.
     func localBook(_ slug: String) -> Book? { Self.localCopy(slug) }
@@ -413,12 +472,13 @@ final class Shelf: ObservableObject {
     }
 
     /// The books «Синхронизация» copies now: those not on the phone, failed, or older than the library's,
-    /// but none the reader took off it, and none open in the reader or held by the narrator.
-    nonisolated static func toSync(_ books: [Book], copies: [String: Copy], skip: Set<String>, busy: Set<String>)
-        -> [Book]
-    {
+    /// but none the reader took off it, none open in the reader or held by the narrator, and none `done`
+    /// (the read ones, while «Убирать прочитанные» is on).
+    nonisolated static func toSync(
+        _ books: [Book], copies: [String: Copy], skip: Set<String>, busy: Set<String>, done: Set<String> = []
+    ) -> [Book] {
         books.filter { book in
-            guard !skip.contains(book.slug) else { return false }
+            guard !skip.contains(book.slug), !done.contains(book.slug) else { return false }
             switch copies[book.slug] ?? .absent {
             case .absent, .failed: return true
             case .outdated: return !busy.contains(book.slug)
@@ -439,7 +499,7 @@ final class Shelf: ObservableObject {
         // this app is suspended under a locked screen, and the copies that follow take seconds, not minutes
         if let root = booksRoot {
             let busy = Set([Player.shared.slug, Player.shared.pageSlug].compactMap { $0 })
-            for book in Self.toSync(books, copies: copies, skip: all ? [] : skip, busy: busy) {
+            for book in Self.toSync(books, copies: copies, skip: all ? [] : skip, busy: busy, done: all ? [] : readLeft) {
                 let textOnly = Self.localCopy(book.slug).map { $0.audioName == nil } ?? false
                 for part in Self.parts(of: book, textOnly: textOnly) {
                     let url = root.appendingPathComponent(book.slug, isDirectory: true).appendingPathComponent(part.name)
@@ -449,12 +509,18 @@ final class Shelf: ObservableObject {
         }
         while all || defaults.bool(forKey: Self.syncKey) {
             let busy = Set([Player.shared.slug, Player.shared.pageSlug].compactMap { $0 })
-            guard let book = Self.toSync(books, copies: copies, skip: all ? [] : skip, busy: busy)
+            guard let book = Self.toSync(books, copies: copies, skip: all ? [] : skip, busy: busy, done: all ? [] : readLeft)
                 .first(where: { !tried.contains($0.slug) })
             else { return }
             tried.insert(book.slug)
             await fetch(book, byHand: false)?.value
         }
+    }
+
+    /// The read books «Синхронизация» leaves while «Убирать прочитанные» is on: read again, they come back.
+    private var readLeft: Set<String> {
+        guard defaults.bool(forKey: Self.dropReadKey) else { return [] }
+        return Set(progress.filter { $0.value.status == .done }.map(\.key))
     }
 
     /// Staging folders (`.<slug>.new`) a fetch left when the app was killed in the middle of it: hundreds of
@@ -575,20 +641,70 @@ final class Shelf: ObservableObject {
 
     // ---- taking books away ----
 
-    /// «Удалить → Только с iPhone» (and «Убирать прочитанные»): the copy goes, the book stays in the library,
-    /// and «Синхронизация» leaves it until it is downloaded by hand.
-    func removeHere(_ slug: String) {
+    /// «Удалить → Только с iPhone» (and «Убирать прочитанные»): the copy goes, the book stays in the library.
+    /// `remember`: «Синхронизация» leaves it until it is downloaded by hand; without, until it is read again.
+    func removeHere(_ slug: String, remember: Bool = true) {
         if Player.shared.slug == slug { Player.shared.stop() }  // the narrator must not play a file that is gone
         if let job = jobs.removeValue(forKey: slug) { job.cancel() }
         try? fm.removeItem(at: Self.localDir(slug))
         copies[slug] = .absent
         localBytes[slug] = nil
         if inLibrary.contains(slug) {
-            skip.insert(slug)
+            if remember { skip.insert(slug) }
         } else {
             books.removeAll { $0.slug == slug }  // a copy of a book the library no longer has: nothing is left
             copies[slug] = nil
         }
+    }
+
+    // ---- the reader's status of a book ----
+
+    /// «Читаю», «Отложена», «Прочитана» from the library. «Прочитана» adds today to the book's dates; a read
+    /// book set back to «Читаю» or «Отложена» was not finished after all, and loses its latest date.
+    func setStatus(_ book: Book, _ status: BookStatus) {
+        write(book) { st in
+            let at = ReadingState.nowMs
+            var patch: [String: Any] = ["shelf": status.rawValue, "shelfAt": at]
+            var finished = st["finished"] as? [String] ?? []
+            if status == .done {
+                if !finished.contains(ReadingState.today) { finished.append(ReadingState.today) }
+            } else if let last = finished.max(), (st["shelf"] as? String) == "done" {
+                finished.remove(at: finished.lastIndex(of: last)!)
+            } else {
+                return patch
+            }
+            patch["finished"] = finished
+            patch["finishedAt"] = at
+            return patch
+        }
+    }
+
+    /// «Перечитать»: back to «Читаю» from the start; the dates it was read on stay.
+    func reread(_ book: Book) {
+        if Player.shared.slug == book.slug { Player.shared.seek(0) }
+        write(book) { _ in
+            let at = ReadingState.nowMs
+            return ["shelf": "reading", "shelfAt": at, "pos": 0, "posAt": at, "sent": 0, "sentAt": at, "sentPct": 0]
+        }
+    }
+
+    /// A change to the book's state worked out from its merged state, written to this phone's file; the
+    /// library then shows it.
+    private func write(_ book: Book, patch: @escaping @Sendable ([String: Any]) -> [String: Any]) {
+        guard let dir = sharedDir(book.slug) else { return }  // the folder cannot be reached: nowhere to write
+        Task.detached {
+            let st = ReadingState.load(shared: dir, edition: book.edition)
+            let merged = JSONBox(ReadingState.put(shared: dir, edition: book.edition, patch: patch(st)))
+            await MainActor.run { Player.shared.stateChanged(book.slug, merged.value as? [String: Any] ?? [:]) }
+            await self.remeasure(book)
+        }
+    }
+
+    /// One book's progress read again, after a write.
+    func remeasure(_ book: Book) async {
+        guard let dir = sharedDir(book.slug) else { return }
+        let p = await Task.detached { Self.measure(book, ReadingState.load(shared: dir, edition: book.edition)) }.value
+        progress[book.slug] = p
     }
 
     /// «Удалить → Отовсюду»: the book's folder leaves the shared library, so every device loses it.

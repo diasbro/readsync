@@ -85,21 +85,69 @@ final class ShelfTests: XCTestCase {
 
     func testReadToDrop() {
         let day = 86_400_000.0
-        let now = 100 * day
-        let at = { (fraction: Double, daysAgo: Double) in Readsync.Progress(fraction: fraction, opened: now - daysAgo * day) }
+        let now = try! XCTUnwrap(Shelf.day("2026-10-20")) + 12 * 3_600_000  // noon UTC
+        let at = { (status: BookStatus, finished: String?, openedDaysAgo: Double) in
+            Readsync.Progress(fraction: 1, opened: now - openedDaysAgo * day, status: status, finishedOn: finished)
+        }
         let progress: [String: Readsync.Progress] = [
-            "done-long-ago": at(1, 8),
-            "done-a-week-ago": at(0.99, 7),
-            "done-yesterday": at(1, 1),
-            "almost": at(0.98, 30),
-            "playing": at(1, 30),
-            "not-here": at(1, 30),
+            "read-long-ago": at(.done, "2026-10-01", 8),
+            "read-a-week-ago": at(.done, "2026-10-13", 7),
+            "read-yesterday": at(.done, "2026-10-19", 8),  // finished yesterday, though last opened earlier
+            "read-opened-yesterday": at(.done, "2026-10-01", 1),
+            "read-no-date": at(.done, nil, 30),  // finished before dates were kept
+            "at-the-end-not-read": at(.none, nil, 30),  // the end of the position alone is not «read» here
+            "reading-at-the-end": at(.reading, "2026-01-01", 30),
+            "paused": at(.paused, nil, 30),
+            "playing": at(.done, "2026-01-01", 30),
+            "not-here": at(.done, "2026-01-01", 30),
         ]
-        let local: Set = ["done-long-ago", "done-a-week-ago", "done-yesterday", "almost", "playing"]
+        let local = Set(progress.keys).subtracting(["not-here"])
         XCTAssertEqual(
-            Shelf.readToDrop(progress, local: local, loaded: "playing", now: now), ["done-a-week-ago", "done-long-ago"])
-        XCTAssertEqual(Shelf.readToDrop(progress, local: local, loaded: nil, now: now).count, 3)
+            Shelf.readToDrop(progress, local: local, loaded: "playing", now: now),
+            ["read-a-week-ago", "read-long-ago", "read-no-date"])
+        XCTAssertEqual(Shelf.readToDrop(progress, local: local, loaded: nil, now: now).count, 4)
         XCTAssertEqual(Shelf.readToDrop([:], local: local, loaded: nil, now: now), [])
+    }
+
+    func testCurrentFollowsTheStatus() {
+        let p = { (status: BookStatus, fraction: Double, opened: Double) in
+            Readsync.Progress(fraction: fraction, opened: opened, status: status)
+        }
+        XCTAssertTrue(Shelf.isCurrent(p(.none, 0.5, 1)))
+        XCTAssertFalse(Shelf.isCurrent(p(.none, 0.5, 0)))  // never opened here or anywhere
+        XCTAssertFalse(Shelf.isCurrent(p(.none, 0, 1)))  // opened by mistake
+        XCTAssertFalse(Shelf.isCurrent(p(.done, 0.5, 1)))  // read, put back on the shelf on the Mac
+        XCTAssertFalse(Shelf.isCurrent(p(.paused, 0.5, 1)))
+        XCTAssertTrue(Shelf.isCurrent(p(.reading, 0, 1)))  // a reread, back at its start
+        XCTAssertTrue(Shelf.isCurrent(p(.reading, 0.995, 1)))  // the read mark undone near the end
+        XCTAssertFalse(Shelf.isCurrent(nil))
+    }
+
+    func testSections() {
+        let books = ["a", "b", "c", "d", "e", "f"].map { Book(slug: $0, toml: "title = \"\($0)\"") }
+        let progress: [String: Readsync.Progress] = [
+            "a": .init(status: .reading),
+            "b": .init(status: .done, finishedOn: "2026-03-01"),
+            "c": .init(status: .paused),
+            "d": .init(status: .done, finishedOn: "2026-10-07"),
+            "e": .init(status: .done),  // no date: last
+        ]
+        let (all, read) = Shelf.sections(books, progress: progress, current: "a")
+        XCTAssertEqual(all.map(\.slug), ["c", "f"])  // the current one is above, the read ones below
+        XCTAssertEqual(read.map(\.slug), ["d", "b", "e"])  // the latest finished first
+        XCTAssertEqual(Shelf.sections(books, progress: progress, current: nil).all.map(\.slug), ["a", "c", "f"])
+        XCTAssertEqual(Shelf.readIn("2026", read, progress: progress), 2)
+        XCTAssertEqual(Shelf.readIn("2025", read, progress: progress), 0)
+    }
+
+    func testToSyncLeavesReadBooks() {
+        let book = { (slug: String) in Book(slug: slug, toml: "edition = \"e1\"\nfiles = \"book.json:5\"") }
+        let books = ["read", "reading", "taken-off"].map(book)
+        // «Убирать прочитанные» on: a read book is not brought back
+        XCTAssertEqual(
+            Shelf.toSync(books, copies: [:], skip: ["taken-off"], busy: [], done: ["read"]).map(\.slug), ["reading"])
+        // read again (its status is no longer done): it comes back; one taken off by hand still does not
+        XCTAssertEqual(Shelf.toSync(books, copies: [:], skip: ["taken-off"], busy: [], done: []).map(\.slug), ["read", "reading"])
     }
 
     func testToSync() {

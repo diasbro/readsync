@@ -55,6 +55,8 @@ targets:
       - path: Tests
       - path: ../tests/state_vectors.json
         buildPhase: resources
+      - path: ../tests/status_vectors.json
+        buildPhase: resources
     dependencies:
       - target: Readsync
     settings:
