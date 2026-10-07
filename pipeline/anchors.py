@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -91,7 +92,26 @@ def chunked_match(a: list[str], b: list[str]) -> list[tuple[int, int, int]]:
     return out
 
 
-def build(book: dict, json3: dict) -> dict:
+def audio_seconds(*dirs: Path) -> float:
+    """The length of the first playable audio found in `dirs`, 0 when there is none or ffprobe cannot tell."""
+    src = next((x / n for x in dirs for n in ("audio.m4a", "audio.mp3", "yt.webm") if (x / n).exists()), None)
+    if src is None:
+        return 0.0
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(src)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        return float(out or 0)
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return 0.0
+
+
+def build(book: dict, json3: dict, audio_sec: float = 0.0) -> dict:
+    """`audio_sec`: the recording's own length. Captions may stop before it does (a part without them,
+    closing music), and the words after the last one are spread up to the real end, not squeezed into it."""
     words, bnorm = book_words(book)
     cstart, cend, cnorm = caption_words(json3)
     matches = chunked_match(bnorm, cnorm)
@@ -114,24 +134,27 @@ def build(book: dict, json3: dict) -> dict:
         "anchors": mono,
         "coverage": round(coverage, 4),
         "block_hits": hits,
-        "duration": cend[-1] if cend else 0.0,
+        "duration": max(cend[-1] if cend else 0.0, audio_sec),
     }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("book_dir", type=Path)
-    ap.add_argument("--work", type=Path, help="where anchors.json goes and new captions are looked for first")
+    ap.add_argument(
+        "--work", type=Path, help="where anchors.json goes and a new text and captions are looked for first"
+    )
     args = ap.parse_args()
     d = args.book_dir
     w = args.work or d
-    book = json.loads((d / "book.json").read_text(encoding="utf-8"))
+    text = w / "book.json" if (w / "book.json").exists() else d / "book.json"  # a new text waits in the work dir
+    book = json.loads(text.read_text(encoding="utf-8"))
     caps = next(
         (f for x in (w, d) for f in sorted(x.glob("yt.*.json3")) + [x / "whisper.json3"] if f.exists()), None
     )  # yt.merged / yt.ru-orig
     if caps is None:
         sys.exit("no *.json3 captions in book dir")
-    res = build(book, json.loads(caps.read_text(encoding="utf-8")))
+    res = build(book, json.loads(caps.read_text(encoding="utf-8")), audio_seconds(w, d))
     (w / "anchors.json").write_text(json.dumps(res), encoding="utf-8")
     words_per_block = {}
     for bi, _, _ in res["words"]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -14,6 +15,7 @@ import sys
 import threading
 import time
 import tomllib
+import unicodedata
 import urllib.parse
 from pathlib import Path
 
@@ -30,6 +32,12 @@ BOOKS = Path(os.environ.get("READSYNC_BOOKS") or (APP_BOOKS if APP_BOOKS.exists(
 STATE_LOCK = threading.Lock()
 SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 JOBS: dict[str, dict] = {}
+
+
+class Busy(ValueError):
+    """A job (loading, aligning, extracting again) holds the book now: the change waits until it is done."""
+
+
 PIPELINE_PY = Path(os.environ.get("READSYNC_PYTHON") or ROOT / ".venv" / "bin" / "python").expanduser()
 TRANSLIT = dict(
     zip(
@@ -151,12 +159,12 @@ def list_books() -> list[dict]:
             with contextlib.suppress(OSError, ValueError), (d / "timing.json").open("rb") as fh:
                 m = re.search(rb'"duration":\s*([\d.]+)', fh.read(300))
                 duration = float(m.group(1)) if m else 0.0
-        pos = float(st.get("pos", 0) or 0)
+        pos = float(state._num(st.get("pos")) or 0)  # a device file holding something else is not fatal
         # an audiobook read as pages moves its page, not its narrator: the mode it was left in says which counts,
         # as on the phone. At the end: within a minute of it, or the last spread (what read as finished before
         # statuses existed)
         by_page = duration == 0 or st.get("mode") == "pages"
-        at_end = (st.get("sentPct") or 0) >= 99 if by_page else pos >= duration - 60
+        at_end = (state._num(st.get("sentPct")) or 0) >= 99 if by_page else pos >= duration - 60
         days = st.get("finished")
         meta["state"] = {
             "opened": st.get("opened", 0),
@@ -203,6 +211,8 @@ def add_session(slug: str, delta: dict) -> dict:
         sec, words = float(delta.get("sec", 0)), float(delta.get("words", 0))
     except (TypeError, ValueError):
         sec, words = 0.0, 0.0
+    if not (math.isfinite(sec) and math.isfinite(words)):  # "Infinity" would be saved as JSON nothing reads
+        sec, words = 0.0, 0.0
     return state.add_session(BOOKS / slug, str(delta.get("day", ""))[:10], sec, words)
 
 
@@ -226,7 +236,8 @@ def save_wishlist(items: list[dict]) -> None:
 # `slug`: the book a picked edition is loading into. The title stays until that job succeeds, so a
 # load called off or failed leaves the card «без текста» with its editions, as it was
 WISH_FIELDS = ("title", "author", "note", "text_url", "audio_url", "searched", "query", "slug")
-WISH_JSON = ("hits", "author_hits", "unopenable")  # the last search result stays with the title until it is loaded
+# the last search result stays with the title until it is loaded; `failed`: catalogs that did not answer it
+WISH_JSON = ("hits", "author_hits", "unopenable", "failed")
 
 
 def wishlist_add(data: dict) -> list[dict]:
@@ -300,20 +311,29 @@ def save_hits(slug: str, data: dict) -> None:
 def rename_book(slug: str, title: str) -> dict:
     """Rename a book in place. Only the title line of book.toml is rewritten: the slug, the files,
     the reading state and every other field stay as they are."""
+    _pipeline()
+    from manifest import clean_title, toml_str
+
     d = BOOKS / slug
-    title = " ".join(str(title or "").split())
+    title = clean_title(title or "")
     if not SLUG_RE.match(slug) or not (d / "book.toml").is_file():
         raise ValueError("unknown book")
     if not title:
         raise ValueError("нужно название")
-    text = (d / "book.toml").read_text(encoding="utf-8")
-    line = 'title = "{}"'.format(title.replace("\\", "\\\\").replace('"', '\\"'))
-    new_text, hits = re.subn(r"(?m)^title\s*=.*$", lambda _: line, text, count=1)
-    if not hits:
-        new_text = line + "\n" + text
-    tmp = d / "book.toml.tmp"
-    tmp.write_text(new_text, encoding="utf-8")
-    os.replace(tmp, d / "book.toml")
+
+    with STATE_LOCK:  # start_job runs under it too: no job starts between the check and the write
+        if job_running(slug):  # it rewrites book.toml itself: the new title would be lost
+            raise Busy("книга ещё обрабатывается")
+        st = (d / "book.toml").stat()
+        text = (d / "book.toml").read_text(encoding="utf-8")
+        line = f"title = {toml_str(title)}"
+        new_text, hits = re.subn(r"(?m)^title\s*=.*$", lambda _: line, text, count=1)
+        if not hits:
+            new_text = line + "\n" + text
+        tmp = d / "book.toml.tmp"
+        tmp.write_text(new_text, encoding="utf-8")
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))  # the library orders new books by it: a renamed one is not
+        os.replace(tmp, d / "book.toml")
     forget_query(slug)
     return {"slug": slug, "title": title}
 
@@ -337,9 +357,9 @@ def delete_book(slug: str) -> None:
     d = BOOKS / slug
     if not SLUG_RE.match(slug) or not d.is_dir():
         raise ValueError("книга не существует")
-    if job_running(slug):
-        raise ValueError("книга ещё загружается")
-    with STATE_LOCK:
+    with STATE_LOCK:  # start_job runs under it too: no job can start between the check and the removal
+        if job_running(slug):
+            raise ValueError("книга ещё загружается")
         shutil.rmtree(d)
         JOBS.pop(slug, None)
 
@@ -355,8 +375,9 @@ def merge_settings(patch: dict) -> dict:
     """Reader settings are global (not per book); last writer wins by client timestamp."""
     with STATE_LOCK:
         cur = load_settings()
-        if isinstance(patch.get("settings"), dict) and patch.get("settingsAt", 0) >= cur.get("settingsAt", 0):
-            cur = {"settings": patch["settings"], "settingsAt": patch.get("settingsAt", 0)}
+        at = state._num(patch.get("settingsAt")) or 0
+        if isinstance(patch.get("settings"), dict) and at >= (state._num(cur.get("settingsAt")) or 0):
+            cur = {"settings": patch["settings"], "settingsAt": at}
             tmp = SETTINGS_FILE.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, SETTINGS_FILE)
@@ -415,7 +436,7 @@ def where_now(slug: str) -> dict:
     blocks = book["blocks"]
     audio_mode = bool(words) and st.get("mode") != "pages"
     if audio_mode:
-        pos = float(st.get("pos", 0) or 0)
+        pos = float(state._num(st.get("pos")) or 0)
         lo, hi = 0, len(words) - 1
         while lo < hi:
             mid = (lo + hi + 1) // 2
@@ -430,7 +451,7 @@ def where_now(slug: str) -> dict:
             blk["sentences"][-1] if blk["sentences"] else [0, len(blk["text"])],
         )
     else:
-        target = int(st.get("sent", 0) or 0)
+        target = int(state._num(st.get("sent")) or 0)
         n = 0
         bi, rng = 0, [0, 0]
         for i, blk in enumerate(blocks):
@@ -464,7 +485,9 @@ def slug_from_source(urls: list[str]) -> str:
 
 
 def slugify(title: str) -> str:
-    s = "".join(TRANSLIT.get(c, c) for c in title.lower())
+    """Transliterated, lower case, dashes, at most 48 characters. NFC first, so a letter typed as a base and a
+    combining mark (й as и + U+0306) reads as itself; the phone's BookImport.slugify is the same."""
+    s = "".join(TRANSLIT.get(c, c) for c in unicodedata.normalize("NFC", title).lower())
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:48]
     return s or "book"
 
@@ -473,8 +496,8 @@ def form_values(form: dict, key: str) -> list[str]:
     f = form.get(key) or {}
     vals = f.get("values") or ([f["value"]] if f.get("value") else [])
     out: list[str] = []
-    for v in vals:
-        out += [x.strip() for x in re.split(r"[\n,]+", v) if x.strip()]
+    for v in vals:  # one link per line or between spaces: a comma belongs to the link (Wikisource titles have them)
+        out += v.split()
     return out
 
 
@@ -485,6 +508,11 @@ def start_job(form: dict) -> tuple[dict | None, str]:
     slug = val("slug") or (slugify(title) if title else slug_from_source(form_values(form, "text_url")))
     if not SLUG_RE.match(slug):
         return None, "не вышло назвать папку книги"
+    if not val("slug"):  # a new book named like one already in the library (another author's) gets «-2», «-3»
+        base, n = slug, 1  # one still loading (only its stub book.toml so far) is in the library too
+        while (BOOKS / slug / "book.json").exists() or ((BOOKS / slug / "book.toml").exists() and job_running(slug)):
+            n += 1
+            slug = f"{base}-{n}"
     audio_ref = val("audio_ref")
     if audio_ref:  # a recording found by the audio search: the pipeline resolves its parts itself
         try:
@@ -503,13 +531,9 @@ def start_job(form: dict) -> tuple[dict | None, str]:
     replace = (d / "book.json").exists() and not attach_audio and val("replace") == "1"
     if (d / "book.json").exists() and not attach_audio and not replace:
         return None, f"«{title_of(slug)}» уже есть в библиотеке"
-    d.mkdir(parents=True, exist_ok=True)
-    if has_file:
-        fname = "upload_" + re.sub(r"[^\w.-]+", "_", tf["filename"])
-        (d / fname).write_bytes(tf["data"])
-        texts.append(str(d / fname))
-    if not texts and not attach_audio:
-        return None, "нужен текст: ссылка или файл"
+    audios = form_values(form, "audio_url")
+    af = form.get("audio_file")
+    has_audio_file = bool(af and af.get("filename") and af["data"])
 
     def allowed(src: str) -> bool:
         if src.startswith(("http://", "https://")):
@@ -519,46 +543,61 @@ def start_job(form: dict) -> tuple[dict | None, str]:
         except OSError:
             return False
 
+    # every refusal comes before anything is written: a refused form leaves nothing in the library
+    if not texts and not has_file and not attach_audio:
+        return None, "нужен текст: ссылка или файл"
     if not all(allowed(t) for t in texts):
         return None, "ссылка должна начинаться с http(s)"
-    audios = form_values(form, "audio_url")
-    af = form.get("audio_file")
-    if af and af.get("filename") and af["data"]:
-        ext = os.path.splitext(af["filename"])[1].lower() or ".m4a"
-        (d / ("upload" + ext)).write_bytes(af["data"])
-        audios.append(str(d / ("upload" + ext)))
-    if attach_audio and not audios and not audio_ref:
+    if attach_audio and not audios and not has_audio_file and not audio_ref:
         return None, "нужна ссылка на аудио или файл"
     if not all(allowed(a) for a in audios):
         return None, "ссылка на аудио должна начинаться с http(s)"
-    py = str(PIPELINE_PY) if PIPELINE_PY.exists() else sys.executable
-    cmd = [py, str(ROOT / "pipeline" / "add_book.py"), slug]
-    for t in texts:
-        cmd += ["--text", t]
-    for a in audios:
-        cmd += ["--audio", a]
-    if audio_ref:
-        cmd += ["--audio-ref", audio_ref]
-    if val("align") != "on":
-        cmd.append("--no-align")
-    flags = (
-        ("title", "--title"),
-        ("author", "--author"),
-        ("narrator", "--narrator"),
-        ("translator", "--translator"),
-        ("year", "--year"),
-    )
-    for k, flag in flags:
-        if val(k):
-            cmd += [flag, val(k)]
-    if replace:  # new text, new sentence numbering: the page-mode position starts over (audio seconds stay valid)
-        state.forget_sent(d)
-    if not (d / "book.toml").exists():  # a stub so the card shows up as "loading" right away; add_book fills it in
-        esc_ = lambda v: str(v).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
-        # no title of our own for a link: add_book keeps a title it finds here, and the book's is the one wanted
-        stub = {"slug": slug, "title": title, "author": val("author")}
-        (d / "book.toml").write_text("".join(f'{k} = "{esc_(v)}"\n' for k, v in stub.items() if v), encoding="utf-8")
-    launch(slug, cmd)
+    made = not d.exists()
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        if has_file:
+            fname = "upload_" + re.sub(r"[^\w.-]+", "_", tf["filename"])
+            (d / fname).write_bytes(tf["data"])
+            texts.append(str(d / fname))
+        if has_audio_file:
+            # upload_*: tidied once the job is over; the extension goes into ffmpeg's list of parts, so letters only
+            ext = re.sub(r"[^a-z0-9]", "", os.path.splitext(af["filename"])[1].lower()) or "m4a"
+            (d / f"upload_audio.{ext}").write_bytes(af["data"])
+            audios.append(str(d / f"upload_audio.{ext}"))
+        py = str(PIPELINE_PY) if PIPELINE_PY.exists() else sys.executable
+        cmd = [py, str(ROOT / "pipeline" / "add_book.py")]
+        for t in texts:
+            cmd += ["--text", t]
+        for a in audios:
+            cmd += ["--audio", a]
+        if audio_ref:
+            cmd += ["--audio-ref", audio_ref]
+        if val("align") != "on":
+            cmd.append("--no-align")
+        flags = (
+            ("title", "--title"),
+            ("author", "--author"),
+            ("narrator", "--narrator"),
+            ("translator", "--translator"),
+            ("year", "--year"),
+        )
+        for k, flag in flags:
+            if val(k):
+                cmd.append(f"{flag}={val(k)}")  # one argument: a title like «-273» is not taken for an option
+        cmd += ["--", slug]
+        if not (d / "book.toml").exists():  # a stub so the card shows up as "loading" right away; add_book fills it in
+            _pipeline()
+            from manifest import toml_str
+
+            # no title of our own for a link: add_book keeps a title it finds here, and the book's is the one wanted
+            stub = {"slug": slug, "title": title, "author": val("author")}
+            lines = "".join(f"{k} = {toml_str(v)}\n" for k, v in stub.items() if v)
+            (d / "book.toml").write_text(lines, encoding="utf-8")
+        launch(slug, cmd)
+    except BaseException:
+        if made:  # an upload that could not be saved, a job that did not start: no empty folder stays behind
+            shutil.rmtree(d, ignore_errors=True)
+        raise
     return {"slug": slug}, ""
 
 

@@ -452,3 +452,30 @@ def test_a_search_called_off_stops_at_once(monkeypatch):
     with pytest.raises(sources.Cancelled):
         sources.search_text("что угодно", cancel)
     assert time.monotonic() - t0 < 2
+
+
+def test_a_round_that_ran_out_of_time_stops_its_tries(monkeypatch):
+    """A mirror still failing at the deadline is not asked again in the background, minutes after the answer."""
+    import threading
+    import time
+
+    calls = []
+
+    class Flaky:
+        name = "flaky"
+
+        def search(self, query):
+            calls.append(time.monotonic())
+            raise TimeoutError("timed out")
+
+        def author_books(self, query):
+            return "", []
+
+    monkeypatch.setattr(sources, "SOURCES", [Flaky()])
+    monkeypatch.setattr(sources, "ROUND_SECONDS", 0.3)
+    monkeypatch.setattr(sources, "PAUSE", 0.2)  # tries at 0, 0.2, 0.6, 1.2, 2.0 s if nothing stops them
+    _, _, _, errors, _ = sources.ask(["что угодно"], cancel=threading.Event())
+    asked = len(calls)
+    time.sleep(1.2)
+    assert errors == ["flaky: не ответил за 0.3 с"]
+    assert len(calls) == asked

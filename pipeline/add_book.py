@@ -33,8 +33,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from compact import aac_args  # noqa: E402
-from manifest import stamp  # noqa: E402
-from tidy import PLAYABLE, claim, land, tidy, work_dir  # noqa: E402
+from extract_text import MAX_UNPACKED, safe_name  # noqa: E402
+from manifest import clean_title, stamp, toml_str  # noqa: E402
+from tidy import PLAYABLE, land, take, tidy, work_dir  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # the same root the server uses: the Mac app keeps the books outside the code it updates
@@ -81,6 +82,8 @@ def unwrap(data: bytes, hint: str) -> tuple[bytes, str]:
         names = [i.filename for i in files]
         if "META-INF/container.xml" in names or len(files) != 1 or names[0].lower().endswith(".fb2"):
             break
+        if files[0].file_size > MAX_UNPACKED:
+            raise SystemExit(f"в архиве файл на {files[0].file_size / 1e6:.0f} МБ: это не книга")
         data, hint = z.read(files[0]), names[0]
     return data, hint
 
@@ -146,9 +149,11 @@ def download_site_images(data: bytes, src: str, d: Path) -> None:
     base = src.rsplit("/", 1)[0]
     for name in names:
         n = name.decode()
+        if not safe_name(n):
+            continue
         try:
             r = urllib.request.Request(f"{base}/images/{n}", headers=UA)
-            (d / "images" / n).write_bytes(urllib.request.urlopen(r, timeout=60).read())
+            (d / "images" / safe_name(n)).write_bytes(urllib.request.urlopen(r, timeout=60).read())
         except (OSError, ValueError):
             print("image not downloaded:", n, flush=True)
 
@@ -185,8 +190,9 @@ EXTRACTORS = {
 
 
 def build_text(sources: list[str], d: Path, title: str, author: str, w: Path) -> None:
-    """Download, extract and merge the text in the work dir `w`, then move the book in. A folder made
-    and deleted inside the library while iCloud uploads it comes back as an empty placeholder."""
+    """Download, extract and merge the text in the work dir `w`: book.json and images/ wait there until
+    the whole job is done (see land_text). A folder made and deleted inside the library while iCloud
+    uploads it comes back as an empty placeholder."""
     parts_dir = w / "parts"
     if parts_dir.exists():
         shutil.rmtree(parts_dir)
@@ -195,15 +201,14 @@ def build_text(sources: list[str], d: Path, title: str, author: str, w: Path) ->
         kind = fetch_text(src, part)
         run([PY, str(PIPE / EXTRACTORS[kind]), str(part)])
         check_real_book(json.loads((part / "book.json").read_text(encoding="utf-8")), len(sources))
-    # merge parts (a single part is copied through), then gather images into the book's images/
+    # merge parts (a single part is copied through), then gather their images beside the merged book
     cmd = [PY, str(PIPE / "merge_books.py"), str(w), "--title", title, "--author", author]
     run(cmd)
-    (d / "images").mkdir(exist_ok=True)
+    (w / "images").mkdir(exist_ok=True)
     for part in sorted(parts_dir.iterdir()):
         if (part / "images").is_dir():
             for f in (part / "images").iterdir():
-                shutil.copy(f, d / "images" / f.name)
-    land(w / "book.json", d / "book.json")
+                shutil.copy(f, w / "images" / f.name)
     shutil.rmtree(parts_dir)  # the downloads served their purpose: the merged book is all that is read
 
 
@@ -371,6 +376,17 @@ def land_audio(w: Path, d: Path) -> None:
         land(c, d / c.name)
 
 
+def land_text(w: Path, d: Path) -> None:
+    """The new text and its pictures move into the book once everything else is ready: until here a book
+    being given another text kept its old book.json, timing.json and edition, whatever happened. Another text
+    is not the old one extracted again: no map of the old sentences (editions.json, see reextract.py) leads to it."""
+    (d / "editions.json").unlink(missing_ok=True)
+    (d / "images").mkdir(exist_ok=True)
+    for f in (w / "images").iterdir() if (w / "images").is_dir() else ():
+        land(f, d / "images" / f.name)
+    land(w / "book.json", d / "book.json")
+
+
 FRAGMENT_RE = re.compile(r"конец ознакомительного фрагмента|ознакомительн\w+ фрагмент\w*|купить полную версию", re.I)
 
 
@@ -399,10 +415,12 @@ def main() -> None:
 
     # a stop (SIGTERM to the job's process group) unwinds like an error, so the cleanup below runs
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    w = take(work_dir(args.slug))  # downloads and intermediate files, outside the (iCloud) library
+    if w is None:  # a re-extraction of this book is running: its work dir is not ours to wipe
+        sys.exit(f"{args.slug}: книга уже обрабатывается")
     d = BOOKS / args.slug
     new = not d.exists()
     d.mkdir(parents=True, exist_ok=True)
-    w = claim(work_dir(args.slug))  # downloads and intermediate files, outside the (iCloud) library
     try:
         build(args, d, w)
     finally:
@@ -417,15 +435,14 @@ def build(args: argparse.Namespace, d: Path, w: Path) -> None:
         build_text(args.text, d, args.title, args.author, w)
     elif not (d / "book.json").exists():
         raise SystemExit("no text: pass --text, or use an existing book slug to attach audio")
-    book = json.loads((d / "book.json").read_text(encoding="utf-8"))
+    text = w / "book.json" if (w / "book.json").exists() else d / "book.json"  # a new text waits in w
+    book = json.loads(text.read_text(encoding="utf-8"))
 
     # new text under existing captions (an edition replaced): the word timing is rebuilt from them
     has_captions = any(d.glob("yt.*.json3")) or (d / "whisper.json3").exists()
     has_audio = any((d / name).exists() for name in PLAYABLE)
     new_audio = bool(args.audio or args.audio_ref)
     retime = bool(args.text) and not new_audio and has_captions and has_audio
-    if args.text and (retime or new_audio):
-        (d / "timing.json").unlink(missing_ok=True)  # it times the old text, which is gone already
     if retime:
         run([PY, str(PIPE / "anchors.py"), str(d), "--work", str(w)])
         run([PY, str(PIPE / "timing_from_anchors.py"), str(w)])
@@ -441,14 +458,13 @@ def build(args: argparse.Namespace, d: Path, w: Path) -> None:
         run([PY, str(PIPE / "timing_from_anchors.py"), str(w)])
 
     toml = d / "book.toml"
-    esc = lambda s: str(s).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
     meta = {}
     if toml.exists():
         import tomllib
 
         meta = tomllib.loads(toml.read_text(encoding="utf-8"))
     meta.setdefault("slug", args.slug)
-    meta["title"] = args.title or meta.get("title") or book.get("title", args.slug)
+    meta["title"] = clean_title(args.title or meta.get("title") or book.get("title", args.slug))
     meta["author"] = args.author or meta.get("author") or book.get("author", "")
     meta["language"] = args.lang
     if args.text:
@@ -462,8 +478,13 @@ def build(args: argparse.Namespace, d: Path, w: Path) -> None:
         land_audio(w, d)
     elif retime:
         land(w / "timing.json", d / "timing.json")
+    if (w / "book.json").exists():
+        land_text(w, d)
     tmp = d / "book.toml.tmp"
-    tmp.write_text("".join(f'{k} = "{esc(v)}"\n' for k, v in meta.items() if v != ""), encoding="utf-8")
+    tmp.write_text("".join(f"{k} = {toml_str(v)}\n" for k, v in meta.items() if v != ""), encoding="utf-8")
+    if toml.exists():  # the library orders new books by this time: a book given audio or a text is not new
+        st = toml.stat()
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
     os.replace(tmp, toml)
     # a new edition only with new text: it is what makes sentence positions stale; new audio shows in the sizes
     stamp(d, new_edition=bool(args.text))

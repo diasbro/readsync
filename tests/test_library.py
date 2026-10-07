@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import textwrap
 import threading
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -148,7 +150,7 @@ def test_audio_ref_becomes_a_pipeline_flag(tmp_path, monkeypatch):
     ((slug, cmd),) = launched
     assert slug == "b"
     assert cmd[cmd.index("--audio-ref") + 1] == ref
-    assert cmd[cmd.index("--narrator") + 1] == "Кир Дмитриев"
+    assert "--narrator=Кир Дмитриев" in cmd  # one argument, so a value starting with "-" is never an option
     assert "--audio" not in cmd
 
 
@@ -364,3 +366,253 @@ def test_hits_keep_the_count_of_unopenable_editions(tmp_path, monkeypatch):
     (tmp_path / "b").mkdir()
     library.save_hits("b", {"hits": [], "unopenable": 3, "query": "b"})
     assert json.loads((tmp_path / "b" / "hits.json").read_text(encoding="utf-8"))["unopenable"] == 3
+
+
+def ready_book(tmp_path: Path, monkeypatch, slug: str = "b", toml: str = 'title = "B"\nedition = "e1"\n') -> Path:
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    monkeypatch.setenv("READSYNC_DEVICE", "a" * 32)
+    d = tmp_path / slug
+    d.mkdir()
+    (d / "book.toml").write_text(toml, encoding="utf-8")
+    (d / "book.json").write_text('{"title": "B", "blocks": []}', encoding="utf-8")
+    return d
+
+
+def test_an_uploaded_recording_goes_with_the_job(tmp_path, monkeypatch):
+    """The upload is a download like any other: tidied once the job is over, never synced as part of the book."""
+    library._pipeline()
+    from tidy import tidy
+
+    d = ready_book(tmp_path, monkeypatch)
+    launched = []
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: launched.append(cmd))
+
+    job, err = library.start_job({"slug": {"value": "b"}, "audio_file": {"filename": "Book.MP3", "data": b"x" * 10}})
+
+    assert err == ""
+    (upload,) = [a for a in launched[0] if a.startswith(str(d))]
+    assert Path(upload).exists()
+    tidy(d)
+    assert not Path(upload).exists()
+
+
+def test_an_upload_name_never_reaches_ffmpegs_list(tmp_path, monkeypatch):
+    """The parts list quotes each file in '…': a quote or a line break in the extension would break it."""
+    d = ready_book(tmp_path, monkeypatch)
+    launched = []
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: launched.append(cmd))
+
+    library.start_job({"slug": {"value": "b"}, "audio_file": {"filename": "x.m4a'\nfile '/etc/x", "data": b"x"}})
+
+    (upload,) = [a for a in launched[0] if a.startswith(str(d))]
+    assert re.fullmatch(r"upload_audio\.[a-z0-9]+", Path(upload).name), upload
+
+
+def test_a_replacement_keeps_the_page_until_it_is_in(tmp_path, monkeypatch):
+    """A text replacement that fails or is called off changes nothing: the page position is still there.
+    Once the new text is in, its new edition drops the old sentence anyway."""
+    import state
+
+    d = ready_book(tmp_path, monkeypatch)
+    state.put(d, {"sent": 1234, "sentAt": 5, "sentPct": 40})
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: None)  # and the job then fails
+
+    job, err = library.start_job(
+        {"slug": {"value": "b"}, "text_url": {"value": "https://example.org/x.fb2"}, "replace": {"value": "1"}}
+    )
+
+    assert err == ""
+    assert library.load_state("b")["sent"] == 1234
+    (d / "book.toml").write_text('title = "B"\nedition = "e2"\n', encoding="utf-8")  # the job succeeded after all
+    assert "sent" not in library.load_state("b")
+
+
+def test_a_refused_form_leaves_nothing_behind(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: pytest.fail("launched"))
+    form = {
+        "slug": {"value": "nb"},
+        "text_file": {"filename": "book.fb2", "data": b"<FictionBook/>"},
+        "audio_url": {"value": "ftp://example.org/a.mp3"},
+    }
+
+    job, err = library.start_job(form)
+
+    assert job is None and err == "ссылка на аудио должна начинаться с http(s)"
+    assert not (tmp_path / "nb").exists()
+
+
+def test_a_book_keeps_its_place_in_the_library_when_renamed(tmp_path, monkeypatch):
+    """New books come first by the time they were added; a rename does not make a book new."""
+    d = ready_book(tmp_path, monkeypatch)
+    os.utime(d / "book.toml", (1_000_000_000, 1_000_000_000))
+
+    library.rename_book("b", "Другое название")
+
+    (book,) = library.list_books()
+    assert book["title"] == "Другое название"
+    assert book["added"] == 1_000_000_000_000
+
+
+def test_a_book_is_not_deleted_under_a_job_that_just_started(tmp_path, monkeypatch):
+    """The server starts a job under STATE_LOCK: a delete waiting for the lock must see that job."""
+    d = ready_book(tmp_path, monkeypatch)
+    procs = []
+
+    def launch(slug, cmd):
+        procs.append(subprocess.Popen(["sleep", "5"]))
+        library.JOBS[slug] = {"proc": procs[-1], "started": time.time(), "slug": slug}
+
+    monkeypatch.setattr(library, "launch", launch)
+    errors = []
+
+    def delete():
+        try:
+            library.delete_book("b")
+        except ValueError as e:
+            errors.append(str(e))
+
+    t = threading.Thread(target=delete)
+    try:
+        with library.STATE_LOCK:  # as serve.do_POST holds it around start_job
+            t.start()
+            time.sleep(0.2)  # the delete is waiting for the lock by now
+            job, err = library.start_job({"slug": {"value": "b"}, "audio_url": {"value": "https://example.org/a"}})
+            assert err == ""
+        t.join(5)
+        assert errors == ["книга ещё загружается"]
+        assert d.is_dir()
+    finally:
+        for p in procs:
+            p.kill()
+            p.wait()
+        library.JOBS.clear()
+
+
+def test_a_title_with_a_line_break_keeps_book_toml_readable(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: None)
+
+    job, err = library.start_job(
+        {"title": {"value": "Война и мир.\n Том 1\x07"}, "text_url": {"value": "https://example.org/x.fb2"}}
+    )
+
+    assert err == ""
+    meta = tomllib.loads((tmp_path / job["slug"] / "book.toml").read_text(encoding="utf-8"))
+    assert meta["title"] == "Война и мир.\n Том 1\x07"
+
+
+def test_a_link_with_a_comma_stays_one_link(tmp_path, monkeypatch):
+    """Wikisource keeps commas in its titles: «Hamlet, Prince of Denmark» is one link, not two."""
+    from sources.wikisource import Wikisource
+
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    launched = []
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: launched.append(cmd))
+    (hit,) = Wikisource().pages({"query": {"pages": [{"title": "Hamlet, Prince of Denmark", "index": 1}]}}, "en")
+
+    job, err = library.start_job({"title": {"value": "Hamlet"}, "text_url": {"value": hit["url"]}})
+
+    assert err == ""
+    assert launched[0][launched[0].index("--text") + 1] == hit["url"]
+    assert library.form_values({"audio_url": {"value": "https://a/1\nhttps://a/2 https://a/3"}}, "audio_url") == [
+        "https://a/1",
+        "https://a/2",
+        "https://a/3",
+    ]
+
+
+def test_a_position_that_is_not_a_number_does_not_break_the_library(tmp_path, monkeypatch):
+    """One device file holding a string (a phone build with a bug, a hand edit) is read as no position."""
+    import state
+
+    d = ready_book(tmp_path, monkeypatch)
+    book = {
+        "title": "B",
+        "chapters": [{"title": "I"}],
+        "blocks": [{"kind": "p", "chapter": 0, "text": "Раз. Два.", "sentences": [[0, 4], [5, 9]]}],
+    }
+    (d / "book.json").write_text(json.dumps(book, ensure_ascii=False), encoding="utf-8")
+    state.put(d, {"pos": "x", "posAt": 1, "sent": "x", "sentAt": 1, "sentPct": "99"})
+
+    (listed,) = library.list_books()
+
+    assert listed["state"]["pos"] == 0 and not listed["state"]["atEnd"]
+    assert library.where_now("b")["text"] == "Раз."
+
+
+def test_a_rename_keeps_no_control_characters(tmp_path, monkeypatch):
+    """A pasted title may carry a bell or a line break: the title is one line of text, book.toml stays readable."""
+    d = ready_book(tmp_path, monkeypatch)
+
+    library.rename_book("b", "Новое\x07 название\n")
+
+    assert tomllib.loads((d / "book.toml").read_text(encoding="utf-8"))["title"] == "Новое название"
+
+
+def test_a_new_book_named_like_one_in_the_library_gets_its_own_folder(tmp_path, monkeypatch):
+    """Two books may share a title (another author, a title the slug cannot tell apart): the second is not refused."""
+    ready_book(tmp_path, monkeypatch, slug="rasskazy")
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: None)
+    form = {
+        "title": {"value": "Рассказы"},
+        "author": {"value": "Чехов"},
+        "text_url": {"value": "https://example.org/1"},
+    }
+
+    job, err = library.start_job(form)
+    assert (job, err) == ({"slug": "rasskazy-2"}, "")
+    (tmp_path / "rasskazy-2" / "book.json").write_text("{}", encoding="utf-8")
+    assert library.start_job(form) == ({"slug": "rasskazy-3"}, "")
+    assert 'title = "B"' in (tmp_path / "rasskazy" / "book.toml").read_text(encoding="utf-8")
+
+
+def test_a_saved_title_keeps_the_catalogs_its_search_missed(tmp_path, monkeypatch):
+    """After a reload the card still says the search failed, not that no catalog has the book."""
+    monkeypatch.setattr(library, "WISHLIST_FILE", tmp_path / "wishlist.json")
+    (item,) = library.wishlist_add({"title": "Дао Дэ Цзин"})
+
+    library.wishlist_update(item["id"], {"hits": [], "searched": "2026-10-07", "failed": ["Флибуста", "Coollib"]})
+
+    assert library.load_wishlist()[0]["failed"] == ["Флибуста", "Coollib"]
+
+
+def test_a_second_book_of_the_same_title_while_the_first_loads_gets_its_own_folder(tmp_path, monkeypatch):
+    """The first is only a stub book.toml while its job runs: its folder is taken all the same."""
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: None)
+    library._pipeline()
+    from tidy import claim, work_dir
+
+    (tmp_path / "kniga").mkdir()
+    (tmp_path / "kniga" / "book.toml").write_text('slug = "kniga"\ntitle = "Kniga"\n', encoding="utf-8")
+    claim(work_dir("kniga"))  # its job, loading
+
+    job, err = library.start_job({"title": {"value": "Kniga"}, "text_url": {"value": "https://example.org/b2"}})
+
+    assert (job, err) == ({"slug": "kniga-2"}, "")
+    assert (tmp_path / "kniga" / "book.toml").read_text(encoding="utf-8") == 'slug = "kniga"\ntitle = "Kniga"\n'
+
+
+def test_a_rename_waits_for_the_job_holding_the_book(tmp_path, monkeypatch):
+    """A job (or a reextract) rewrites book.toml itself: a rename meanwhile would be lost, so it is refused."""
+    d = ready_book(tmp_path, monkeypatch)
+    library._pipeline()
+    from tidy import claim, work_dir
+
+    w = claim(work_dir("b"))
+    with pytest.raises(library.Busy, match="обрабатывается"):
+        library.rename_book("b", "Новое")
+    assert 'title = "B"' in (d / "book.toml").read_text(encoding="utf-8")
+    (w / "pid").write_text("1", encoding="utf-8")  # the job is over
+    library.rename_book("b", "Новое")
+    assert 'title = "Новое"' in (d / "book.toml").read_text(encoding="utf-8")
+
+
+def test_slugify_reads_combining_letters_as_themselves():
+    """W27: NFC first, then each code point; the cut keeps a dash it lands on (the phone does the same)."""
+    assert library.slugify("Мастер и Маргарита") == "master-i-margarita"
+    assert library.slugify("Чаи\u0306ка") == library.slugify("Чайка") == "chayka"
+    assert library.slugify("е\u0301ль") == "e-l"  # е with a stress mark: no letter of its own
+    assert library.slugify("a" * 47 + " b") == "a" * 47 + "-"
+    assert library.slugify("!!!") == "book"

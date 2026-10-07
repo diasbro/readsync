@@ -14,7 +14,7 @@ VECTORS = json.loads((Path(__file__).parent / "state_vectors.json").read_text(en
 
 def test_shared_merge_vectors():
     for v in VECTORS:
-        assert state.merge(v["files"], v["edition"]) == v["merged"], v["name"]
+        assert state.merge(v["files"], v["edition"], v.get("editions")) == v["merged"], v["name"]
 
 
 def book(tmp_path: Path, edition: str = "e1") -> Path:
@@ -197,3 +197,64 @@ def test_a_done_patch_writes_both_keys_and_an_older_one_does_not_overwrite(tmp_p
     assert on_disk["shelf"] == "done" and on_disk["finished"] == ["2026-10-07"] and on_disk["finishedAt"] == 50
     merged = state.put(d, {"shelf": "reading", "shelfAt": 40, "finished": [], "finishedAt": 40})
     assert merged["shelf"] == "done" and merged["finished"] == ["2026-10-07"]
+
+
+def test_a_sentence_from_a_page_of_the_old_text_is_not_taken(tmp_path, monkeypatch):
+    """A tab left open across a text replacement still counts sentences in the old text: its page turns
+    must not land as positions in the new one. A page that names no edition is taken as before."""
+    monkeypatch.setenv("READSYNC_DEVICE", "a" * 32)
+    d = book(tmp_path, "e2")
+    state.put(d, {"sent": 10, "sentAt": 1, "sentEdition": "e2"})
+
+    merged = state.put(d, {"sent": 1234, "sentAt": 2, "sentEdition": "e1"})
+
+    assert merged["sent"] == 10
+    assert state.put(d, {"sent": 11, "sentAt": 3})["sent"] == 11
+
+
+def test_a_text_extracted_again_keeps_the_page(tmp_path, monkeypatch):
+    """editions.json maps the old edition's sentences: the position read in it is translated, and a tab
+    still showing the old text saves its page in the new numbering."""
+    monkeypatch.setenv("READSYNC_DEVICE", "a" * 32)
+    d = book(tmp_path, "e1")
+    state.put(d, {"sent": 3, "sentAt": 5, "sentPct": 20, "sentEdition": "e1"})
+    maps = {"e1": [0, 1, 1, 2, 4], "e0": "broken"}
+    (d / "editions.json").write_text(json.dumps({"edition": "e2", "maps": maps}), encoding="utf-8")
+    assert state.load(d)["sent"] == 3  # the map leads to the next edition: not used while the book is e1
+    (d / "book.toml").write_text('title = "B"\nedition = "e2"\n', encoding="utf-8")
+
+    assert state.load(d)["sent"] == 2
+    assert state.editions_of(d) == {"edition": "e2", "maps": {"e1": [0, 1, 1, 2, 4]}}
+
+    merged = state.put(d, {"sent": 4, "sentAt": 6, "sentPct": 30, "sentEdition": "e1"})
+    assert merged["sent"] == 4
+    saved = json.loads(own(d).read_text(encoding="utf-8"))
+    assert (saved["sent"], saved["sentEdition"]) == (4, "e2")
+    assert state.put(d, {"sent": 9, "sentAt": 7, "sentEdition": "e0"})["sent"] == 4  # no usable map for e0
+
+
+def test_a_map_leading_to_another_edition_is_not_used(tmp_path, monkeypatch):
+    """editions.json names the edition its maps lead to: a text replaced since (or a new edition stamped by
+    hand) is not that edition, so a stale map is ignored instead of taking its indices for the new text's."""
+    monkeypatch.setenv("READSYNC_DEVICE", "c" * 32)
+    d = book(tmp_path, "e3")
+    (d / "state").mkdir()
+    (d / "editions.json").write_text(json.dumps({"edition": "e2", "maps": {"e1": [0, 5, 9, 12]}}), encoding="utf-8")
+    (d / "state" / ("b" * 32 + ".json")).write_text(
+        json.dumps({"sent": 2, "sentAt": 5, "sentEdition": "e1"}), encoding="utf-8"
+    )
+    assert "sent" not in state.load(d)
+    assert "sent" not in state.put(d, {"sent": 1, "sentAt": 9, "sentEdition": "e1"})
+    (d / "editions.json").write_text(json.dumps({"e1": [0, 5, 9, 12]}), encoding="utf-8")  # no edition named: no map
+    assert state.editions_of(d) == {} and "sent" not in state.load(d)
+
+
+def test_the_merged_sentence_names_its_edition(tmp_path, monkeypatch):
+    """A page that loaded another text can tell the merged sentence is not in its numbering."""
+    monkeypatch.setenv("READSYNC_DEVICE", "a" * 32)
+    d = book(tmp_path, "e2")
+    (d / "editions.json").write_text(json.dumps({"edition": "e2", "maps": {"e1": [0, 3, 4]}}), encoding="utf-8")
+    assert "sentEdition" not in state.put(d, {"pos": 1, "posAt": 1})
+    merged = state.put(d, {"sent": 1, "sentAt": 2, "sentEdition": "e1"})
+    assert (merged["sent"], merged["sentEdition"]) == (3, "e2")
+    assert state.load(d)["sentEdition"] == "e2"

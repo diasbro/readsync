@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import signal
@@ -274,3 +275,153 @@ def test_a_file_packed_twice_is_unpacked():
     assert add_book.sniff(data, name) == "pdf"
     fb2zip = packed("book.fb2", b"<FictionBook/>")
     assert add_book.unwrap(fb2zip, "b.fb2.zip") == (fb2zip, "b.fb2.zip")
+
+
+def book_with_audio(tmp_path: Path, monkeypatch) -> Path:
+    """A finished audiobook: text, audio, its captions and timing, stamped."""
+    from manifest import stamp
+
+    monkeypatch.setattr(add_book, "BOOKS", tmp_path)
+    d = tmp_path / "b"
+    d.mkdir()
+    (d / "book.json").write_text(json.dumps({"title": "Old", "blocks": []}), encoding="utf-8")
+    (d / "audio.m4a").write_bytes(b"audio" * 10)
+    (d / "timing.json").write_text('{"words": [[0, 0, 1, 0.0, 0.5]]}', encoding="utf-8")
+    (d / "yt.merged.json3").write_text('{"events": []}', encoding="utf-8")
+    (d / "book.toml").write_text('title = "B"\n', encoding="utf-8")
+    stamp(d)
+    return d
+
+
+def new_text(src, d, title, author, w):
+    """build_text as it ends: the merged book and its pictures in the work dir."""
+    (w / "images").mkdir()
+    (w / "images" / "cover.jpg").write_bytes(b"new cover")
+    (w / "book.json").write_text(json.dumps({"title": "New", "blocks": [{"text": "x" * 500}]}), encoding="utf-8")
+
+
+def test_a_text_replacement_that_fails_leaves_the_book_as_it_was(tmp_path, monkeypatch):
+    """The new text is timed against the old captions; when that fails (or the reader stops it) the book keeps
+    its text, timing and edition, and the manifest still matches the files."""
+    d = book_with_audio(tmp_path, monkeypatch)
+    before = {p.name: p.read_bytes() for p in d.iterdir()}
+
+    def run(cmd, **kw):
+        if Path(cmd[1]).name == "anchors.py":
+            raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(add_book, "build_text", new_text)
+    monkeypatch.setattr(add_book, "run", run)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "b", "--text", "https://example.org/x", "--no-align"])
+    with pytest.raises(subprocess.CalledProcessError):
+        add_book.main()
+
+    assert {p.name: p.read_bytes() for p in d.iterdir()} == before
+
+
+def test_a_new_text_and_its_pictures_land_last(tmp_path, monkeypatch, work_root):
+    """Until the timing for the new text is ready the book shows the old one; then text, pictures and a new
+    edition come in together."""
+    d = book_with_audio(tmp_path, monkeypatch)
+    old = edition(d)
+    seen = []
+
+    def run(cmd, **kw):
+        if Path(cmd[1]).name == "anchors.py":  # it times the new text, which waits in the work dir
+            seen.append((json.loads((work_root / "b" / "book.json").read_text())["title"], book_title(d)))
+        if str(cmd[1]).endswith("timing_from_anchors.py"):
+            (Path(cmd[2]) / "timing.json").write_text('{"words": []}', encoding="utf-8")
+
+    def book_title(book: Path) -> str:
+        return json.loads((book / "book.json").read_text(encoding="utf-8"))["title"]
+
+    monkeypatch.setattr(add_book, "build_text", new_text)
+    monkeypatch.setattr(add_book, "run", run)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "b", "--text", "https://example.org/x", "--no-align"])
+    add_book.main()
+
+    assert seen == [("New", "Old")]
+    assert book_title(d) == "New" and (d / "images" / "cover.jpg").read_bytes() == b"new cover"
+    assert (d / "timing.json").read_text(encoding="utf-8") == '{"words": []}'
+    assert edition(d) != old
+    meta = tomllib.loads((d / "book.toml").read_text(encoding="utf-8"))
+    assert f"book.json:{(d / 'book.json').stat().st_size}" in meta["files"]
+
+
+def test_a_title_with_a_line_break_keeps_book_toml_readable(tmp_path, monkeypatch):
+    """An FB2 title may span lines: it is kept on one, and book.toml must parse, or the book drops out of the library."""
+    from extract_fb2 import extract
+
+    src = tmp_path / "x" / "book.fb2"
+    src.parent.mkdir()
+    src.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">'
+        "<description><title-info><book-title>Война и мир.\n Том 1</book-title></title-info></description>"
+        "<body><section><p>Текст.</p></section></body></FictionBook>",
+        encoding="utf-8",
+    )
+    book = extract(src)
+    monkeypatch.setattr(add_book, "BOOKS", tmp_path)
+    monkeypatch.setattr(add_book, "run", lambda cmd, **kw: None)
+    monkeypatch.setattr(
+        add_book,
+        "build_text",
+        lambda s, d, t, a, w: (d / "book.json").write_text(json.dumps(book, ensure_ascii=False), encoding="utf-8"),
+    )
+    (tmp_path / "nb").mkdir()
+    (tmp_path / "nb" / "book.toml").write_text('slug = "nb"\n', encoding="utf-8")  # the server's stub
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "nb", "--text", "https://example.org/x.fb2", "--no-align"])
+
+    add_book.main()
+
+    assert book["title"] == "Война и мир.\n Том 1"
+    assert tomllib.loads((tmp_path / "nb" / "book.toml").read_text(encoding="utf-8"))["title"] == "Война и мир. Том 1"
+
+
+def test_a_title_that_starts_with_a_dash_reaches_the_job(tmp_path, monkeypatch):
+    """The server's command line for add_book: «-273» is a title, not an option."""
+    import library
+
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    monkeypatch.setattr(add_book, "BOOKS", tmp_path)
+    launched = []
+    monkeypatch.setattr(library, "launch", lambda slug, cmd: launched.append(cmd))
+    job, err = library.start_job(
+        {"title": {"value": "-273"}, "author": {"value": "--"}, "text_url": {"value": "https://example.org/x.fb2"}}
+    )
+    assert err == ""
+    got = []
+    monkeypatch.setattr(add_book, "build", lambda args, d, w: got.append(args))
+    monkeypatch.setattr(sys, "argv", launched[0][1:])
+
+    add_book.main()
+
+    assert (got[0].slug, got[0].title, got[0].author) == (job["slug"], "-273", "--")
+
+
+def test_image_links_of_a_page_stay_inside_its_images(tmp_path, monkeypatch):
+    """data-src comes from a downloaded page: a path in it names a picture in images/, never a file elsewhere."""
+    part = tmp_path / "w" / "parts" / "01"
+    part.mkdir(parents=True)
+    page = b'<div id="book-content"><img data-src="../../../../evil.txt"><img data-src="/abs/x.jpg"></div>'
+    monkeypatch.setattr(add_book.urllib.request, "urlopen", lambda r, timeout=0: io.BytesIO(b"picture"))
+
+    add_book.download_site_images(page, "https://evil.example/book/1/read.html", part)
+
+    assert sorted(p.name for p in (part / "images").iterdir()) == ["evil.txt", "x.jpg"]
+    assert not (tmp_path / "evil.txt").exists()
+
+
+def test_a_packed_file_too_big_for_a_book_is_not_unpacked(monkeypatch):
+    """A zip bomb served as a book is refused by the size it declares, before a byte is unpacked."""
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("book.pdf", b"%PDF-1.4 " + b"0" * 5000)
+    monkeypatch.setattr(add_book, "MAX_UNPACKED", 1000)
+    monkeypatch.setattr(zipfile.ZipFile, "read", lambda *a: pytest.fail("unpacked"))
+
+    with pytest.raises(SystemExit, match="это не книга"):
+        add_book.unwrap(buf.getvalue(), "book.zip")
