@@ -1,0 +1,301 @@
+[
+ {
+  "file": "povest.fb2",
+  "kind": "fb2",
+  "images": {
+   "cover.jpg": "d20f6ffd523b78a86cd2f916fa34af5d1918d75f7b142237c752ad6b254213ab",
+   "map.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
+  },
+  "title": "Повесть о маяке",
+  "author": "Пётр Выдумкин",
+  "text_end": 169,
+  "fragment_note": "",
+  "words": 880,
+  "book": "povest.fb2.book.json"
+ },
+ {
+  "file": "rasskaz-1251.fb2",
+  "kind": "fb2",
+  "images": {},
+  "title": "Рассказ в три дня",
+  "author": "Вера Придумова",
+  "text_end": 152,
+  "fragment_note": "",
+  "words": 772,
+  "book": "rasskaz-1251.fb2.book.json"
+ },
+ {
+  "file": "sbornik.fb2.zip",
+  "kind": "fb2zip",
+  "images": {},
+  "title": "Сборник туманов",
+  "author": "Олег Небывалов",
+  "text_end": 130,
+  "fragment_note": "",
+  "words": 686,
+  "book": "sbornik.fb2.zip.book.json"
+ },
+ {
+  "file": "kniga.epub",
+  "kind": "epub",
+  "images": {
+   "cover.jpg": "d20f6ffd523b78a86cd2f916fa34af5d1918d75f7b142237c752ad6b254213ab",
+   "fig1.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
+  },
+  "title": "Книга реки",
+  "author": "Анна Сочинская",
+  "text_end": 148,
+  "fragment_note": "",
+  "words": 807,
+  "book": "kniga.epub.book.json"
+ },
+ {
+  "file": "zapiska.epub",
+  "kind": "epub",
+  "images": {
+   "cover.jpeg": "d20f6ffd523b78a86cd2f916fa34af5d1918d75f7b142237c752ad6b254213ab"
+  },
+  "title": "Записка о тумане",
+  "author": "Иван Небыль",
+  "text_end": 131,
+  "fragment_note": "Конец ознакомительного фрагмента",
+  "words": 654,
+  "book": "zapiska.epub.book.json"
+ },
+ {
+  "file": "stil.epub",
+  "kind": "epub",
+  "images": {
+   "fig.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
+  },
+  "title": "Книга со стилем",
+  "author": "Анна Сочинская",
+  "text_end": 161,
+  "fragment_note": "",
+  "words": 809,
+  "book": "stil.epub.book.json"
+ },
+ {
+  "file": "primechaniya.epub",
+  "kind": "epub",
+  "images": {
+   "a_b.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0",
+   "fig.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
+  },
+  "title": "Примечания & картинки",
+  "author": "Анна Сочинская",
+  "text_end": 195,
+  "fragment_note": "",
+  "words": 1007,
+  "book": "primechaniya.epub.book.json"
+ },
+ {
+  "file": "spisok.epub",
+  "kind": "epub",
+  "images": {},
+  "title": "Список",
+  "author": "Иван Небыль",
+  "text_end": 121,
+  "fragment_note": "",
+  "words": 576,
+  "book": "spisok.epub.book.json"
+ },
+ {
+  "file": "stihi.fb2",
+  "kind": "fb2",
+  "images": {},
+  "title": "Стихи и проза",
+  "author": "Олег Небывалов",
+  "text_end": 145,
+  "fragment_note": "",
+  "words": 737,
+  "book": "stihi.fb2.book.json"
+ },
+ {
+  "file": "kartinki.fb2",
+  "kind": "fb2",
+  "images": {
+   "big.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0",
+   "g1.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0",
+   "g2.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
+  },
+  "title": "Знаки и гадания",
+  "author": "Олег Небывалов",
+  "text_end": 130,
+  "fragment_note": "",
+  "words": 729,
+  "book": "kartinki.fb2.book.json"
+ },
+ {
+  "file": "polnota.fb2",
+  "kind": "fb2",
+  "images": {
+   "end1.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0",
+   "end2.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0",
+   "s.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0",
+   "start2.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0",
+   "t.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
+  },
+  "title": "Полнота",
+  "author": "Олег Небывалов",
+  "text_end": 157,
+  "fragment_note": "",
+  "words": 714,
+  "book": "polnota.fb2.book.json"
+ },
+ {
+  "file": "nebrezhno.fb2",
+  "kind": "fb2",
+  "images": {
+   "good.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
+  },
+  "title": "Небрежная книга",
+  "author": "Вера Придумова",
+  "text_end": 97,
+  "fragment_note": "",
+  "words": 526,
+  "book": "nebrezhno.fb2.book.json"
+ },
+ {
+  "file": "kraya.fb2",
+  "kind": "fb2",
+  "images": {
+   "pic.png": "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
+  },
+  "title": "Края",
+  "author": "Олег Небывалов",
+  "text_end": 115,
+  "fragment_note": "",
+  "words": 638,
+  "book": "kraya.fb2.book.json"
+ },
+ {
+  "file": "bityj-1251.fb2",
+  "kind": "fb2",
+  "images": {},
+  "title": "Битая книга",
+  "author": "Вера Придумова",
+  "text_end": 119,
+  "fragment_note": "",
+  "words": 629,
+  "book": "bityj-1251.fb2.book.json"
+ },
+ {
+  "file": "zapiski.txt",
+  "kind": "txt",
+  "images": {},
+  "title": "zapiski",
+  "author": "",
+  "text_end": 136,
+  "fragment_note": "",
+  "words": 757,
+  "book": "zapiski.txt.book.json"
+ },
+ {
+  "file": "dnevnik-1251.txt",
+  "kind": "txt",
+  "images": {},
+  "title": "dnevnik-1251",
+  "author": "",
+  "text_end": 121,
+  "fragment_note": "",
+  "words": 655,
+  "book": "dnevnik-1251.txt.book.json"
+ },
+ {
+  "file": "dnevnik-koi8.txt",
+  "kind": "txt",
+  "images": {},
+  "title": "dnevnik-koi8",
+  "author": "",
+  "text_end": 121,
+  "fragment_note": "",
+  "words": 655,
+  "same_as": "dnevnik-1251.txt",
+  "book": "dnevnik-koi8.txt.book.json"
+ },
+ {
+  "file": "dnevnik-866.txt",
+  "kind": "txt",
+  "images": {},
+  "title": "dnevnik-866",
+  "author": "",
+  "text_end": 121,
+  "fragment_note": "",
+  "words": 655,
+  "same_as": "dnevnik-1251.txt",
+  "book": "dnevnik-866.txt.book.json"
+ },
+ {
+  "file": "rukopis.txt",
+  "kind": "txt",
+  "images": {},
+  "title": "rukopis",
+  "author": "",
+  "text_end": 116,
+  "fragment_note": "",
+  "words": 597,
+  "book": "rukopis.txt.book.json"
+ },
+ {
+  "file": "zametki.txt",
+  "kind": "txt",
+  "images": {},
+  "title": "zametki",
+  "author": "",
+  "text_end": 136,
+  "fragment_note": "",
+  "words": 716,
+  "book": "zametki.txt.book.json"
+ },
+ {
+  "file": "doklad.pdf",
+  "kind": "pdf",
+  "images": {},
+  "title": "Доклад о маяках",
+  "author": "Пётр Выдумкин",
+  "text_end": 117,
+  "fragment_note": "",
+  "words": 637,
+  "book": "doklad.pdf.book.json"
+ },
+ {
+  "file": "doklad.pdf.zip",
+  "kind": "pdf",
+  "images": {},
+  "title": "Доклад о маяках",
+  "author": "Пётр Выдумкин",
+  "text_end": 117,
+  "fragment_note": "",
+  "words": 637,
+  "book": "doklad.pdf.zip.book.json"
+ },
+ {
+  "file": "lekcii.pdf",
+  "kind": "pdf",
+  "images": {},
+  "title": "Лекции о маяках",
+  "author": "Пётр Выдумкин",
+  "text_end": 145,
+  "fragment_note": "",
+  "words": 769,
+  "book": "lekcii.pdf.book.json"
+ },
+ {
+  "file": "zaglushka.fb2",
+  "kind": "fb2",
+  "python_error": "на сайте вместо книги заглушка: «Книга заблокирована по требованию правообладателя.». Возьми другое издание",
+  "error": "заглушка"
+ },
+ {
+  "file": "korotko.txt",
+  "kind": "txt",
+  "python_error": "в файле всего 5 слов, это не книга. Возьми другое издание",
+  "error": "500 слов"
+ },
+ {
+  "file": "prochee.zip",
+  "python_error": "в архиве docx; поддерживаются fb2, epub, pdf, txt, html",
+  "error": "нет книги"
+ }
+]

@@ -1,10 +1,15 @@
 """Merge several extracted parts (book.json files) into one book: each part becomes a level-1
-section, block and chapter indices are renumbered, notes are prefixed per part."""
+section, block and chapter indices are renumbered, notes are prefixed per part. A part that opens with
+its own title block keeps it as the only narrated heading: its level-1 entry is for the contents alone."""
 
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from extract_text import dump_book  # noqa: E402
 
 
 def merge(parts: list[tuple[str, dict]], title: str = "", author: str = "") -> dict:
@@ -21,28 +26,24 @@ def merge(parts: list[tuple[str, dict]], title: str = "", author: str = "") -> d
     for i, (part_title, book) in enumerate(parts, 1):
         prefix = f"p{i}_"
         base_ch = len(chapters)
-        chapters.append(
-            {
-                "id": f"part{i}",
-                "title": part_title or book.get("title") or f"Часть {i}",
-                "level": 1,
-                "first_block": len(blocks),
-            }
-        )
-        blocks.append(
-            {
-                "images": [],
-                "id": f"part{i}-title",
-                "kind": "title",
-                "chapter": base_ch,
-                "stanza": None,
-                "text": part_title or book.get("title") or f"Часть {i}",
-                "em": [],
-                "notes": [],
-                "sentences": [[0, len(part_title or book.get("title") or f"Часть {i}")]],
-                "audio": True,
-            }
-        )
+        name = part_title or book.get("title") or f"Часть {i}"
+        chapters.append({"id": f"part{i}", "title": name, "level": 1, "first_block": len(blocks)})
+        own_title = bool(book["blocks"]) and book["blocks"][0].get("kind") == "title"
+        if not own_title:  # a heading to hear where the part begins, unless the part brings its own
+            blocks.append(
+                {
+                    "images": [],
+                    "id": f"part{i}-title",
+                    "kind": "title",
+                    "chapter": base_ch,
+                    "stanza": None,
+                    "text": name,
+                    "em": [],
+                    "notes": [],
+                    "sentences": [[0, len(name)]],
+                    "audio": True,
+                }
+            )
         offset = len(chapters)
         for ch in book["chapters"]:
             c = dict(ch)
@@ -54,7 +55,7 @@ def merge(parts: list[tuple[str, dict]], title: str = "", author: str = "") -> d
             nb = dict(b)
             nb["chapter"] = b["chapter"] + offset
             nb["id"] = prefix + str(b["id"])
-            nb["notes"] = [{"pos": n["pos"], "id": prefix + n["id"]} for n in b.get("notes", [])]
+            nb["notes"] = [{**n, "id": prefix + n["id"]} for n in b.get("notes", [])]  # the marker `m` too
             nb["images"] = [im if isinstance(im, dict) else {"src": im} for im in b.get("images", [])]
             blocks.append(nb)
         for k, v in book.get("notes", {}).items():
@@ -85,7 +86,7 @@ def main() -> None:
             ((p / "title.txt").read_text(encoding="utf-8").strip() if (p / "title.txt").exists() else "", book)
         )
     merged = merge(parts, args.title, args.author)
-    (args.book_dir / "book.json").write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+    (args.book_dir / "book.json").write_text(dump_book(merged), encoding="utf-8")
     print(f"merged parts={len(parts)} chapters={len(merged['chapters'])} blocks={len(merged['blocks'])}")
 
 
