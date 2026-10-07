@@ -15,6 +15,7 @@ class OpdsSource:
     name = "opds"
     base = ""
     search_url = ""  # search feed; the query is appended
+    seconds = 30  # a shelf is several pages, and a mirror that is down answers none
 
     def entries(self, xml: str) -> list[dict]:
         """Book entries of a feed as hits, with what the catalog states: authors, translator, year, size, format."""

@@ -10,7 +10,8 @@ import time
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, wait
 
-from .base import OPENS, SOURCE_ORDER, editions, fallbacks, matched, norm_title, terms, title_score
+from . import base
+from .base import OPENS, answers_whole_query, editions, fallbacks, matched, norm_title, said_words, terms, title_score
 from .bia import Bia
 from .coollib import Coollib
 from .fantasy_worlds import FantasyWorlds
@@ -65,7 +66,8 @@ def ask(
     """Every term against every source, all at once: title hits, plus the books of an author named by
     one of `author_queries` (the whole query at first; its first and last words when that found nothing).
     Each request is retried while its failure is transient (`TRIES`). Sources in `skip` sit the round out;
-    the names of the ones that failed even so come back with the errors."""
+    the names of the ones that failed even so come back with the errors. A source may declare its own
+    `seconds`, counted from when a request is made: past it the round stops waiting for that request."""
     cancel = cancel or threading.Event()
     over = threading.Event()  # the round's own end, a cancel's or its deadline's: tries still running stop at it
     hits: list[dict] = []
@@ -73,33 +75,55 @@ def ask(
     errors: list[str] = []
     failed: set[str] = set()
     author_name = ""
-    # not a `with`: leaving it would wait for a request hanging on a dead mirror, and the round is over
-    ex = ThreadPoolExecutor(max_workers=len(SOURCES) * PER_SOURCE)
-    futures = {}
+    budget = {s.name: min(getattr(s, "seconds", ROUND_SECONDS), ROUND_SECONDS) for s in SOURCES}
+    started: dict[int, float] = {}  # when each request was made: a budget runs from there, not from the queue
+
+    def run(i: int, fn, arg: str):
+        started[i] = time.monotonic()
+        base.ROUND.over = over
+        return retrying(fn, arg, over)
+
+    jobs = []
     for s in SOURCES:
         if s.name in skip:
             continue
-        for query in queries:
-            futures[ex.submit(retrying, s.search, query, over)] = (s.name, "title")
-        for author_query in author_queries:
-            futures[ex.submit(retrying, s.author_books, author_query, over)] = (s.name, "author")
+        jobs += [(s.name, "title", s.search, query) for query in queries]
+        jobs += [(s.name, "author", s.author_books, query) for query in author_queries]
+    # not a `with`: leaving it would wait for a request hanging on a dead mirror, and the round is over
+    ex = ThreadPoolExecutor(max_workers=len(SOURCES) * PER_SOURCE)
+    futures = {ex.submit(run, i, fn, arg): (name, what, i) for i, (name, what, fn, arg) in enumerate(jobs)}
     # wait in short steps, so «отменить» ends the round at once and not when the slowest mirror gives up
-    deadline, late = time.monotonic() + ROUND_SECONDS, set(futures)
-    while late and not cancel.is_set() and time.monotonic() < deadline:
-        _, late = wait(late, timeout=min(0.25, max(0.0, deadline - time.monotonic())))
+    deadline, waiting = time.monotonic() + ROUND_SECONDS, set(futures)
+    while waiting and not cancel.is_set() and time.monotonic() < deadline:
+        now = time.monotonic()
+        ends = {}
+        for f in waiting:
+            name, _, i = futures[f]
+            if not f.done():
+                ends[f] = started[i] + budget[name] if i in started else deadline
+        waiting = {f for f, end in ends.items() if now < end}
+        if waiting:
+            wait(waiting, timeout=min(0.25, min(ends[f] for f in waiting) - now))
     over.set()
     ex.shutdown(wait=False, cancel_futures=True)
     if cancel.is_set():
         raise Cancelled
+    # read after the queue is dropped: a request that never started is cancelled now and counts as late
+    late = {f for f in futures if not f.done() or f.cancelled()}
     for f in late:
-        failed.add(futures[f][0])
-        errors.append(f"{futures[f][0]}: не ответил за {ROUND_SECONDS} с")
+        name = futures[f][0]
+        failed.add(name)
+        errors.append(f"{name}: не ответил за {budget[name]} с")
     for f in futures:  # in the order they were submitted, so the same search returns the same list
         if f in late:
             continue
-        n, what = futures[f]
+        n, what, _ = futures[f]
         try:
             res = f.result()
+        except Cancelled:  # the round ended between two tries
+            failed.add(n)
+            errors.append(f"{n}: не ответил за {budget[n]} с")
+            continue
         except Exception as e:  # noqa: BLE001
             failed.add(n)
             errors.append(f"{n}: {e}")
@@ -121,7 +145,7 @@ def unique(hits: list[dict], dropped: list[int] | None = None) -> list[dict]:
     links: set[tuple[str, str]] = set()
     files: set[tuple] = set()
     out = []
-    order = {n: i for i, n in enumerate(SOURCE_ORDER)}
+    order = {n: i for i, n in enumerate(base.SOURCE_ORDER)}
     for h in sorted(hits, key=lambda h: order.get(h.get("source", ""), 9)):  # the mirror kept is the preferred one
         if h.get("kind") not in OPENS:
             if dropped is not None and (h.get("source", ""), h.get("url", "")) not in links:
@@ -161,21 +185,25 @@ def search_text(query: str, cancel: threading.Event | None = None) -> dict:
     cancel = cancel or threading.Event()
     hits, by_author, author_name, errors, failed = ask([query], author_queries=(query,), cancel=cancel)
     words = terms(query)
+    said = said_words(query)
     note = ""
-    if not hits and words and len(norm_title(query).split()) > 1:
-        note = "по названию целиком ничего; ниже то, что нашлось по словам"
+    # shorter searches follow unless a row names every word of the query
+    if words and len(norm_title(query).split()) > 1 and not any(answers_whole_query(words, h) for h in hits):
         # a query like "технология принятия решений виногродский" names a book and its author at once, the
         # author at either end; a catalog that failed the first round after all its tries is not asked again
         raw = [w for w in norm_title(query).split() if w in words]
         ends = tuple(dict.fromkeys(w for w in (raw[:1] + raw[-1:]) if w)) or (words[0],)
-        hits, more_by_author, name, errs, _ = ask(
+        more, more_by_author, name, errs, _ = ask(
             fallbacks(query, SHORTER_TRIES), author_queries=ends, skip=frozenset(failed), cancel=cancel
         )
         by_author += more_by_author
         author_name = author_name or name
         errors += errs
-        need = min(2, len(words))  # a single shared word is a coincidence, two are a match
-        hits = [h for h in hits if matched(words, h) >= need]
+        need = min(2, len(said))  # a single shared word is a coincidence, two are a match
+        added = [h for h in more if matched(said, h) >= need]
+        hits += added
+        if added or not hits:
+            note = "целиком запрос не нашёлся; ниже то, что нашлось по словам"
     # a title hit by an author the query names belongs to the author block
     want = set(norm_title(query).split())
     by_query_author = [h for h in hits if want and want <= set(norm_title(h["author"]).split())]

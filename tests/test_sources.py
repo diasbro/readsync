@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import sources
 from sources import base
 from sources.flibusta import Flibusta
@@ -479,3 +482,217 @@ def test_a_round_that_ran_out_of_time_stops_its_tries(monkeypatch):
     time.sleep(1.2)
     assert errors == ["flaky: не ответил за 0.3 с"]
     assert len(calls) == asked
+
+
+# ---------------------------------------------------------------- search rounds
+
+
+def test_a_catalog_past_its_own_budget_does_not_hold_the_round(monkeypatch):
+    """A catalog that names its own `seconds` is not waited for past it: the rows of the others are the
+    answer, and the search does not hang on one mirror for the whole round."""
+    gate = threading.Event()  # a request already in flight: nothing can call it back
+
+    class Slow:
+        name = "slow"
+        seconds = 0.3
+
+        def search(self, query):
+            gate.wait(10)
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    class Quick:
+        name = "quick"
+
+        def search(self, query):
+            return [base.hit("quick", "Книга перемен", "https://x/1.fb2", "fb2")]
+
+        def author_books(self, query):
+            return "", []
+
+    monkeypatch.setattr(sources, "SOURCES", [Slow(), Quick()])
+    monkeypatch.setattr(sources, "ROUND_SECONDS", 30)
+    t0 = time.monotonic()
+    try:
+        hits, _, _, errors, failed = sources.ask(["книга перемен"], cancel=threading.Event())
+        spent = time.monotonic() - t0
+    finally:
+        gate.set()  # the hanging request is let go: the test does not carry it into the next one
+    assert spent < 2, f"ждали медленный каталог {spent:.1f} с"
+    assert [h["title"] for h in hits] == ["Книга перемен"]  # the fast catalog answered while it hung
+    assert errors == ["slow: не ответил за 0.3 с"] and failed == {"slow"}
+
+
+def test_a_short_word_of_a_title_counts_for_a_match():
+    """«Лунь юй» is a title of two two-letter words. The words a phrase search may ask for are the long
+    ones, but a row that names the short ones too is that book and not a coincidence."""
+    assert base.said_words("Лунь юй Виногродский") == ["лунь", "юй", "виногродский"]
+    assert base.terms("Лунь юй Виногродский") == ["виногродский", "лунь"]  # what the catalogs are asked
+
+
+def test_a_title_of_short_words_is_found_by_its_first_words(monkeypatch):
+    class Catalog:
+        name = "gutenberg"
+
+        def search(self, query):
+            if query == "лунь юй":
+                return [base.hit(self.name, "Лунь Юй", "https://x/1.fb2", "fb2", author="Конфуций")]
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr(sources, "SOURCES", [Catalog()])
+    res = sources.search_text("Лунь юй Виногродский")
+    assert [r["title"] for r in res["hits"]] == ["Лунь Юй"]
+
+
+def test_a_row_that_names_part_of_the_query_does_not_stop_the_shorter_searches(monkeypatch):
+    """A row that names only some words of the query is not the book: the shorter searches still run."""
+
+    class Partial:
+        name = "wikisource"
+
+        def search(self, query):
+            return [base.hit(self.name, "ПУТЬ ДИСКУРСИВНОГО ПОЗНАНИЯ ТРАКТАТА", "https://x/article", "html")]
+
+        def author_books(self, query):
+            return "", []
+
+    class Books:
+        name = "gutenberg"
+
+        def search(self, query):
+            if query == "дао дэ цзин":
+                return [base.hit(self.name, "Дао дэ цзин", "https://x/1.fb2", "fb2")]
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr(sources, "SOURCES", [Partial(), Books()])
+    res = sources.search_text("Дао дэ цзин Виногродский")
+    # the book the shorter search found comes first, and the first round's row is kept
+    assert [r["title"] for r in res["hits"]] == ["Дао дэ цзин", "ПУТЬ ДИСКУРСИВНОГО ПОЗНАНИЯ ТРАКТАТА"]
+    assert res["note"]
+
+
+def test_a_row_that_names_the_whole_query_ends_the_search(monkeypatch):
+    """The phrase found the book itself: no shorter searches follow, and the round is not asked twice."""
+    asked = []
+
+    class Catalog:
+        name = "gutenberg"
+
+        def search(self, query):
+            asked.append(query)
+            if query.lower() == "tao te ching":  # a catalog does not care for the case of a query
+                return [base.hit(self.name, "Tao Te Ching", "https://x/1.epub", "epub", author="Laozi")]
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr(sources, "SOURCES", [Catalog()])
+    res = sources.search_text("Tao Te Ching")
+    assert [r["title"] for r in res["hits"]] == ["Tao Te Ching"] and res["note"] == ""
+    assert asked == ["Tao Te Ching"]
+
+
+def test_a_request_the_round_never_started_is_named_as_late(monkeypatch):
+    """More requests than the pool has workers: a source whose requests were still queued when the round
+    ended did not answer either, and is named so (and the answer is not cached as whole)."""
+
+    class Slow:
+        def __init__(self, name):
+            self.name = name
+
+        def search(self, query):
+            time.sleep(0.3)
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    monkeypatch.setattr(sources, "SOURCES", [Slow(f"s{i}") for i in range(8)])
+    monkeypatch.setattr(sources, "PER_SOURCE", 1)  # 8 workers for 8 * (3 + 2) = 40 requests
+    monkeypatch.setattr(sources, "ROUND_SECONDS", 0.5)
+    monkeypatch.setattr(sources, "PAUSE", 0)
+    _, _, _, errors, failed = sources.ask(["а", "б", "в"], author_queries=("г", "д"), cancel=threading.Event())
+    never_started = {f"s{i}" for i in range(4, 8)}  # 16 requests made in 0.5 s, these were behind them
+    assert never_started <= failed, failed
+    assert never_started <= {e.split(":")[0] for e in errors}, errors
+    assert all(e.endswith("не ответил за 0.5 с") for e in errors), errors
+
+
+def test_a_budget_runs_from_when_the_request_is_made(monkeypatch):
+    """A request that waited in the queue behind others still gets its whole budget."""
+
+    class Busy:
+        name = "busy"
+
+        def search(self, query):
+            time.sleep(0.5)
+            return []
+
+        def author_books(self, query):
+            time.sleep(0.5)
+            return "", []
+
+    class Quick:
+        name = "quick"
+        seconds = 0.3
+
+        def search(self, query):
+            return [base.hit("quick", "Книга перемен", "https://x/1.fb2", "fb2")]
+
+        def author_books(self, query):
+            return "", []
+
+    monkeypatch.setattr(sources, "SOURCES", [Busy(), Quick()])
+    monkeypatch.setattr(sources, "PER_SOURCE", 1)  # 2 workers, both taken by `busy` for 0.5 s
+    monkeypatch.setattr(sources, "ROUND_SECONDS", 5)
+    hits, _, _, errors, failed = sources.ask(["книга перемен"], author_queries=("x",), cancel=threading.Event())
+    assert [h["title"] for h in hits] == ["Книга перемен"] and not errors and not failed
+
+
+def test_initials_do_not_make_a_match():
+    """«Л. Н. Толстой»: the initials are not words of the title, nor a search of their own."""
+    assert base.said_words("Л. Н. Толстой Война и мир") == ["толстой", "война", "мир"]
+    assert "л н" not in base.fallbacks("Л. Н. Толстой Война и мир")
+    row = {"title": "Анна Каренина", "author": "Толстой Л. Н.", "translator": ""}
+    assert base.matched(["л", "н", "толстой"], row) == 1
+
+
+def test_the_note_is_shown_only_when_the_shorter_searches_found_something(monkeypatch):
+    """The reader is told the list came from shorter searches when it did — and not when the first round
+    already had the row and the shorter ones added nothing."""
+
+    class Catalog:
+        name = "gutenberg"
+
+        def search(self, query):
+            if query.lower() == "дао дэ цзин виногродский":  # only the query as typed
+                return [base.hit(self.name, "Дао дэ цзин", "https://x/1.fb2", "fb2")]
+            return []
+
+        def author_books(self, query):
+            return "", []
+
+    sources.CACHE.clear()
+    monkeypatch.setattr(sources, "SOURCES", [Catalog()])
+    res = sources.search_text("Дао дэ цзин Виногродский")
+    assert [r["title"] for r in res["hits"]] == ["Дао дэ цзин"] and res["note"] == ""
+
+
+def test_a_catalog_that_declares_a_budget_declares_a_sane_one():
+    """`ask` waits no longer than `ROUND_SECONDS` for anyone, so a budget past it would be a silent lie.
+    A catalog that answers many pages at a time, or none at all when a mirror is down, has one."""
+    for s in sources.SOURCES:
+        assert 0 < getattr(s, "seconds", sources.ROUND_SECONDS) <= sources.ROUND_SECONDS, s.name
+    assert Flibusta().seconds < sources.ROUND_SECONDS  # an OPDS shelf: several pages, and mirrors that go down
