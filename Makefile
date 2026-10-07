@@ -4,7 +4,7 @@ PY := .venv/bin/python
 APP_BOOKS := $(HOME)/Library/Application Support/readsync/books
 BOOKS ?= $(or $(READSYNC_BOOKS),$(shell [ -e "$(APP_BOOKS)" ] && echo "$(APP_BOOKS)" || echo books))
 
-.PHONY: setup serve test lint fmt add-book align app dmg ios-sim
+.PHONY: setup serve test lint fmt add-book align compact app dmg ios-sim
 
 setup:
 	$(PYTHON) -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -e ".[dev]"
@@ -38,6 +38,10 @@ dmg:
 # make align slug=my-book   (re-run the precise MMS pass)
 align:
 	$(PY) pipeline/align.py "$(BOOKS)/$(slug)"
+
+# make compact slug=my-book   (re-encode the audio to AAC-LC mono 48 kbit/s once the timing is checked to hold)
+compact:
+	$(PY) pipeline/compact.py "$(BOOKS)/$(slug)"
 
 # the iPhone app in the simulator: build, install, launch (needs Xcode, xcodegen and the iOS simulator)
 SIM ?= iPhone 17

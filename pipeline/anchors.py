@@ -121,16 +121,18 @@ def build(book: dict, json3: dict) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("book_dir", type=Path)
+    ap.add_argument("--work", type=Path, help="where anchors.json goes and new captions are looked for first")
     args = ap.parse_args()
     d = args.book_dir
+    w = args.work or d
     book = json.loads((d / "book.json").read_text(encoding="utf-8"))
     caps = next(
-        (f for f in sorted(d.glob("yt.*.json3")) + [d / "whisper.json3"] if f.exists()), None
+        (f for x in (w, d) for f in sorted(x.glob("yt.*.json3")) + [x / "whisper.json3"] if f.exists()), None
     )  # yt.merged / yt.ru-orig
     if caps is None:
         sys.exit("no *.json3 captions in book dir")
     res = build(book, json.loads(caps.read_text(encoding="utf-8")))
-    (d / "anchors.json").write_text(json.dumps(res), encoding="utf-8")
+    (w / "anchors.json").write_text(json.dumps(res), encoding="utf-8")
     words_per_block = {}
     for bi, _, _ in res["words"]:
         words_per_block[bi] = words_per_block.get(bi, 0) + 1

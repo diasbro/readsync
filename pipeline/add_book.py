@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import urllib.request
@@ -26,8 +27,9 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from compact import aac_args  # noqa: E402
 from manifest import stamp  # noqa: E402
-from tidy import PLAYABLE, tidy  # noqa: E402
+from tidy import PLAYABLE, claim, land, tidy, work_dir  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # the same root the server uses: the Mac app keeps the books outside the code it updates
@@ -167,8 +169,9 @@ def build_text(sources: list[str], d: Path, title: str, author: str) -> None:
     shutil.rmtree(parts_dir)  # the downloads served their purpose: the merged book is all that is read
 
 
-def fetch_audio(src: str, d: Path, idx: int, lang: str) -> Path:
-    """Download one audio part (YouTube via yt-dlp, with auto captions) or copy a local file."""
+def fetch_audio(src: str, w: Path, idx: int, lang: str) -> Path:
+    """Download one audio part (YouTube via yt-dlp, with auto captions) or copy a local file, into the
+    work dir."""
     if is_url(src):
         out = f"part{idx:02d}.%(ext)s"
         run(
@@ -186,11 +189,11 @@ def fetch_audio(src: str, d: Path, idx: int, lang: str) -> Path:
                 out,
                 src,
             ],
-            cwd=d,
+            cwd=w,
         )
-        return next(f for f in d.iterdir() if f.stem == f"part{idx:02d}" and f.suffix not in (".json3", ".part"))
+        return next(f for f in w.iterdir() if f.stem == f"part{idx:02d}" and f.suffix not in (".json3", ".part"))
     p = Path(src).expanduser()
-    dst = d / f"part{idx:02d}{p.suffix.lower()}"
+    dst = w / f"part{idx:02d}{p.suffix.lower()}"
     if not dst.exists():
         shutil.copy(p, dst)
     return dst
@@ -206,59 +209,24 @@ def duration_of(path: Path) -> float:
     return float(out or 0)
 
 
-def build_audio(sources: list[str], d: Path, lang: str) -> None:
-    parts = [fetch_audio(src, d, i, lang) for i, src in enumerate(sources, 1)]
+def build_audio(sources: list[str], w: Path, lang: str) -> None:
+    """Everything in the work dir: audio.m4a, audio16k.wav and the joined captions, if any."""
+    parts = [fetch_audio(src, w, i, lang) for i, src in enumerate(sources, 1)]
     offsets, total = [], 0.0
     for p in parts:
         offsets.append(total)
         total += duration_of(p)
-    # playable file (AAC) and 16 kHz mono WAV for alignment, both from the concatenation of all parts
-    lst = d / "parts.txt"
+    # playable file (AAC) and 16 kHz mono WAV for alignment, both from the concatenation of all parts:
+    # the timing is measured on the sources, so it does not depend on the encoder
+    lst = w / "parts.txt"
     lst.write_text("".join(f"file '{p.resolve()}'\n" for p in parts), encoding="utf-8")
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(lst),
-            "-vn",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "96k",
-            "-movflags",
-            "+faststart",
-            str(d / "audio.m4a"),
-        ]
-    )
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
-            str(d / "audio.m4a"),
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_s16le",
-            str(d / "audio16k.wav"),
-        ]
-    )
+    concat = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst), "-vn"]
+    run([*concat, *aac_args(), str(w / "audio.m4a")])
+    run([*concat, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(w / "audio16k.wav")])
     # captions: shift each part's events by its offset and join into one json3
     events = []
     for p, off in zip(parts, offsets, strict=True):
-        caps = sorted(d.glob(f"{p.stem}.*.json3"))
+        caps = sorted(w.glob(f"{p.stem}.*.json3"))
         if not caps:
             continue
         data = json.loads(caps[0].read_text(encoding="utf-8"))
@@ -266,15 +234,27 @@ def build_audio(sources: list[str], d: Path, lang: str) -> None:
             if "tStartMs" in ev:
                 ev["tStartMs"] = int(ev["tStartMs"] + off * 1000)
                 events.append(ev)
-    for old in d.glob("yt.*.json3"):
-        old.unlink()
     if events:
-        (d / "yt.merged.json3").write_text(json.dumps({"events": events}, ensure_ascii=False), encoding="utf-8")
-    elif (d / "whisper.json3").exists():
-        (d / "whisper.json3").unlink()
+        (w / "yt.merged.json3").write_text(json.dumps({"events": events}, ensure_ascii=False), encoding="utf-8")
     for p in parts:
-        p.unlink()  # the concatenated m4a is the source from now on
+        p.unlink()  # the concatenation is the source from now on; the space is free before the slow steps
     lst.unlink()
+
+
+def land_audio(w: Path, d: Path) -> None:
+    """The new audio, its timing and its captions replace the old ones in one step each; until here the
+    book kept its old audio.m4a, timing.json and book.toml. stamp() follows and comes last."""
+    for name in ("audio.m4a", "timing.json"):
+        if not (w / name).exists():
+            raise SystemExit(f"{name} не собран")
+    caps = [*sorted(w.glob("yt.*.json3")), *[f for f in (w / "whisper.json3",) if f.exists()]]
+    land(w / "audio.m4a", d / "audio.m4a")
+    land(w / "timing.json", d / "timing.json")
+    # the old version's captions and other playable copies belong to the old audio
+    for old in [*d.glob("yt.*.json3"), d / "whisper.json3", d / "audio.mp3", d / "yt.webm"]:
+        old.unlink(missing_ok=True)
+    for c in caps:
+        land(c, d / c.name)
 
 
 FRAGMENT_RE = re.compile(r"конец ознакомительного фрагмента|ознакомительн\w+ фрагмент\w*|купить полную версию", re.I)
@@ -302,15 +282,19 @@ def main() -> None:
     ap.add_argument("--whisper-model", default="small")
     args = ap.parse_args()
 
+    # a stop (SIGTERM to the job's process group) unwinds like an error, so the cleanup below runs
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     d = BOOKS / args.slug
     d.mkdir(parents=True, exist_ok=True)
+    w = claim(work_dir(args.slug))  # downloads and intermediate files, outside the (iCloud) library
     try:
-        build(args, d)
+        build(args, d, w)
     finally:
         tidy(d)  # finished, failed or stopped: the downloads and derived audio are not kept
+        shutil.rmtree(w, ignore_errors=True)
 
 
-def build(args: argparse.Namespace, d: Path) -> None:
+def build(args: argparse.Namespace, d: Path, w: Path) -> None:
     if args.text:
         build_text(args.text, d, args.title, args.author)
     elif not (d / "book.json").exists():
@@ -321,20 +305,19 @@ def build(args: argparse.Namespace, d: Path) -> None:
     has_captions = any(d.glob("yt.*.json3")) or (d / "whisper.json3").exists()
     has_audio = any((d / name).exists() for name in PLAYABLE)
     retime = bool(args.text) and not args.audio and has_captions and has_audio
+    if args.text and (retime or args.audio):
+        (d / "timing.json").unlink(missing_ok=True)  # it times the old text, which is gone already
     if retime:
-        for stale in ("timing.json", "anchors.json", "align.log"):
-            (d / stale).unlink(missing_ok=True)
-        run([PY, str(PIPE / "anchors.py"), str(d)])
-        run([PY, str(PIPE / "timing_from_anchors.py"), str(d)])
+        run([PY, str(PIPE / "anchors.py"), str(d), "--work", str(w)])
+        run([PY, str(PIPE / "timing_from_anchors.py"), str(w)])
     if args.audio:
-        for stale in ("timing.json", "anchors.json", "align.log"):
-            (d / stale).unlink(missing_ok=True)
-        build_audio(args.audio, d, args.lang)
-        if not (d / "yt.merged.json3").exists() and not (d / "whisper.json3").exists():
+        # the old audio, timing and book.toml stay as they are until everything new is ready in w
+        build_audio(args.audio, w, args.lang)
+        if not (w / "yt.merged.json3").exists():
             print("no captions: transcribing with faster-whisper (slow)", flush=True)
-            run([PY, str(PIPE / "transcribe.py"), str(d), "--model", args.whisper_model, "--lang", args.lang])
-        run([PY, str(PIPE / "anchors.py"), str(d)])
-        run([PY, str(PIPE / "timing_from_anchors.py"), str(d)])
+            run([PY, str(PIPE / "transcribe.py"), str(w), "--model", args.whisper_model, "--lang", args.lang])
+        run([PY, str(PIPE / "anchors.py"), str(d), "--work", str(w)])
+        run([PY, str(PIPE / "timing_from_anchors.py"), str(w)])
 
     toml = d / "book.toml"
     esc = lambda s: str(s).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
@@ -355,7 +338,13 @@ def build(args: argparse.Namespace, d: Path) -> None:
     if args.audio:
         meta["audio_source"] = " | ".join(args.audio)
         meta["narrator"] = args.narrator or meta.get("narrator", "")
-    toml.write_text("".join(f'{k} = "{esc(v)}"\n' for k, v in meta.items() if v != ""), encoding="utf-8")
+    if args.audio:
+        land_audio(w, d)
+    elif retime:
+        land(w / "timing.json", d / "timing.json")
+    tmp = d / "book.toml.tmp"
+    tmp.write_text("".join(f'{k} = "{esc(v)}"\n' for k, v in meta.items() if v != ""), encoding="utf-8")
+    os.replace(tmp, toml)
     # a new edition only with new text: it is what makes sentence positions stale; new audio shows in the sizes
     stamp(d, new_edition=bool(args.text))
 
@@ -365,7 +354,7 @@ def build(args: argparse.Namespace, d: Path) -> None:
     )
     if (args.audio or retime) and not args.no_align:
         print("running precise MMS alignment (about 15 min per hour of audio, low priority)...", flush=True)
-        run([PY, str(PIPE / "align.py"), str(d)])
+        run([PY, str(PIPE / "align.py"), str(d), "--work", str(w)])
         print("done: precise timing", flush=True)
 
 

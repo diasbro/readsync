@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -72,12 +73,41 @@ TRANSLIT = dict(
 )
 
 
+def _pipeline() -> None:
+    """The pipeline's own modules (manifest, tidy) importable from here."""
+    if str(ROOT / "pipeline") not in sys.path:
+        sys.path.insert(0, str(ROOT / "pipeline"))
+
+
+def sweep_jobs() -> None:
+    """Work dirs no live job holds are what a killed job, a crash or a power cut left: they go, and the
+    book they were for is tidied. A job still running (here, from an earlier server or from the
+    command line) keeps its own."""
+    _pipeline()
+    from tidy import held, tidy, work_root
+
+    root = work_root()
+    if not root.is_dir():
+        return
+    for w in root.iterdir():
+        job = JOBS.get(w.name)
+        if (job and job["proc"].poll() is None) or held(w):
+            continue
+        try:
+            shutil.rmtree(w)
+            if SLUG_RE.match(w.name) and (BOOKS / w.name / "book.toml").is_file():
+                tidy(BOOKS / w.name)
+        except OSError as e:
+            print(f"work dir {w.name} not swept: {e}", file=sys.stderr, flush=True)
+
+
 def ensure_manifests() -> None:
     """Books made before manifests existed get one, once: a phone cannot tell a finished copy of them
     from a half-synced one otherwise. Books still loading are left to their job, and so are books
     whose last job failed (their add.log stays until a job succeeds). One unreadable book never
-    keeps the server from starting."""
-    sys.path.insert(0, str(ROOT / "pipeline"))
+    keeps the server from starting. Runs at server start, so it sweeps what dead jobs left first."""
+    sweep_jobs()
+    _pipeline()
     from manifest import ID_RE, stamp
 
     for toml in BOOKS.glob("*/book.toml"):
@@ -498,10 +528,38 @@ def start_job(form: dict) -> tuple[dict | None, str]:
         esc_ = lambda v: str(v).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
         stub = {"slug": slug, "title": title or slug, "author": val("author")}
         (d / "book.toml").write_text("".join(f'{k} = "{esc_(v)}"\n' for k, v in stub.items() if v), encoding="utf-8")
-    with open(d / "add.log", "w", encoding="utf-8") as log:  # the child inherits the handle; ours closes here
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)
-    JOBS[slug] = {"proc": proc, "started": time.time(), "slug": slug}
+    launch(slug, cmd)
     return {"slug": slug}, ""
+
+
+def launch(slug: str, cmd: list[str]) -> None:
+    """A job runs in a process group of its own, so a stop reaches yt-dlp, ffmpeg and the aligner too."""
+    with open(BOOKS / slug / "add.log", "w", encoding="utf-8") as log:  # the child inherits it; ours closes here
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT, start_new_session=True)
+    JOBS[slug] = {"proc": proc, "started": time.time(), "slug": slug}
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def kill_group(proc: subprocess.Popen, grace: float = 10.0) -> None:
+    """SIGTERM to the whole group (the job unwinds and tidies), SIGKILL to whatever is left after `grace`."""
+    pgid = proc.pid  # start_new_session: the job leads its own group
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and (proc.poll() is None or _group_alive(pgid)):
+        time.sleep(0.1)
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pgid, signal.SIGKILL)
+    proc.wait()
 
 
 def stop_job(slug: str) -> None:
@@ -510,16 +568,14 @@ def stop_job(slug: str) -> None:
     job = JOBS.get(slug)
     if not SLUG_RE.match(slug) or not job or job["proc"].poll() is not None:
         raise ValueError("нечего останавливать")
-    job["proc"].terminate()
-    try:
-        job["proc"].wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        job["proc"].kill()
+    kill_group(job["proc"])
     JOBS.pop(slug, None)  # called off on purpose: the card must not report it as a failure
-    d = BOOKS / slug
-    shutil.rmtree(d / "parts", ignore_errors=True)
-    for leftover in d.glob("upload_*"):
-        leftover.unlink(missing_ok=True)
+    _pipeline()
+    from tidy import tidy, work_dir
+
+    shutil.rmtree(work_dir(slug), ignore_errors=True)
+    if (BOOKS / slug).is_dir():
+        tidy(BOOKS / slug)
 
 
 def start_align(slug: str) -> tuple[dict | None, str]:
@@ -530,11 +586,7 @@ def start_align(slug: str) -> tuple[dict | None, str]:
     if slug in JOBS and JOBS[slug]["proc"].poll() is None:
         return None, "книга ещё загружается"
     py = str(PIPELINE_PY) if PIPELINE_PY.exists() else sys.executable
-    with open(d / "add.log", "w", encoding="utf-8") as log:
-        proc = subprocess.Popen(
-            [py, str(ROOT / "pipeline" / "align.py"), str(d)], stdout=log, stderr=subprocess.STDOUT, cwd=ROOT
-        )
-    JOBS[slug] = {"proc": proc, "started": time.time(), "slug": slug}
+    launch(slug, [py, str(ROOT / "pipeline" / "align.py"), str(d)])
     return {"slug": slug}, ""
 
 
