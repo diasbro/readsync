@@ -146,6 +146,27 @@ def hit(source: str, title: str, url: str, kind: str, **extra) -> dict:
     return h
 
 
+def audio_hit(source: str, ref: str, title: str, **extra) -> dict:
+    """A recording as an audio source reports it (see `sources/audio`). `ref` is all the server needs
+    to find it again; sizes are estimates from duration and bitrate where the source states no size."""
+    h = {
+        "source": source,
+        "ref": ref,
+        "title": title,
+        "author": "",
+        "narrator": "",
+        "duration_s": None,
+        "parts": None,
+        "size_bytes": None,
+        "bitrate_kbps": None,
+        "captions": False,
+        "page_url": "",
+        "licensed_trial": False,
+    }
+    h.update(extra)
+    return h
+
+
 def editions(hits: list[dict]) -> list[dict]:
     """One row per edition. Numbered volumes of the same edition (same source, work, author, translator)
     load together as one book; anything else stays a row of its own."""
