@@ -23,6 +23,12 @@
   // interface as <audio>, but the app owns the position, the sessions and the lock-screen controls.
   const native = !!window.nativeAudio;
   if (native) document.documentElement.classList.add("in-app");  // the page sits inside the iPhone app
+  // The app hides the status bar, so the band beside the camera island is free: the top bar moves up into
+  // it, its buttons in the two ears, and the text starts right under the island. Portrait only: turned on
+  // its side the phone has no inset at the top.
+  const insetProbe = document.body.appendChild(Object.assign(document.createElement("div"), { style: "position:fixed;top:0;height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none" }));
+  const fitEars = () => document.documentElement.classList.toggle("ears", native && insetProbe.offsetHeight >= 24);
+  fitEars(); new ResizeObserver(fitEars).observe(insetProbe);  // the web view learns its insets after the first paint
   const audio = window.nativeAudio || $("#audio"), textEl = $("#text");
   const pgCur = $("#pg-cur"), pgTotal = $("#pg-total"), pgRead = $("#pg-read");
   let book, wB, wT0, wT1, wS, sFirst, sLast, sBlock, sWordsCum = [], chapStartWord = [], chapStartTime = [], duration = 0, hasAudio = false;
@@ -497,7 +503,9 @@
   let pgTyping = false;  // while the reader is typing, a page turn must not overwrite what they wrote
   function paintPager() {
     pgTotal.textContent = pages.total;
-    $("#pg-foot").textContent = `${pages.cur + 1} / ${pages.total}`;
+    // with the top bar in the island's ears there is no room for the chapter up there: it reads at the foot
+    const chap = document.documentElement.classList.contains("ears") ? $("#chapter-title").textContent : "";
+    $("#pg-foot").textContent = (chap ? chap + " · " : "") + `${pages.cur + 1} / ${pages.total}`;
     pgCur.style.width = String(pages.total).length + 2 + "ch";
     if (!pgTyping) pgCur.value = pages.cur + 1;
     $("#pg-prev").disabled = pages.cur <= 0; $("#pg-next").disabled = pages.cur >= pages.total - 1;  // the ends say so

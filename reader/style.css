@@ -239,6 +239,14 @@ input[type=range], input[type=checkbox], select { accent-color: var(--accent); }
 .back-lib { display: none; color: var(--fg); }
 .in-app .back-lib { display: inline-flex; margin-right: -6px; }
 .in-app .back-lib svg { width: 24px; height: 24px; }
+/* the top bar in the camera island's ears (the app hides the status bar): as tall as the inset, the
+   buttons left and right of the island, no title in between, no rule under it */
+.ears { --topbar-h: max(52px, var(--safe-t)); }
+.ears .topbar { padding-top: 0; background: var(--bg); backdrop-filter: none; border-bottom-color: transparent; }
+.ears .topbar-title { visibility: hidden; }
+/* the lines scrolling up fade into the bar instead of being cut at its edge */
+.ears .topbar::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 16px; pointer-events: none;
+  background: linear-gradient(var(--bg), transparent); }
 /* leaving the page there is locking the phone, and the narrator plays on: this switch means nothing */
 .in-app label:has(#set-pause-hidden) { display: none; }
 @media (hover: hover) { .icon:hover { background: var(--line); } }
@@ -344,7 +352,7 @@ body.pages.immersive.bare .topbar { opacity: 0; transform: translateY(-100%); po
 body.pages.immersive.bare .pager { opacity: 0; transform: translateY(16px); pointer-events: none; }
 .pg-foot { display: none; position: fixed; z-index: 15; left: 0; right: 0; bottom: var(--foot-b); text-align: center;
   font-size: 11px; line-height: 16px; letter-spacing: .04em; color: var(--muted); font-variant-numeric: tabular-nums;
-  pointer-events: none; opacity: 0; transition: opacity .25s ease; }
+  padding: 0 28px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; opacity: 0; transition: opacity .25s ease; }
 body.pages.immersive .pg-foot { display: block; }
 body.pages.immersive.bare .pg-foot { opacity: .85; }
 @media (prefers-reduced-motion: reduce) {
