@@ -21,14 +21,17 @@
     document.querySelectorAll("#lib-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
     $("#lib-ui").value = settings.ui;
     $("#lib-audio-search").checked = settings.audioSearch !== false;
+    $("#lib-auto-done").checked = settings.autoDone !== false;
   }
-  onSettingsSynced = syncPrefsUI;
+  // the view is a setting too: another browser's choice arriving lays the shelf out again
+  onSettingsSynced = () => { syncPrefsUI(); if (loaded) paint(); };
   syncPrefsUI();
   $("#lib-settings").onclick = (e) => { e.stopPropagation(); prefs.hidden = !prefs.hidden; };
   addEventListener("click", (e) => { if (!e.target.closest("#lib-prefs, #lib-settings")) prefs.hidden = true; });
   $("#lib-theme").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; settings.theme = b.dataset.v; applySettings(); persistSettings(); syncPrefsUI(); });
   $("#lib-ui").addEventListener("input", (e) => { settings.ui = e.target.value; applySettings(); persistSettings(); syncPrefsUI(); });
   $("#lib-audio-search").addEventListener("change", (e) => { settings.audioSearch = e.target.checked; applySettings(); persistSettings(); paint(); });
+  $("#lib-auto-done").addEventListener("change", (e) => { settings.autoDone = e.target.checked; persistSettings(); });
   $("#bookmarklet").href = "javascript:(function(){window.open('" + location.origin + "/?wish='+encodeURIComponent(document.title),'_blank')})()";
 
   // ---- header line: the sentence you stopped at in the current book, the word highlight walking along it ----
@@ -71,7 +74,7 @@
       const w = await fetch(`/api/where/${current.slug}`).then((r) => r.json()).catch(() => null);
       if (w && w.text) { runDemo(w.text, current.title + (w.mode === "pages" && w.chapter ? " · " + w.chapter : ""), "?book=" + current.slug, w.mode === "audio" ? "audio" : "pages"); return; }
     }
-    const done = all.filter((b) => b.ready && b.state.finished);
+    const done = all.filter((b) => b.ready && statusOf(b) === "done");
     if (done.length) {
       const b = done[Math.floor(Math.random() * done.length)];
       const w = await fetch(`/api/where/${b.slug}?random=1`).then((r) => r.json()).catch(() => null);
@@ -81,12 +84,12 @@
   }
 
   // ---- data ----
-  // Shelves: a book with more than 10 minutes of reading is "reading now" unless moved by hand; within a
-  // shelf the most recent activity (opened, or added) comes first. A title saved without text is a "shell"
-  // card that waits in the catalog. Every card opens in place (⚙) for its text and audio.
+  // Shelves follow the book's status, which the server derives (state.status): «reading» is «Читаю сейчас»,
+  // «done» goes to the folded «Прочитанные», newest first; «paused» and none share the rest. Within a shelf
+  // the most recent activity (opened, or added) comes first. A title saved without text is a "shell" card
+  // that waits in the catalog. Every card opens in place (⚙) for its text, audio and status.
   // open: id of the card opened in place; confirmDel / confirmStop: the card asking "delete?" / "call the load off?"
-  let books = [], wishes = [], jobs = {}, open = null, confirmDel = null, confirmStop = null;
-  const READING_SEC = 600;
+  let books = [], wishes = [], jobs = {}, open = null, confirmDel = null, confirmStop = null, loaded = false;
   const SOURCE = { "fantasy-worlds": "Fantasy Worlds", flibusta: "Flibusta", coollib: "Coollib", "standard-ebooks": "Standard Ebooks",
     gutenberg: "Gutenberg", wikisource: "Wikisource", bia: "Buddhadasa Archives" };
   const SOURCES_LABEL = Object.values(SOURCE).join(", ");
@@ -98,7 +101,8 @@
   const isShell = (x) => !x.state;
   const idOf = (x) => (isShell(x) ? x.id : x.slug);
   const nameOf = (b) => b.title || (b.building ? "Книга по ссылке" : b.slug);  // a link names its book only once loaded
-  const shelfOf = (b) => (b.state.shelf ? b.state.shelf : b.state.finished ? "library" : b.state.seconds > READING_SEC ? "reading" : "library");
+  const statusOf = (b) => b.state?.status || "none";
+  let showDone = store.get("rs:showDone", false);  // «Прочитанные» unfolded: this browser's convenience, not state
   const REF_SOURCE = { knigavuhe: "knigavuhe", yt: "YouTube", ia: "archive.org" };  // a recording loaded by its ref
   const sourceOf = (url) => { const h = (url || "").split("|")[0].trim(); const ref = /^(knigavuhe|yt|ia):/.exec(h); if (ref) return REF_SOURCE[ref[1]]; for (const k in SOURCE) if (h.includes(k.replace("-", "-"))) return SOURCE[k]; return h && !isUrl(h) ? "файл" : h ? new URL(h).hostname.replace(/^www\./, "") : ""; };
   const kb = (n) => (n == null ? "" : n >= 1000 ? (n / 1024).toFixed(1).replace(".", ",") + " МБ" : n + " КБ");
@@ -324,12 +328,18 @@
     const other = b.ready ? (hitsCache[b.slug]?.hits?.length || b.has_hits) : shellOf(b) || b.has_hits;
     return `<div class="m status warn"><span>не загрузилось: ${esc(j.log[j.log.length - 1] || "код " + j.exit)}</span>${other ? '<button class="link-btn" data-act="otherEdition">другое издание</button>' : ""}${b.ready ? '<button class="link-btn" data-act="dismiss">скрыть</button>' : ""}</div>`;
   }
-  function progressOf(b) {
-    const st = b.state, pos = st.pos || 0, dur = st.duration || store.get("rs:dur:" + b.slug, 0);
+  // `short`: the line under a cover, where a word and a number fit
+  function progressOf(b, short = false) {
+    const st = b.state, pos = st.pos || 0, dur = st.duration || store.get("rs:dur:" + b.slug, 0), status = statusOf(b);
     // read as pages, an audiobook counts its page (the phone does the same)
-    const pct = st.finished ? 100 : b.has_audio && st.mode !== "pages" ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
-    const where = !b.ready ? "" : st.finished ? "прочитано целиком" : b.has_audio ? (pct ? `прочитано ${pct}% · ${fmt(pos)}` : "не начато") : (st.sent ? `прочитано ${pct}%` : "не начато");
-    return { pct, where };
+    const pct = b.has_audio && st.mode !== "pages" ? (dur ? Math.round((pos / dur) * 100) : 0) : (st.sentPct || 0);
+    if (!b.ready) return { pct: 0, where: "" };
+    // a status said in words shows even at 0%
+    if (status === "done") return { pct: 100, done: true, said: true, where: st.finishedOn && !short ? "прочитана " + dayName(st.finishedOn) : "прочитана" };
+    if (status === "paused") return { pct, said: true, where: `отложена · ${pct}%` };
+    if (st.rereading) return { pct, said: true, where: `перечитываю · ${pct}%` };
+    if (short) return { pct, where: pct ? `${pct}%` : "" };
+    return { pct, where: b.has_audio ? (pct ? `прочитано ${pct}% · ${fmt(pos)}` : "не начато") : (st.sent ? `прочитано ${pct}%` : "не начато") };
   }
   function textSection(x) {
     const found = isShell(x) ? x : hitsCache[x.slug] || {};
@@ -363,12 +373,15 @@
       <input class="rename-input" value="${esc(x.title || x.slug)}" spellcheck="false" aria-label="Название">
       ${icon("renameYes", "✓", "Сохранить (↵)")}${fold}</div>`;
   }
-  // a ready book opened in place still reads at one click: «Читать», where it stands, and its shelf
+  // a ready book opened in place still reads at one click: «Читать», where it stands, and its status as
+  // three words, the current one marked (none for a book without one); a read book can be read again
+  const STATUSES = [["reading", "Читаю"], ["paused", "Отложена"], ["done", "Прочитана"]];
   function leadHtml(b) {
     if (isShell(b) || !b.ready) return "";
-    const reading = shelfOf(b) === "reading";
+    const now = statusOf(b);
+    const seg = STATUSES.map(([v, label]) => `<button type="button" role="radio" aria-checked="${now === v}" data-act="status" data-v="${v}">${label}</button>`).join('<span aria-hidden="true">·</span>');
     return `<div class="lead"><a class="btn sm primary" href="?book=${esc(b.slug)}">Читать</a><span class="m">${esc(progressOf(b).where)}</span>
-      <button class="link-btn" data-act="shelf">${reading ? "убрать из «Читаю сейчас»" : "положить в «Читаю сейчас»"}</button></div>`;
+      <span class="stat-seg" role="radiogroup" aria-label="Статус книги">${seg}</span>${now === "done" ? '<button class="link-btn" data-act="reread">перечитать</button>' : ""}</div>`;
   }
   function footHtml(x) {
     if (confirmDel === idOf(x)) {
@@ -377,8 +390,9 @@
     }
     return `<div class="foot"><button class="link-btn" data-act="del">${isShell(x) ? "убрать из библиотеки" : "удалить книгу"}</button></div>`;
   }
-  function openHtml(x) {
-    return `<div class="card open${isShell(x) ? " shell" : ""}" data-key="${esc(idOf(x))}"><div class="body">
+  // `panel`: opened from a cover, the card spans the grid's width under the cover's row
+  function openHtml(x, panel = false) {
+    return `<div class="card open${isShell(x) ? " shell" : ""}${panel ? " panel" : ""}" data-key="${esc(idOf(x))}"><div class="body">
       ${headHtml(x)}
       ${facts(x) ? `<div class="m">${esc(facts(x))}</div>` : ""}${leadHtml(x)}${isShell(x) ? "" : failHtml(x)}
       ${x.building ? "" : textSection(x)}${isShell(x) || !x.ready || x.building ? "" : audioSection(x)}${x.building ? "" : footHtml(x)}</div></div>`;
@@ -386,7 +400,7 @@
   function cardHtml(b) {
     if (open === b.slug && !b.building) return openHtml(b);
     const job = jobOf(b), failed = !!failedJob(b);
-    const { pct, where } = progressOf(b);
+    const { pct, where, done, said } = progressOf(b);
     const stage = job?.running && job.stage ? " · " + job.stage : "";
     const meta = [facts(b), !b.ready ? (b.building ? "загружается" + (stage || "…") : failed ? null : "не загрузилась до конца") : b.building ? "заменяю" + (stage || "…") : null].filter(Boolean).join(" · ");
     const frag = b.fragment_note ? `<div class="m status warn">в конце текста «${esc(b.fragment_note)}»</div>` : "";
@@ -396,7 +410,41 @@
     const link = b.ready ? `<a class="cover-link" href="?book=${esc(b.slug)}" tabindex="-1" aria-hidden="true">${cover}</a>` : `<div class="cover-link">${cover}</div>`;
     return `<div class="card" data-key="${esc(b.slug)}">${link}
       <div class="body">${b.ready ? `<a href="?book=${esc(b.slug)}" class="tlink">${title}</a>` : title}<div class="m${meta ? "" : " empty"}">${esc(meta)}</div>${failHtml(b)}${frag}
-      <div class="bar${pct ? "" : " empty"}"><i style="width:${pct}%"></i></div><div class="m${pct ? "" : " empty"}">${where}</div></div>${actsHtml(b)}</div>`;
+      <div class="bar${pct ? "" : " empty"}${done ? " done" : ""}"><i style="width:${pct}%"></i></div><div class="m${pct || said ? "" : " empty"}">${where}</div></div>${actsHtml(b)}</div>`;
+  }
+  // ---- covers: the same books as tiles, a cover, the title in two lines and one line of state ----
+  // The title is the tile's one stop for the keyboard (a book not loaded yet: its ⚙). A tile opened stays in
+  // its place, marked, and its card follows it across the whole grid; the card keeps the book's data-key
+  // (focus, closing and the search line find the book by it), the tile names it with data-for.
+  const plate = (title, foot, cls = "") => `<div class="cover plate${cls}"><span class="pt">${esc(title)}</span><span class="pa">${esc(foot)}</span></div>`;
+  function tileHtml(b) {
+    const opened = open === b.slug && !b.building, job = jobOf(b), fail = failedJob(b);
+    const loading = b.building || (!b.ready && !fail);
+    const cover = b.cover ? `<img class="cover" src="/books/${esc(b.slug)}/${esc(b.cover)}" alt="" loading="lazy">` : plate(nameOf(b), b.author || "");
+    const art = `${cover}${loading ? '<span class="spin" aria-hidden="true"></span>' : ""}`;
+    const link = b.ready ? `<a class="cover-link" href="?book=${esc(b.slug)}" tabindex="-1" aria-hidden="true">${art}</a>` : `<div class="cover-link">${art}</div>`;
+    const tip = esc([nameOf(b), b.author].filter(Boolean).join(" — "));
+    const title = b.ready ? `<a class="tlink" href="?book=${esc(b.slug)}" title="${tip}"><span class="t">${esc(nameOf(b))}</span></a>` : `<span class="t" title="${tip}">${esc(nameOf(b))}</span>`;
+    const { where, said } = progressOf(b, true);
+    const audioMark = b.has_audio ? `<span class="au" title="С аудио">${iconSvg("audio")}</span>` : "";
+    let line, act = icon("gear", iconSvg("gear"), "Текст, аудио, статус");
+    if (loading) {
+      const stage = job?.running && job.stage ? " · " + job.stage : "";
+      line = confirmStop === b.slug ? `<span class="m ask">отменить? <button data-act="stopYes">да</button> · <button data-act="stopNo">нет</button></span>`
+        : `<span class="m"><span class="spin"></span>${b.building && b.ready ? "заменяю" : "загружается"}${esc(stage)}</span>`;
+      act = confirmStop === b.slug ? "" : icon("stopJob", iconSvg("close"), "Отменить загрузку");
+    } else if (fail) line = `<span class="m warn" title="${esc(fail.log[fail.log.length - 1] || "код " + fail.exit)}">не загрузилось</span>`;
+    else if (b.fragment_note) line = `<span class="m warn" title="в конце текста «${esc(b.fragment_note)}»">фрагмент</span>`;
+    else line = `<span class="m" title="${esc(where)}">${said ? "" : audioMark}${esc(where)}</span>`;
+    const tile = `<div class="card tile${opened ? " on" : ""}${loading ? " loading" : ""}" ${opened ? "data-for" : "data-key"}="${esc(b.slug)}">${link}${title}<div class="tl">${line}${act}</div></div>`;
+    return opened ? tile + openHtml(b, true) : tile;
+  }
+  function shellTileHtml(w) {
+    const opened = open === w.id, s = searching.get(w.id) || {}, n = openableCount(w);
+    const said = s.busy ? '<span class="spin"></span>ищу…' : n ? esc(plural(n, "издание", "издания", "изданий")) : w.searched ? "не нашлось" : "";
+    const tile = `<div class="card tile shell${opened ? " on" : ""}" ${opened ? "data-for" : "data-key"}="${esc(w.id)}"><div class="cover-link" data-act="gear">${plate(w.title, "без текста", " empty")}</div>
+      <span class="t" data-act="gear" title="${esc(w.title)}">${esc(w.title)}</span><div class="tl"><span class="m">${said}</span>${icon("gear", iconSvg("gear"), "Издания, своя ссылка или файл")}</div></div>`;
+    return opened ? tile + openHtml(w, true) : tile;
   }
   function shellHtml(w) {
     if (open === w.id) return openHtml(w);
@@ -424,17 +472,33 @@
     const pl = player(); pl?.remove();
     const draft = keepDraft(), focus = keepFocus();
     const byActivity = (a, b) => (b.at || 0) - (a.at || 0) || (a.title || "").localeCompare(b.title || "", "ru");
-    const entry = (b) => ({ at: b.state.opened || b.added || 0, title: nameOf(b), html: cardHtml(b) });
+    // the covers are a way to see the rest of the library: «Читаю сейчас» and «Прочитанные» stay cards
+    const covers = settings.libView === "covers";
+    const entry = (b, tile = false) => ({ at: b.state.opened || b.added || 0, title: nameOf(b), html: tile ? tileHtml(b) : cardHtml(b) });
     // while a query is typed everything matching sits in one list under the line, so nothing hides above it
     const hits = books.filter(matches);
-    const reading = query ? [] : hits.filter((b) => shelfOf(b) === "reading").map(entry).sort(byActivity);
-    const rest = [...(query ? hits : hits.filter((b) => shelfOf(b) !== "reading")).map(entry),
-      ...shellsShown().filter(matches).map((w) => ({ at: +w.id.slice(1) || 0, title: w.title, html: shellHtml(w) }))].sort(byActivity);
-    const any = reading.length + rest.length > 0;
+    const reading = query ? [] : hits.filter((b) => statusOf(b) === "reading").map((b) => entry(b)).sort(byActivity);
+    const doneBooks = query ? [] : hits.filter((b) => statusOf(b) === "done")
+      .sort((a, b) => (b.state.finishedOn || "").localeCompare(a.state.finishedOn || "") || nameOf(a).localeCompare(nameOf(b), "ru"));
+    const rest = [...(query ? hits : hits.filter((b) => !["reading", "done"].includes(statusOf(b)))).map((b) => entry(b, covers)),
+      ...shellsShown().filter(matches).map((w) => ({ at: +w.id.slice(1) || 0, title: w.title, html: covers ? shellTileHtml(w) : shellHtml(w) }))].sort(byActivity);
+    const any = reading.length + rest.length + doneBooks.length > 0;
     $("#lib-title").textContent = reading.length ? "Остальные" : "Библиотека";
     $("#reading-section").hidden = !reading.length;
     $("#reading-list").innerHTML = reading.map((x) => x.html).join("");
+    // everything is read or being read: no empty heading for the rest
+    $("#library-section").hidden = !query && !rest.length && any;
+    $("#lib-view").hidden = !rest.length;
+    document.querySelectorAll("#lib-view button").forEach((v) => v.setAttribute("aria-pressed", String(v.dataset.v === (covers ? "covers" : "list"))));
+    $("#library-list").classList.toggle("covers", covers);
     $("#library-list").innerHTML = rest.map((x) => x.html).join("") + (query ? addRowHtml(any) : !any ? '<p class="muted small">Пока пусто. Напиши название книги в строке выше, вставь ссылку или перетащи файл.</p>' : "");
+    const year = String(new Date().getFullYear()), thisYear = doneBooks.filter((b) => (b.state.finishedOn || "").startsWith(year)).length;
+    $("#done-section").hidden = !doneBooks.length;
+    $("#done-n").textContent = doneBooks.length;
+    $("#done-year").textContent = thisYear ? `в ${year} — ${thisYear}` : "";
+    $("#done-fold").setAttribute("aria-expanded", String(showDone));
+    $("#done-list").hidden = !showDone;
+    $("#done-list").innerHTML = showDone ? doneBooks.map((b) => cardHtml(b)).join("") : "";
     markSel();
     if (listening) {
       const row = document.querySelector(`.cand[data-ref="${CSS.escape(listening.ref)}"]`);
@@ -443,7 +507,7 @@
     }
     if (!restoreDraft(draft)) restoreFocus(focus);
   }
-  const matchCards = () => (query ? [...document.querySelectorAll("#library-list .card:not(.add)")] : []);
+  const matchCards = () => (query ? [...document.querySelectorAll("#library-list .card:not(.add):not(.panel)")] : []);
   function markSel() {
     const cards = matchCards();
     sel = Math.max(0, Math.min(sel, cards.length - 1));
@@ -469,23 +533,25 @@
   // «no» of a question that just appeared, or the card itself when the button is gone
   function keepFocus() {
     const a = document.activeElement, card = a?.closest?.(".card");
-    return card && !card.classList.contains("add") ? { key: card.dataset.key, act: a.dataset.act, ref: a.closest(".cand")?.dataset.ref } : null;
+    return card && !card.classList.contains("add") ? { key: card.dataset.key || card.dataset.for, act: a.dataset.act, v: a.dataset.v, ref: a.closest(".cand")?.dataset.ref } : null;
   }
   function restoreFocus(f) {
     const card = f && document.querySelector(`.card[data-key="${CSS.escape(f.key)}"]`);
     if (!card) return;
     const el = card.querySelector('[data-act="delNo"], [data-act="stopNo"], [data-act="audioNo"]')
       || (f.ref && card.querySelector(`.cand[data-ref="${CSS.escape(f.ref)}"] [data-act="${f.act}"]`))
+      || (f.v && card.querySelector(`[data-act="${f.act}"][data-v="${CSS.escape(f.v)}"]`))
       || (f.act && card.querySelector(`[data-act="${{ delNo: "del", delYes: "del", stopNo: "stopJob" }[f.act] || f.act}"]`))
-      || card.querySelector('[data-act="gear"], .tlink, [data-act]');
+      || card.querySelector('button[data-act="gear"], .tlink, [data-act]');
     el?.focus({ preventScroll: true });
   }
   async function renderLibrary() {
     [books, wishes] = await Promise.all([fetch("/api/books").then((r) => r.json()), api("GET", "/api/wishlist").catch(() => wishes)]);
+    loaded = true;
     paint();
     // nothing to find yet: the line is the only move, so it takes the keyboard
     if (!books.length && !wishes.length && document.activeElement === document.body) omni.focus();
-    headerLine(books.filter((b) => shelfOf(b) === "reading"), books);
+    headerLine(books.filter((b) => statusOf(b) === "reading"), books);
   }
   // the book picked in the line: a ready one opens, any other opens its card
   function openPicked(card) {
@@ -513,7 +579,7 @@
       const no = document.querySelector(".ask .no");
       if (no) { no.click(); return; }  // a question is answered «no» before anything closes
       if (confirmDel || confirmStop || audioConfirm) { confirmDel = confirmStop = audioConfirm = null; paint(); return; }
-      if (renaming || finding) { renaming = finding = null; paint(); } else if (open) { const was = open; closeCard(); paint(); document.querySelector(`.card[data-key="${CSS.escape(was)}"] [data-act="gear"]`)?.focus(); }
+      if (renaming || finding) { renaming = finding = null; paint(); } else if (open) { const was = open; closeCard(); paint(); document.querySelector(`.card[data-key="${CSS.escape(was)}"] button[data-act="gear"]`)?.focus(); }
     }
     if (e.key === "/" && !(e.target instanceof Element && e.target.matches("input, textarea, select"))) { e.preventDefault(); omni.focus(); }
   });
@@ -651,14 +717,34 @@
     if (isShell(x)) { await saveHits(s, { hits: x.hits, author_hits: x.author_hits, query: queryOf(x), unopenable: x.unopenable }); searching.delete(x.id); await api("PUT", "/api/wishlist/" + x.id, { slug: s }).catch(() => {}); }
     renderLibrary();
   }
-  const entryOf = (card) => books.find((b) => b.slug === card.dataset.key) || wishes.find((w) => w.id === card.dataset.key);
+  // a card names its book by data-key; a cover whose card is open, by data-for
+  const entryOf = (card) => { const k = card.dataset.key || card.dataset.for; return books.find((b) => b.slug === k) || wishes.find((w) => w.id === k); };
 
   // ---- actions: every button carries data-act; the card it sits in gives the book ----
   const ACTIONS = {
     link: () => addByLink(query),
     save: () => addTitle(query),
-    // the shelf is said in words in the open card; ▶ is only ever «open the book»
-    shelf: async (x) => { await api("PUT", `/api/state/${x.slug}`, { shelf: shelfOf(x) === "reading" ? "library" : "reading", shelfAt: Date.now() }); renderLibrary(); },
+    // The status is said in words in the open card; ▶ is only ever «open the book». «Прочитана» adds today to
+    // the days the book was read; leaving it for «Читаю» or «Отложена» takes the last day off again (the mark
+    // was a mistake). The whole list is written, as the merge takes it whole.
+    status: async (x, btn) => {
+      const to = btn.dataset.v, from = statusOf(x);
+      if (to === from) return;
+      const at = Date.now(), days = [...(x.state.finished || [])].sort();
+      const patch = { shelf: to, shelfAt: at };
+      if (to === "done" && !days.includes(today())) Object.assign(patch, { finished: [...days, today()], finishedAt: at });
+      if (from === "done" && days.length) Object.assign(patch, { finished: days.slice(0, -1), finishedAt: at });
+      await api("PUT", `/api/state/${x.slug}`, patch);
+      renderLibrary();
+    },
+    // read again: back to «Читаю» from the beginning; the days it was read stay
+    reread: async (x) => {
+      const at = Date.now();
+      await api("PUT", `/api/state/${x.slug}`, { shelf: "reading", shelfAt: at, pos: 0, posAt: at, sent: 0, sentAt: at, sentPct: 0 });
+      renderLibrary();
+    },
+    view: (x, btn) => { settings.libView = btn.dataset.v; persistSettings(); paint(); },
+    fold: () => { showDone = !showDone; store.set("rs:showDone", showDone); paint(); },
     gear: async (x) => {
       const to = open === idOf(x) ? null : idOf(x);
       closeCard();
@@ -804,11 +890,19 @@
     const btn = e.target.closest("[data-act]");
     if (!btn) return;
     const card = btn.closest(".card");
+    if (!card) { ACTIONS[btn.dataset.act]?.(null, btn); return; }  // the page's own: the view, the fold
     const x = card && !card.classList.contains("add") ? entryOf(card) : null;
     if (x || card?.classList.contains("add")) ACTIONS[btn.dataset.act]?.(x, btn);
   });
   $("#library").addEventListener("keydown", (e) => {
     if (!(e.target instanceof Element)) return;
+    // the three status words: ← → move between them, ↵ or space picks
+    if (e.target.matches(".stat-seg [role=radio]") && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      const all = [...e.target.parentElement.querySelectorAll("[role=radio]")], i = all.indexOf(e.target);
+      all[(i + (e.key === "ArrowRight" ? 1 : all.length - 1)) % all.length].focus();
+      return;
+    }
     if (e.target.matches(".card.add") && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); e.target.click(); return; }
     if (e.target.classList.contains("afind-input")) {
       if (e.key === "Enter") { e.preventDefault(); e.target.closest(".afind")?.querySelector('[data-act="findAudioGo"]')?.click(); }

@@ -29,6 +29,8 @@
         <div class="muted small" style="margin-top:6px">Шрифт текста и остальное — в настройках внутри книги.</div>
         <div class="popup-title" style="margin-top:14px">Озвучки</div>
         <label class="switch"><input type="checkbox" id="lib-audio-search"> искать и слушать озвучки в карточке книги</label>
+        <div class="popup-title" style="margin-top:14px">Прочитанные</div>
+        <label class="switch"><input type="checkbox" id="lib-auto-done"> отмечать прочитанной в конце текста</label>
         <div class="popup-title" style="margin-top:14px">Кнопка для панели закладок</div>
         <div class="muted small">Перетащи <a id="bookmarklet" href="#" class="bm">+ readsync</a> на панель закладок браузера.
           Нажмёшь её на странице любой книги — название сохранится сюда, текст найдёшь потом.</div>
@@ -49,9 +51,17 @@
     <div id="reading-list" class="lib-grid"></div>
   </section>
 
-  <section class="lib-section">
-    <h2 id="lib-title">Библиотека</h2>
+  <section class="lib-section" id="library-section">
+    <div class="sec-head"><h2 id="lib-title">Библиотека</h2>
+      <span class="view-seg" id="lib-view" role="group" aria-label="Вид" hidden><button type="button" data-act="view" data-v="list" title="Списком" aria-label="Списком" data-icon="menu"></button><button type="button" data-act="view" data-v="covers" title="Обложками" aria-label="Обложками" data-icon="grid"></button></span></div>
     <div id="library-list" class="lib-grid"></div>
+  </section>
+
+  <!-- read books: folded away by default, newest first; the count of this year beside the heading -->
+  <section class="lib-section" id="done-section" hidden>
+    <div class="sec-head"><h2><button type="button" class="fold" id="done-fold" data-act="fold" aria-expanded="false" aria-controls="done-list">Прочитанные · <span id="done-n">0</span></button></h2>
+      <span class="sec-note" id="done-year"></span></div>
+    <div id="done-list" class="lib-grid" hidden></div>
   </section>
   <audio id="listen" preload="none"></audio>
 </div>
@@ -72,6 +82,7 @@
   <main id="text"></main>
 
   <button id="return-pill" class="pill" hidden>↧ вернуться к чтению</button>
+  <div id="done-pill" class="pill" role="status" hidden>Книга прочитана · <button type="button" id="done-undo" class="link-btn">отменить</button></div>
   <footer id="pager" class="pager" hidden>
     <div class="pg-side" id="pg-read"></div>
     <div class="pg-nav">
@@ -199,6 +210,7 @@
     <section>
       <h4>Статистика</h4>
       <div id="stats" class="stats"></div>
+      <label class="row"><input type="checkbox" id="set-auto-done"> Отмечать прочитанной в конце</label>
     </section>
     <section class="muted small keys" data-mode="audio">
       <h4>Клавиши</h4>

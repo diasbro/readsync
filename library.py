@@ -106,22 +106,23 @@ def ensure_manifests() -> None:
     """Books made before manifests existed get one, once: a phone cannot tell a finished copy of them
     from a half-synced one otherwise. Books still loading are left to their job, and so are books
     whose last job failed (their add.log stays until a job succeeds). One unreadable book never
-    keeps the server from starting. Runs at server start, so it sweeps what dead jobs left first."""
+    keeps the server from starting. Runs at server start, so it sweeps what dead jobs left first.
+    Books stamped before the end of their main text was get only that added (see manifest.stamp_ends)."""
     sweep_jobs()
     _pipeline()
-    from manifest import ID_RE, stamp
+    from manifest import ID_RE, stamp, stamp_ends
 
     for toml in BOOKS.glob("*/book.toml"):
         d = toml.parent
         try:
-            if (
-                (d / "book.json").exists()
-                and not (d / "add.log").exists()
-                and d.name not in JOBS
-                and not ID_RE.search(toml.read_text(encoding="utf-8"))
-            ):
+            if not (d / "book.json").exists() or (d / "add.log").exists() or d.name in JOBS:
+                continue
+            text = toml.read_text(encoding="utf-8")
+            if not ID_RE.search(text):
                 stamp(d)
-        except OSError as e:
+            elif not re.search(r"(?m)^text_end\s*=", text):
+                stamp_ends(d)
+        except (OSError, ValueError) as e:
             print(f"manifest skipped for {d.name}: {e}", file=sys.stderr, flush=True)
 
 
@@ -152,9 +153,11 @@ def list_books() -> list[dict]:
                 duration = float(m.group(1)) if m else 0.0
         pos = float(st.get("pos", 0) or 0)
         # an audiobook read as pages moves its page, not its narrator: the mode it was left in says which counts,
-        # as on the phone. Finished: within a minute of the end, or the last spread
+        # as on the phone. At the end: within a minute of it, or the last spread (what read as finished before
+        # statuses existed)
         by_page = duration == 0 or st.get("mode") == "pages"
-        finished = (st.get("sentPct") or 0) >= 99 if by_page else pos >= duration - 60
+        at_end = (st.get("sentPct") or 0) >= 99 if by_page else pos >= duration - 60
+        days = st.get("finished")
         meta["state"] = {
             "opened": st.get("opened", 0),
             "shelf": st.get("shelf", ""),
@@ -164,7 +167,9 @@ def list_books() -> list[dict]:
             "sentPct": st.get("sentPct", 0),
             "mode": st.get("mode", ""),
             "seconds": sum(v.get("sec", 0) for v in (st.get("stats") or {}).get("days", {}).values()),
-            "finished": bool(finished),
+            "atEnd": bool(at_end),
+            "finished": [x for x in days if isinstance(x, str)] if isinstance(days, list) else [],
+            **state.status(st, duration > 0, bool(at_end)),
         }
         if (d / "timing.json").exists():
             try:

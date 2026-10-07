@@ -6,6 +6,12 @@ against another edition of the text is dropped, because sentence numbers mean no
 
 The merge is also implemented by the iPhone app; `tests/state_vectors.json` is the shared contract.
 Files merge in ascending file-name order, and on equal `<key>At` the earlier file keeps its value.
+
+`shelf` is the book's status: "" (none: derived from reading), "reading", "paused" or "done"; the old
+"library" reads as "paused". `finished` is the list of local days the book was finished on, written
+whole: a writer takes the merged list, adds or drops a day and writes it all, so an undo on one device
+wins over an older list on another. `status()` derives what the library shows; `tests/status_vectors.json`
+is its contract with the iPhone app.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ import tomllib
 import uuid
 from pathlib import Path
 
-LWW = ("pos", "sent", "mode", "opened", "shelf")  # last writer wins, by "<key>At"
+LWW = ("pos", "sent", "mode", "opened", "shelf", "finished")  # last writer wins, by "<key>At"
 DEVICE_FILE = re.compile(r"^[0-9a-f]{32}\.json$")  # «<id> 2.json», a sync conflict copy, is not a device
 DEVICE_ID = re.compile(r"^[0-9a-f]{32}$")
 LOCK = threading.Lock()
@@ -160,6 +166,34 @@ def merge(files: list[dict], edition: str) -> dict:
     return out
 
 
+def status(merged: dict, audio: bool, at_end: bool) -> dict:
+    """The book's status from its merged state. `audio`: the book has audio, so unless it was left in page
+    mode its time position is the one that counts; `at_end`: the position is at the end by the rule used
+    before statuses existed (the last spread, or within a minute of the end), which is how a book finished
+    then reads as done. A paused book read since it was paused is reading again; a done one stays done
+    however its position moves (looking up a quote is not rereading). Pure: shared vectors run against it."""
+    shelf = merged.get("shelf")
+    finished = merged.get("finished")
+    days = [d for d in finished if isinstance(d, str)] if isinstance(finished, list) else []
+    stats = merged.get("stats")
+    read_days = stats.get("days") if isinstance(stats, dict) else None
+    read_days = read_days if isinstance(read_days, dict) else {}
+    if shelf == "done":
+        st = "done"
+    elif shelf == "reading":
+        st = "reading"
+    elif shelf in ("paused", "library"):
+        key = "posAt" if audio and merged.get("mode") != "pages" else "sentAt"
+        st = "reading" if (_num(merged.get(key)) or 0) > (_num(merged.get("shelfAt")) or 0) else "paused"
+    elif at_end:
+        st = "done"
+    else:
+        seconds = sum(_num(v.get("sec")) or 0 for v in read_days.values() if isinstance(v, dict))
+        st = "reading" if seconds > 600 else "none"
+    on = max(days) if days else (max(read_days) if st == "done" and read_days else None)
+    return {"status": st, "rereading": st == "reading" and bool(days), "finishedOn": on}
+
+
 def load(book_dir: Path) -> dict:
     """What the reader sees: every device's state merged."""
     with LOCK:
@@ -176,6 +210,8 @@ def put(book_dir: Path, patch: dict) -> dict:
         st = _own_for_write(book_dir)
         for key in LWW:
             at = _num(patch.get(key + "At", 0))
+            if key == "finished" and not isinstance(patch.get(key), list):
+                continue  # a list of days or nothing: anything else would be merged as one
             if key in patch and at is not None and at >= (_num(st.get(key + "At")) or 0):
                 st[key], st[key + "At"] = patch[key], at
                 if key == "sent":

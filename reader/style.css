@@ -235,11 +235,66 @@ html[data-theme="night"] .card .ask .yes, html[data-theme="night"] .card .foot.c
 /* controls and labels are never part of the text: selecting a name must not drag them along.
    Deliberately global, the reader's own buttons are controls too. */
 .card .tag, .ic, .icon, .omni .glyph, .omni kbd, .card.add .t b { user-select: none; -webkit-user-select: none; }
+/* a section heading with its tools on the right; «Прочитанные» folds by its heading */
+.sec-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 24px; margin: 0 0 14px; }
+.lib-section .sec-head h2 { margin: 0; }
+.sec-note { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.lib-section h2 .fold { background: none; border: 0; padding: 0; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; cursor: pointer; }
+.lib-section h2 .fold:hover { color: var(--fg); }
+.lib-section h2 .fold::after { content: ""; display: inline-block; vertical-align: 2px; width: 5px; height: 5px; margin-left: 10px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+.lib-section h2 .fold[aria-expanded="true"]::after { transform: rotate(45deg); }
+.view-seg { display: inline-flex; }
+.view-seg button { width: 28px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.view-seg button svg { width: 16px; height: 16px; }
+.view-seg button:hover { color: var(--fg); }
+.view-seg button[aria-pressed="true"] { color: var(--fg); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* the status of a book, three words in its open card; a read book's bar is full and quiet */
+.card.open .lead { flex-wrap: wrap; row-gap: 6px; }
+.stat-seg { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+.stat-seg button { background: none; border: 0; padding: 2px 0; font: inherit; color: var(--muted); cursor: pointer; }
+.stat-seg button:hover { color: var(--accent); }
+.stat-seg button[aria-checked="true"] { color: var(--fg); box-shadow: inset 0 -1.5px 0 var(--accent); }
+.card.open .lead .stat-seg ~ .link-btn { margin-left: 4px; }
+.card .bar.done i { background: color-mix(in srgb, var(--muted) 50%, transparent); }
+/* covers: a grid of 2:3 covers with the title and one line of state; an opened cover's card spans the row
+   under it (dense flow fills the row it leaves) */
+#library-list.covers { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); column-gap: 24px; row-gap: 28px; grid-auto-flow: row dense; align-items: start; }
+#library-list.covers > .panel, #library-list.covers > .card.add, #library-list.covers > p { grid-column: 1 / -1; }
+.card.tile { display: flex; flex-direction: column; min-width: 0; padding: 0; border: 0; border-radius: 0; background: none; gap: 0; }
+.card.tile:hover { transform: none; }
+.card.tile .cover-link { display: block; position: relative; }
+.card.tile .cover { width: 100%; height: auto; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 6px; box-sizing: border-box;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--fg) 8%, transparent), 0 6px 16px -6px rgb(0 0 0 / .25); transition: transform .15s, box-shadow .15s; }
+.card.tile:hover .cover { transform: translateY(-2px); box-shadow: 0 0 0 1px color-mix(in srgb, var(--fg) 10%, transparent), 0 12px 22px -8px rgb(0 0 0 / .35); }
+.card.tile.on .cover, .card.tile.sel .cover { outline: 2px solid var(--accent); outline-offset: 3px; }
+.card.tile .plate { display: flex; flex-direction: column; justify-content: space-between; align-items: stretch; gap: 8px; padding: 10px; overflow: hidden; text-align: left;
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel)); border: 1px solid var(--line); }
+.card.tile .plate .pt { font-family: var(--serif); font-size: 15px; line-height: 1.2; color: var(--fg); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+.card.tile .plate .pa { font-family: var(--ui); font-size: 11px; color: var(--muted); }
+.card.tile .plate.empty { background: none; border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent); box-shadow: none; }
+.card.tile.loading .cover { opacity: .45; }
+.card.tile .cover-link > .spin { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -11px 0 0 -11px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
+.card.tile .tlink, .card.tile > .t { margin-top: 8px; }
+.card.tile .t { font-family: var(--serif); font-size: 15px; line-height: 1.25; -webkit-line-clamp: 2; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.card.tile.shell .t { cursor: pointer; }
+.card.tile .tl { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 22px; margin-top: 3px; }
+.card.tile .tl .m { flex: 1; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.card.tile .tl .au svg { width: 12px; height: 12px; vertical-align: -2px; margin-right: 4px; }
+.card.tile .tl .m.warn::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d0902e; margin-right: 5px; vertical-align: 1px; }
+.card.tile .tl .spin { display: inline-block; width: 8px; height: 8px; margin-right: 5px; vertical-align: -1px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite; }
+.card.tile .tl .ic { flex: none; width: 24px; height: 24px; opacity: 0; transition: opacity .15s, background-color .15s, color .15s; }
+.card.tile .tl .ic svg { width: 16px; height: 16px; }
+.card.tile:hover .tl .ic, .card.tile:focus-within .tl .ic, .card.tile.on .tl .ic, .card.tile.loading .tl .ic { opacity: 1; }
+@media (hover: none) { .card.tile .tl .ic { opacity: 1; } }
 .toast { position: fixed; left: 50%; top: 18px; transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 999px; font-size: 14px; z-index: 60; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
 @media (max-width: 560px) {
   .card { grid-template-columns: 52px 1fr; } .card .cover { width: 52px; height: 78px; }
   .card .acts { grid-column: 1 / -1; justify-content: flex-start; }
   .card.open .own { flex-wrap: wrap; }
+  #library-list.covers { grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 16px; row-gap: 22px; }
+  .card.tile .t { font-size: 13px; }
+  .stat-seg { margin-left: 0; }
 }
 
 /* ---------- layout ---------- */
@@ -386,6 +441,11 @@ body.pages #sprint-menu { bottom: calc(var(--pager-h) + 10px); }
   -webkit-backdrop-filter: saturate(1.5) blur(24px); backdrop-filter: saturate(1.5) blur(24px);
   box-shadow: var(--float-shadow); font-size: 13.5px; white-space: nowrap; transition: bottom .35s ease; }
 body.hide-player:not(:has(.player.peek)) .pill { bottom: calc(14px + var(--safe-b)); }
+/* «Книга прочитана · отменить»: the same glass, quieter; over the pager in page mode */
+#done-pill { color: var(--muted); }
+#done-pill .link-btn { font-size: inherit; color: var(--accent); margin-left: 2px; }
+body.pages #done-pill { bottom: calc(var(--pager-h) + 14px); }
+body.pages.immersive.bare #done-pill { bottom: calc(var(--foot-b) + 26px); }
 
 /* ---------- player: a card of glass floating over the page ----------
    One clean bar with the chapters as gaps in it (a row of tick marks read as a radio dial), the times

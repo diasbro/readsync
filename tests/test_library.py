@@ -181,8 +181,58 @@ def test_an_audiobook_read_as_pages_counts_its_page(tmp_path, monkeypatch):
         (d / "book.json").write_text('{"blocks": []}', encoding="utf-8")
         (d / "timing.json").write_text('{"duration": 3600, "words": []}', encoding="utf-8")
     state = {b["slug"]: b["state"] for b in library.list_books()}
-    assert state["listened"]["finished"] and state["listened"]["mode"] == "audio"
-    assert state["read"]["finished"] and state["read"]["mode"] == "pages"
+    assert state["listened"]["atEnd"] and state["listened"]["status"] == "done" and state["listened"]["mode"] == "audio"
+    assert state["read"]["atEnd"] and state["read"]["status"] == "done" and state["read"]["mode"] == "pages"
+
+
+def test_books_carry_their_status_and_finish_date(tmp_path, monkeypatch):
+    """The library shows the derived status; the old shelf value «library» at the end of the book is paused."""
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    monkeypatch.setattr(library, "load_state", lambda slug: STATES[slug])
+    STATES = {
+        "done": {"shelf": "done", "shelfAt": 5, "finished": ["2026-03-12", "2026-10-07"], "finishedAt": 5},
+        "old-shelf": {"shelf": "library", "shelfAt": 9, "sent": 50, "sentAt": 3, "sentPct": 100},
+        "again": {"shelf": "reading", "shelfAt": 9, "finished": ["2026-03-12"], "finishedAt": 5},
+        "fresh": {},
+    }
+    for slug in STATES:
+        d = tmp_path / slug
+        d.mkdir()
+        (d / "book.toml").write_text(f'title = "{slug}"\ntext_end = 40\n', encoding="utf-8")
+        (d / "book.json").write_text('{"blocks": []}', encoding="utf-8")
+    state = {b["slug"]: b["state"] for b in library.list_books()}
+    assert (state["done"]["status"], state["done"]["finishedOn"], state["done"]["finished"]) == (
+        "done",
+        "2026-10-07",
+        ["2026-03-12", "2026-10-07"],
+    )
+    assert (state["old-shelf"]["status"], state["old-shelf"]["atEnd"]) == ("paused", True)
+    assert (state["again"]["status"], state["again"]["rereading"]) == ("reading", True)
+    assert (state["fresh"]["status"], state["fresh"]["finishedOn"], state["fresh"]["finished"]) == ("none", None, [])
+    assert {b["slug"]: b.get("text_end") for b in library.list_books()}["fresh"] == 40
+
+
+def test_manifests_add_the_end_of_the_text_once_and_nothing_else(tmp_path, monkeypatch):
+    """A book stamped before text_end existed gets only the two keys: id, edition, files and the file's time
+    stay, so the phone does not see a new version, and the library does not see a new book."""
+    monkeypatch.setattr(library, "BOOKS", tmp_path)
+    d = tmp_path / "old"
+    d.mkdir()
+    toml = 'title = "T"\nid = "{}"\nedition = "{}"\nfiles = "book.json:1"\n'.format("a" * 32, "b" * 32)
+    (d / "book.toml").write_text(toml, encoding="utf-8")
+    book = {"chapters": [{"title": "Глава", "first_block": 0}], "blocks": [{"sentences": [[0, 1]] * 10}]}
+    (d / "book.json").write_text(json.dumps(book), encoding="utf-8")
+    (d / "timing.json").write_text('{"duration": 100, "words": [[0, 0, 1, 1.0, 95.5]]}', encoding="utf-8")
+    os.utime(d / "book.toml", (1_000_000, 1_000_000))
+
+    library.ensure_manifests()
+
+    text = (d / "book.toml").read_text(encoding="utf-8")
+    assert text == toml + "text_end = 10\naudio_end = 95.50\n"
+    assert (d / "book.toml").stat().st_mtime == 1_000_000
+    (d / "book.toml").write_text(toml + "text_end = 3\n", encoding="utf-8")
+    library.ensure_manifests()  # already there: left alone
+    assert (d / "book.toml").read_text(encoding="utf-8") == toml + "text_end = 3\n"
 
 
 def wait_job(slug: str, timeout: float = 10.0) -> None:

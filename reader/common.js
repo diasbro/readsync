@@ -11,6 +11,7 @@ const ICONS = {
   focus: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/>',
   timer: '<circle cx="12" cy="13.5" r="7"/><path d="M12 10v3.5l2.3 1.6M10 3h4"/>',
   menu: '<path d="M4.5 7h15M4.5 12h15M4.5 17h9"/>',
+  grid: '<rect x="4.5" y="4.5" width="6" height="6" rx="1.5"/><rect x="13.5" y="4.5" width="6" height="6" rx="1.5"/><rect x="4.5" y="13.5" width="6" height="6" rx="1.5"/><rect x="13.5" y="13.5" width="6" height="6" rx="1.5"/>',
   gear: '<path d="M4.5 7.5h8M17.5 7.5h2M4.5 16.5h2M11.5 16.5h8"/><circle cx="15" cy="7.5" r="2.3"/><circle cx="9" cy="16.5" r="2.3"/>',
   book: '<path d="M12 6.8C10 5.3 7.2 4.8 4.5 5.2v12.6c2.7-.4 5.5.1 7.5 1.6 2-1.5 4.8-2 7.5-1.6V5.2c-2.7-.4-5.5.1-7.5 1.6zM12 6.8v12.6"/>',
   audio: '<path d="M4.5 15v-2.5a7.5 7.5 0 0 1 15 0V15"/><rect x="3.8" y="13.8" width="3.8" height="5.7" rx="1.4"/><rect x="16.4" y="13.8" width="3.8" height="5.7" rx="1.4"/>',
@@ -37,6 +38,12 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 const today = () => new Date().toISOString().slice(0, 10);
+// a day as the reader says it: «7 октября», with the year only when it is not this one
+const MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+const dayName = (iso) => {
+  const [y, m, d] = String(iso || "").split("-").map(Number);
+  return d && MONTHS[m - 1] ? `${d} ${MONTHS[m - 1]}${y !== new Date().getFullYear() ? " " + y : ""}` : "";
+};
 // Inside the iPhone app there is no server: the reader's writes go to Swift over a message bridge,
 // which answers with the same JSON the server would. Reads still go through fetch (a URL scheme).
 const bridge = window.webkit?.messageHandlers?.readsync;
@@ -48,7 +55,7 @@ function send(method, path, body, keepalive) {
 // ---------------- settings ----------------
 const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", sent: true, word: true, wordStyle: "bg",
   dimMode: "off", offset: 0, scroll: "zone", clickWord: false, speed: 1, hideUi: null, immersive: null, pauseHidden: true, rewind: true,
-  audioSearch: true };
+  audioSearch: true, autoDone: true, libView: "list" };
 // A finger has no hover. Settings left at null follow the device: on for a touch screen, off for a mouse,
 // until the reader sets them; a value the reader saved is never replaced.
 const touchUI = matchMedia("(hover: none)").matches;

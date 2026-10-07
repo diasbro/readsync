@@ -65,6 +65,7 @@
     else if (remote.stats) store.set("rs:stats:" + slug, remote.stats);
     if (!meta) throw new Error("книга не найдена");
     hasAudio = !!(timingJ && meta.audio);
+    bookMeta = meta;
     book = bookJ; duration = hasAudio ? timingJ.duration : 0;
     { const now = Date.now(); putState({ opened: now, openedAt: now }); }  // library sorts by last opened
     document.title = book.title + " — readsync";
@@ -229,6 +230,7 @@
     const t = audio.currentTime + settings.offset;
     const i = wordAt(t);
     if (!audio.paused && lastCounted >= 0 && i > lastCounted && i - lastCounted < 40) session.words += i - lastCounted;
+    if (!native && !audio.paused) heard(audio.currentTime);
     lastCounted = i;
     if (i !== curWord || force) {
       if (curWord >= 0 && wordEls[curWord]) wordEls[curWord].classList.remove("cur");
@@ -354,7 +356,10 @@
   // the app keeps playing on a locked screen: leaving the page is the phone being locked, not the reader leaving
   const onLeave = () => { if (!native && settings.pauseHidden && !audio.paused) audio.pause(); };
   document.addEventListener("visibilitychange", () => { if (document.hidden) { onLeave(); if (pages.on) session.stop(); } else if (pages.on) session.start(); });
-  audio.addEventListener("seeked", () => update(true));
+  audio.addEventListener("seeked", () => { heardAt = -1; update(true); });
+  // played to the end of the file: read to the end, whatever came before. In the app the player says so itself
+  audio.addEventListener("ended", () => { if (!native) markDone(); });
+  if (native) audio.addEventListener("finished", () => loadRemote().then(() => showDone(today())));
   // a paused narrator that moved anyway (the app's lock screen): repaint. While playing the tick does it
   audio.addEventListener("timeupdate", () => { if (audio.paused) update(true); });
   audio.addEventListener("ratechange", () => update(true));
@@ -431,12 +436,13 @@
   // relayout must keep the sentence it started from, or every resize event nudges the place a little.
   function goSpread(n, save = true, anchor = null, step = false) {
     n = Math.max(0, Math.min(pages.total - 1, n));
-    const prevSent = pages.sent;
+    const prevSent = pages.sent, prevCur = pages.cur;
     pages.cur = n; textEl.scrollLeft = n * pages.spreadW;
     pages.sent = anchor != null ? Math.max(0, Math.min(sFirst.length - 1, anchor)) : sentAtSpread(n);
     // words read, not words skipped past: a jump to a page or a chapter is not reading
     if (save && step && pages.sent > prevSent && pages.sent - prevSent < 400) session.words += sWordsCum[pages.sent] - sWordsCum[prevSent];
     paintPager();
+    if (save && step && n > prevCur) turnedOnto(prevCur, n);
     $("#chapter-title").textContent = book.chapters[chapterOfSent(pages.sent)]?.title || "";
     if (save) {
       const at = Date.now(); store.set("rs:sent:" + slug, pages.sent); store.set("rs:sentAt:" + slug, at);
@@ -573,7 +579,7 @@
       $("#loading").textContent = "Не запускается: " + e.message + ". Обнови страницу.";
     });
   }
-  function seek(t) { settling = false; audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); posDirty = true; userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
+  function seek(t) { heardAt = -1; settling = false; audio.currentTime = Math.max(0, Math.min(duration || 1e9, t)); posDirty = true; userScrolled = false; $("#return-pill").hidden = true; update(true); scrollToCurrent(true); }
   // coming back to a paused tab: adopt a newer position/settings written by another browser
   document.addEventListener("visibilitychange", () => {
     if (document.hidden || !audio.paused || native) return;  // in the app the player catches up itself
@@ -779,6 +785,7 @@
     $("#set-ui").value = settings.ui; $("#set-weight").value = settings.weight; $("#set-rewind").checked = !!settings.rewind;
     $("#set-offset").value = Math.round(settings.offset * 1000); $("#offset-out").textContent = (settings.offset > 0 ? "+" : "") + Math.round(settings.offset * 1000) + " мс";
     $("#set-scroll").value = settings.scroll; $("#set-click-word").checked = !!settings.clickWord;
+    $("#set-auto-done").checked = settings.autoDone !== false;
     $("#set-word-style").value = settings.wordStyle; $("#set-hide-ui").checked = byDevice("hideUi"); $("#set-immersive").checked = byDevice("immersive"); $("#set-pause-hidden").checked = !!settings.pauseHidden;
     document.querySelectorAll("#set-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
     $("#btn-focus").classList.toggle("on", settings.dimMode !== "off");
@@ -789,6 +796,7 @@
   bind("#set-ui", "ui"); bind("#set-weight", "weight", Number); bind("#set-rewind", "rewind"); bind("#set-offset", "offset", (v) => Number(v) / 1000);
   $("#set-dim").addEventListener("input", () => { if (settings.dimMode !== "off") settings.lastDim = settings.dimMode; });
   $("#set-offset").addEventListener("input", () => update(true));
+  bind("#set-auto-done", "autoDone");
   bind("#set-word-style", "wordStyle"); bind("#set-hide-ui", "hideUi"); bind("#set-pause-hidden", "pauseHidden"); bind("#set-immersive", "immersive");
   // switched off while playing: the bars come back now, not at the next pause
   $("#set-hide-ui").addEventListener("input", () => { if (!byDevice("hideUi")) { showPlayer(); document.body.classList.remove("idle"); } });
@@ -805,6 +813,58 @@
     pop.style.top = (r.bottom + 8) + "px";
   }
   addEventListener("click", (e) => { if (!e.target.closest("#note-pop, .nref")) $("#note-pop").hidden = true; if (!e.target.closest("#sprint-menu, #btn-sprint, #pg-sprint")) $("#sprint-menu").hidden = true; });
+
+  // ---------------- finished: reading to the end of the main text marks the book read ----------------
+  // The end is where the back matter (bibliography, indexes, «Об авторе») begins: its sentence and the last
+  // word before it, stamped by the pipeline (text_end, audio_end; 30 s of slack for the timing). A copy
+  // stamped before that ends at the last spread and the last minute. Only reading crosses it, a page turned
+  // forward or the narrator playing on, never a jump; and the very end of the book is a second line, for a
+  // reader who said «not yet» at the first. In the app the narrator is the player's: it marks the book itself
+  // and tells the page («finished»). A book already read is never marked again.
+  let bookMeta = {};
+  const isDone = () => (remote.shelf ? remote.shelf === "done" : bookMeta.state?.status === "done");
+  function markDone() {
+    if (settings.autoDone === false || isDone()) return;
+    const day = today(), was = Array.isArray(remote.finished) ? remote.finished : [];
+    const finished = was.includes(day) ? was : [...was, day], at = Date.now();
+    Object.assign(remote, { shelf: "done", shelfAt: at, finished, finishedAt: at });
+    putState({ shelf: "done", shelfAt: at, finished, finishedAt: at });
+    showDone(was.includes(day) ? null : day);
+  }
+  // the quiet line: no sound, no dialog, the narrator plays on; «отменить» puts the book back to «Читаю»
+  let doneTimer = 0, doneDay = null;
+  function showDone(day) {
+    doneDay = day; $("#done-pill").hidden = false;
+    clearTimeout(doneTimer); doneTimer = setTimeout(() => { $("#done-pill").hidden = true; }, 10000);
+  }
+  $("#done-undo").onclick = () => {
+    clearTimeout(doneTimer); $("#done-pill").hidden = true;
+    const at = Date.now(), finished = (Array.isArray(remote.finished) ? remote.finished : []).filter((d) => d !== doneDay);
+    Object.assign(remote, { shelf: "reading", shelfAt: at, finished, finishedAt: at });
+    putState({ shelf: "reading", shelfAt: at, finished, finishedAt: at });
+  };
+  // a page turned forward from before a line onto or past it
+  function turnedOnto(from, to) {
+    const last = pages.total - 1, te = Number(bookMeta.text_end) || 0;
+    const end = te > 0 && te <= sentEls.length ? Math.min(last, spreadOfSent(te - 1)) : last;
+    if ((from < end && to >= end) || (from < last && to >= last)) markDone();
+  }
+  // the narrator played across the line: two ticks less than 5 s apart, so a seek over it does not count
+  let heardAt = -1;
+  function heard(t) {
+    const ae = Number(bookMeta.audio_end) || 0, end = ae ? ae - 30 : duration - 60;
+    if (heardAt >= 0 && t > heardAt && t - heardAt < 5 && heardAt < end && t >= end) markDone();
+    heardAt = t;
+  }
+  // «Прочитана 7 октября», or how many times and the last
+  function doneLine() {
+    const days = (Array.isArray(remote.finished) ? remote.finished : []).filter((d) => typeof d === "string").sort();
+    const n = days.length, times = n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? "раза" : "раз";
+    if (n > 1) return `Прочитана ${n} ${times}, последний — ${dayName(days[n - 1])}<br>`;
+    if (n === 1) return `Прочитана ${dayName(days[0])}<br>`;
+    if (!isDone()) return "";
+    return `Прочитана${bookMeta.state?.finishedOn ? " " + dayName(bookMeta.state.finishedOn) : ""}<br>`;
+  }
 
   // ---------------- sessions & stats ----------------
   const session = {
@@ -836,7 +896,7 @@
     const max = Math.max(60, ...week.map((w) => w.sec));
     const bars = `<div class="bars">${week.map((w) => `<div class="${w.k === today() ? "today" : ""}" style="height:${Math.max(4, (w.sec / max) * 100)}%" title="${fmt(w.sec)}"></div>`).join("")}</div>
       <div class="bars-labels">${week.map((w) => `<span>${w.wd}</span>`).join("")}</div>`;
-    $("#stats").innerHTML = `Сегодня: <b>${fmt(td.sec)}</b>, ${Math.round(td.words)} слов<br>Всего: <b>${fmt(tot)}</b>, ${Math.round(totW)} слов<br>Серия: <b>${streak}</b> дн.<br>Прогресс книги: <b>${pct}%</b>${hasAudio ? " · осталось " + fmt((duration - audio.currentTime) / audio.playbackRate) : ""}${bars}`;
+    $("#stats").innerHTML = `${doneLine()}Сегодня: <b>${fmt(td.sec)}</b>, ${Math.round(td.words)} слов<br>Всего: <b>${fmt(tot)}</b>, ${Math.round(totW)} слов<br>Серия: <b>${streak}</b> дн.<br>Прогресс книги: <b>${pct}%</b>${hasAudio ? " · осталось " + fmt((duration - audio.currentTime) / audio.playbackRate) : ""}${bars}`;
   }
 
   // ---------------- sprint timer ----------------

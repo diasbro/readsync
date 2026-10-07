@@ -1,0 +1,134 @@
+[
+  {
+    "name": "shelf done is done; the date is the latest of finished",
+    "state": {"shelf": "done", "shelfAt": 50, "finished": ["2026-03-12", "2026-10-07"], "finishedAt": 50},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "done", "rereading": false, "finishedOn": "2026-10-07"}
+  },
+  {
+    "name": "shelf reading is reading",
+    "state": {"shelf": "reading", "shelfAt": 5},
+    "audio": true, "atEnd": false,
+    "expect": {"status": "reading", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "shelf reading stays reading at the end of the position",
+    "state": {"shelf": "reading", "shelfAt": 5, "sent": 900, "sentAt": 9, "sentPct": 100},
+    "audio": false, "atEnd": true,
+    "expect": {"status": "reading", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "shelf paused is paused",
+    "state": {"shelf": "paused", "shelfAt": 50, "pos": 100, "posAt": 40},
+    "audio": true, "atEnd": false,
+    "expect": {"status": "paused", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "the old value library reads as paused",
+    "state": {"shelf": "library", "shelfAt": 50},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "paused", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "paused, then listened to: the position of the current mode is newer than shelfAt, so reading",
+    "state": {"shelf": "paused", "shelfAt": 50, "mode": "audio", "modeAt": 10, "pos": 300, "posAt": 60},
+    "audio": true, "atEnd": false,
+    "expect": {"status": "reading", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "paused audiobook left in audio mode: a newer page position does not count",
+    "state": {"shelf": "paused", "shelfAt": 50, "mode": "audio", "modeAt": 10, "pos": 300, "posAt": 40, "sent": 7, "sentAt": 60, "sentPct": 1},
+    "audio": true, "atEnd": false,
+    "expect": {"status": "paused", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "paused audiobook read as pages: the newer page position counts",
+    "state": {"shelf": "paused", "shelfAt": 50, "mode": "pages", "modeAt": 10, "pos": 300, "posAt": 40, "sent": 7, "sentAt": 60, "sentPct": 1},
+    "audio": true, "atEnd": false,
+    "expect": {"status": "reading", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "a book without audio counts its page position whatever the mode says",
+    "state": {"shelf": "library", "shelfAt": 50, "pos": 300, "posAt": 40, "sent": 7, "sentAt": 60, "sentPct": 1},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "reading", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "a position saved at the same time as shelfAt is not newer",
+    "state": {"shelf": "paused", "shelfAt": 50, "sent": 7, "sentAt": 50, "sentPct": 1},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "paused", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "done stays done when the position moves later",
+    "state": {"shelf": "done", "shelfAt": 50, "finished": ["2026-10-07"], "finishedAt": 50, "pos": 10, "posAt": 90},
+    "audio": true, "atEnd": false,
+    "expect": {"status": "done", "rereading": false, "finishedOn": "2026-10-07"}
+  },
+  {
+    "name": "no shelf, at the end of the position (finished before statuses existed): done on the last day read",
+    "state": {"sent": 900, "sentAt": 9, "sentPct": 100, "stats": {"days": {"2026-05-02": {"sec": 900, "words": 10}, "2026-05-14": {"sec": 30, "words": 1}}}},
+    "audio": false, "atEnd": true,
+    "expect": {"status": "done", "rereading": false, "finishedOn": "2026-05-14"}
+  },
+  {
+    "name": "no shelf, at the end, no statistics: done without a date",
+    "state": {"pos": 3590, "posAt": 9},
+    "audio": true, "atEnd": true,
+    "expect": {"status": "done", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "shelf done without finished takes the last day read",
+    "state": {"shelf": "done", "shelfAt": 9, "stats": {"days": {"2026-01-03": {"sec": 100, "words": 1}}}},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "done", "rereading": false, "finishedOn": "2026-01-03"}
+  },
+  {
+    "name": "no shelf, more than ten minutes read: reading",
+    "state": {"stats": {"days": {"2026-10-01": {"sec": 400, "words": 10}, "2026-10-02": {"sec": 201, "words": 10}}}},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "reading", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "no shelf, exactly ten minutes read: none",
+    "state": {"stats": {"days": {"2026-10-01": {"sec": 600, "words": 10}}}},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "none", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "no shelf, nothing read: none",
+    "state": {},
+    "audio": true, "atEnd": false,
+    "expect": {"status": "none", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "an unknown shelf value reads as none",
+    "state": {"shelf": "wishlist", "shelfAt": 9},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "none", "rereading": false, "finishedOn": null}
+  },
+  {
+    "name": "reading a book that has a finish date is rereading",
+    "state": {"shelf": "reading", "shelfAt": 70, "finished": ["2026-03-12"], "finishedAt": 50},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "reading", "rereading": true, "finishedOn": "2026-03-12"}
+  },
+  {
+    "name": "a paused book keeps its finish dates but is not rereading",
+    "state": {"shelf": "paused", "shelfAt": 70, "finished": ["2026-03-12"], "finishedAt": 50},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "paused", "rereading": false, "finishedOn": "2026-03-12"}
+  },
+  {
+    "name": "finish dates out of order: the latest one counts",
+    "state": {"shelf": "done", "shelfAt": 70, "finished": ["2026-10-07", "2025-12-30"], "finishedAt": 70},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "done", "rereading": false, "finishedOn": "2026-10-07"}
+  },
+  {
+    "name": "an empty finished list after an undo is no date",
+    "state": {"shelf": "reading", "shelfAt": 70, "finished": [], "finishedAt": 70},
+    "audio": false, "atEnd": false,
+    "expect": {"status": "reading", "rereading": false, "finishedOn": null}
+  }
+]
