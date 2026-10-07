@@ -27,6 +27,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -113,13 +114,14 @@ def sniff(data: bytes, hint: str) -> str:
 
 
 def fetch_text(src: str, part_dir: Path) -> str:
-    """Download or copy one text source into part_dir; return the extractor kind."""
+    """Download or copy one text source into part_dir; return the extractor kind. A download cut short
+    resumes (see `download`)."""
     part_dir.mkdir(parents=True, exist_ok=True)
     if is_url(src):
-        req = urllib.request.Request(src, headers=UA)
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = r.read()
-            final = r.geturl()
+        got = part_dir / "source"
+        final = download(src, got, what="текст", timeout=120)
+        data = got.read_bytes()
+        got.unlink()
         data, final = unwrap(data, final)
         kind = sniff(data, final)
     else:
@@ -273,17 +275,23 @@ def check_space(parts: list[dict], w: Path) -> None:
         raise SystemExit(f"не хватает места на диске: нужно ~{need / 1e9:.1f} ГБ, свободно {free / 1e9:.1f} ГБ")
 
 
-def download(url: str, dst: Path, tries: int = 3) -> None:
+def download(url: str, dst: Path, tries: int = 3, what: str = "", timeout: int = 60) -> str:
     """One file over HTTP into `dst`: written as `dst.part`, checked against Content-Length, renamed.
-    A dropped connection resumes from where it stopped (Range), up to `tries` times."""
+    A dropped connection resumes from where it stopped (Range), up to `tries` times; a 4xx is not retried.
+    Returns the address after redirects, for `sniff`. `what` names the file in messages."""
     tmp = dst.with_name(dst.name + ".part")
     tmp.unlink(missing_ok=True)
+    final = url
     for attempt in range(tries + 1):
         have = tmp.stat().st_size if tmp.exists() else 0
         headers = {**UA, **({"Range": f"bytes={have}-"} if have else {})}
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as r:
+                final = r.geturl()
                 resumed = have and r.status == 206
+                if resumed and not str(r.headers.get("Content-Range") or "").startswith(f"bytes {have}-"):
+                    tmp.unlink()  # not the bytes that follow ours: the next try starts from zero
+                    raise OSError("пришёл не тот кусок")
                 length = r.headers.get("Content-Length")
                 total = (have if resumed else 0) + int(length) if length else None
                 with tmp.open("ab" if resumed else "wb") as f:
@@ -293,12 +301,14 @@ def download(url: str, dst: Path, tries: int = 3) -> None:
             if total is not None and got != total:
                 raise OSError(f"пришло {got} из {total} байт")
             os.replace(tmp, dst)
-            return
+            return final
         except (OSError, http.client.HTTPException) as e:  # urllib's errors are OSErrors; a cut body is not
-            if attempt == tries:
-                raise SystemExit(f"{dst.name} не скачался: {e}") from None
-            say(f"{dst.name}: {e}, докачиваю")
+            refused = isinstance(e, urllib.error.HTTPError) and 400 <= e.code < 500 and e.code not in (408, 429)
+            if attempt == tries or refused:
+                raise SystemExit(f"{what or dst.name} не скачался: {e}") from None
+            say(f"{what or dst.name}: {e}, докачиваю")
             time.sleep(2)
+    raise AssertionError("unreachable")
 
 
 def fetch_recording(ref: str, w: Path) -> list[str]:
