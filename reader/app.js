@@ -1055,7 +1055,7 @@
     $("#set-ui").value = settings.ui; $("#set-weight").value = settings.weight; $("#set-rewind").checked = !!settings.rewind;
     $("#set-offset").value = Math.round(settings.offset * 1000); $("#offset-out").textContent = (settings.offset > 0 ? "+" : "") + Math.round(settings.offset * 1000) + " мс";
     $("#set-scroll").value = settings.scroll; $("#set-click-word").checked = !!settings.clickWord;
-    $("#set-lock-text").checked = !!settings.lockText; $("#set-justify").checked = settings.justify !== false;
+    $("#set-justify").checked = settings.justify !== false;
     $("#set-word-style").value = settings.wordStyle; $("#set-hide-ui").checked = byDevice("hideUi"); $("#set-immersive").checked = byDevice("immersive"); $("#set-pause-hidden").checked = !!settings.pauseHidden;
     document.querySelectorAll("#set-theme button").forEach((b) => b.classList.toggle("on", b.dataset.v === settings.theme));
     $("#btn-focus").classList.toggle("on", settings.dimMode !== "off"); $("#btn-focus-top").classList.toggle("on", settings.dimMode !== "off");
@@ -1086,8 +1086,6 @@
   bind("#set-ui", "ui"); bind("#set-weight", "weight", Number); bind("#set-rewind", "rewind"); bind("#set-offset", "offset", (v) => Number(v) / 1000);
   $("#set-offset").addEventListener("input", () => update(true));
   bind("#set-justify", "justify");
-  // the sentence being spoken on the lock screen: the app's narrator only, a browser has no lock screen
-  bind("#set-lock-text", "lockText"); $("#set-lock-text").closest("label").hidden = !native;
   bind("#set-word-style", "wordStyle"); bind("#set-hide-ui", "hideUi"); bind("#set-pause-hidden", "pauseHidden"); bind("#set-immersive", "immersive");
   // switched off while playing: the bars come back now, not at the next pause
   $("#set-hide-ui").addEventListener("input", () => { if (!byDevice("hideUi")) { showPlayer(); document.body.classList.remove("idle"); } });

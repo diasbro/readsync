@@ -19,26 +19,13 @@ final class Player: NSObject, ObservableObject {
     /// `isPlaying` as the views see it: told by the player, not asked of it on every draw.
     @Published private(set) var playing = false
     @Published private(set) var progress = 0.0
-    /// The lock screen shows the sentence being spoken instead of the book's title: the reader's setting,
-    /// told here each time the page saves its settings.
-    var lockText = AppSettings.lockText {
-        didSet {
-            guard lockText != oldValue else { return }
-            if lockText { loadText() } else { text = nil }  // the book's text is held only while it is shown
-            updateNowPlaying()
-        }
-    }
-
     private var player: AVPlayer?
     private var observations: [NSKeyValueObservation] = []
     private var endObserver: NSObjectProtocol?
     private var timeObserver: Any?
     private var src = ""
     private var sharedDir: URL?
-    private var words = Words()  // when each word starts (sessions count the words heard) and where it sits
-    private var text: BookText?  // only while the lock screen shows the sentence
-    private var loadingText = false
-    private var shownLine: String?
+    private var words = Words()  // when each word starts: sessions count the words heard
     private weak var web: WKWebView?
     private var webSlug: String?  // the book of the page in the web view, which may be one without audio
     private var reattached = false  // the reader came back to the narrator it left: its position stands
@@ -291,7 +278,6 @@ final class Player: NSObject, ObservableObject {
             }
         }
         setupRemote()
-        loadText()
         updateNowPlaying()
     }
 
@@ -396,9 +382,6 @@ final class Player: NSObject, ObservableObject {
         stateLoaded = false
         storedPos = (0, 0)
         words = Words()
-        text = nil
-        loadingText = false
-        shownLine = nil
         reattached = false
         lastTick = nil
         isDone = false
@@ -538,7 +521,6 @@ final class Player: NSObject, ObservableObject {
     private func tick() {
         let f = fraction
         if abs(f - progress) > 0.0005 { progress = f }  // a hair on the bar: no redraw for less
-        if lockText, line()?.text != shownLine { updateNowPlaying() }
         let t = time, playing = isPlaying
         if let prev = lastTick, !markedOnce, stateLoaded, let book,
             Self.crossed(prev: prev, now: t, threshold: Self.readThreshold(book, duration: duration), playing: playing, done: isDone)
@@ -595,38 +577,6 @@ final class Player: NSObject, ObservableObject {
         })
     }
 
-    // ---- the sentence on the lock screen ----
-
-    private func loadText() {
-        guard lockText, text == nil, !loadingText, let book else { return }
-        loadingText = true
-        let gen = itemGen, file = Shelf.localDir(book.slug).appendingPathComponent("book.json")
-        Task.detached {
-            let text = BookText(file)
-            await MainActor.run {
-                let p = Player.shared
-                // the flag drops whatever came of it: left up, no text would ever be loaded again
-                p.loadingText = false
-                guard p.lockText else { return }
-                guard p.itemGen == gen else {
-                    p.loadText()  // the narrator took up its item again meanwhile (the page reattached)
-                    return
-                }
-                p.text = text
-                p.updateNowPlaying()
-            }
-        }
-    }
-
-    /// The sentence being spoken now, and its chapter.
-    private func line() -> (text: String, chapter: String)? {
-        guard let text else { return nil }
-        let i = wordIndex(time) - 1
-        guard i >= 0, i < words.block.count else { return nil }
-        let b = Int(words.block[i])
-        guard let s = text.sentence(block: b, at: Int(words.from[i]), to: Int(words.to[i])) else { return nil }
-        return (s, text.chapter(b))
-    }
 
     // ---- telling the reader ----
 
@@ -724,16 +674,13 @@ final class Player: NSObject, ObservableObject {
 
     private func updateNowPlaying() {
         guard let book else { return }
-        let line = lockText ? line() : nil
-        shownLine = line?.text
         var info: [String: Any] = [
-            MPMediaItemPropertyTitle: line?.text ?? book.title,
-            MPMediaItemPropertyArtist: line == nil ? book.author : book.title,
+            MPMediaItemPropertyTitle: book.title,
+            MPMediaItemPropertyArtist: book.author,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: time,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(rate) : 0,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: Double(rate),
         ]
-        if let line, !line.chapter.isEmpty { info[MPMediaItemPropertyAlbumTitle] = line.chapter }
         if let d = player?.currentItem?.duration.seconds.finite { info[MPMediaItemPropertyPlaybackDuration] = d }
         if let cover = Player.cover(book.slug) {
             info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: cover.size) { _ in cover }
@@ -779,9 +726,6 @@ struct Session: Sendable {
 /// timing.json's words, as small numbers: `[block, charStart, charEnd, t0, t1]` each.
 struct Words: Sendable {
     var starts: [Double] = []
-    var block: [Int32] = []
-    var from: [Int32] = []
-    var to: [Int32] = []
 
     init() {}
 
@@ -790,72 +734,7 @@ struct Words: Sendable {
             let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
             let words = obj["words"] as? [[Any]]
         else { return }
-        let int = { (w: [Any], i: Int) in Int32(clamping: Int(w.count > i ? ReadingState.num(w[i]) : 0)) }
         starts = words.map { $0.count > 3 ? ReadingState.num($0[3]) : 0 }
-        block = words.map { int($0, 0) }
-        from = words.map { int($0, 1) }
-        to = words.map { int($0, 2) }
-    }
-}
-
-/// What the lock screen needs of book.json: each block's text and sentences, and where chapters begin.
-struct BookText: Sendable {
-    private var blocks: [String] = []
-    private var sentences: [[Int32]] = []  // per block: start, end, start, end… in UTF-16 units, as the reader counts
-    private var chapters: [(block: Int, title: String)] = []
-
-    init?(_ file: URL) {
-        guard let data = try? Data(contentsOf: file),
-            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-            let blocks = obj["blocks"] as? [[String: Any]]
-        else { return nil }
-        for b in blocks {
-            self.blocks.append(b["text"] as? String ?? "")
-            let spans = b["sentences"] as? [[Any]] ?? []
-            sentences.append(spans.flatMap { $0.prefix(2).map { Int32(clamping: Int(ReadingState.num($0))) } })
-        }
-        for c in obj["chapters"] as? [[String: Any]] ?? [] where (c["hidden"] as? Bool) != true {
-            chapters.append((Int(ReadingState.num(c["first_block"])), c["title"] as? String ?? ""))
-        }
-    }
-
-    func chapter(_ block: Int) -> String { chapters.last { $0.block <= block }?.title ?? "" }
-
-    /// The sentence the word at `from..<to` of `block` is in: the block's own span, or, without spans, as far
-    /// as the sentence-ending marks either side. A long one is shown a piece at a time, the piece the word is in.
-    /// `limit`: what one line of the lock screen's player holds; a longer sentence goes by in pieces of that.
-    func sentence(block b: Int, at from: Int, to: Int, limit: Int = 26) -> String? {
-        guard b >= 0, b < blocks.count else { return nil }
-        let s = blocks[b] as NSString
-        let n = s.length
-        guard from >= 0, from <= n else { return nil }
-        var start = 0, end = n
-        let spans = sentences[b]
-        if let k = stride(from: 0, to: spans.count - 1, by: 2).first(where: { from >= Int(spans[$0]) && from < Int(spans[$0 + 1]) }) {
-            (start, end) = (Int(spans[k]), min(n, Int(spans[k + 1])))
-        } else {
-            let enders = Set(".!?…".utf16), closers = Set("\"»”’)]".utf16)
-            start = from
-            while start > 0, !enders.contains(s.character(at: start - 1)) { start -= 1 }
-            end = max(from, min(to, n))
-            while end < n, !enders.contains(s.character(at: end)) { end += 1 }
-            while end < n, enders.contains(s.character(at: end)) || closers.contains(s.character(at: end)) { end += 1 }
-        }
-        // a long one in pieces of up to `limit`, cut at a space: the line changes once per piece, not per word
-        var a = start, z = end
-        while z - a > limit {
-            let r = s.range(of: " ", options: .backwards, range: NSRange(location: a + 1, length: limit - 1))
-            let cut = r.location == NSNotFound ? a + limit : r.location
-            if from < cut {
-                z = cut
-                break
-            }
-            a = cut
-        }
-        let r = s.rangeOfComposedCharacterSequences(for: NSRange(location: a, length: z - a))
-        let body = s.substring(with: r).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else { return nil }
-        return body  // pieces follow the voice one after another: no ellipses eating the line
     }
 }
 

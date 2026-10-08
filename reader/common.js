@@ -55,7 +55,7 @@ function send(method, path, body, keepalive) {
 // ---------------- settings ----------------
 const DEFAULTS = { font: 20, lh: 1.65, width: 42, family: "literata", ui: "inter", weight: 400, theme: "auto", sent: true, word: true, wordStyle: "bg",
   dimMode: "off", offset: 0, scroll: "zone", clickWord: false, speed: 1, hideUi: null, immersive: null, pauseHidden: true, rewind: true,
-  audioSearch: true, libView: "list", lockText: false, justify: true };
+  audioSearch: true, libView: "list", justify: true };
 // A finger has no hover. Settings left at null follow the device: on for a touch screen, off for a mouse,
 // until the reader sets them; a value the reader saved is never replaced.
 const touchUI = matchMedia("(hover: none)").matches;
