@@ -1427,9 +1427,13 @@ final class Shelf: ObservableObject {
             }
             whole = true
             // iCloud's own download of the book's files goes back to the cloud: the phone keeps them once, in
-            // the copy. The manifest stays: every refresh reads it.
-            for name in book.files.keys { try? fm.evictUbiquitousItem(at: source.appendingPathComponent(name)) }
-            for name in names { try? fm.evictUbiquitousItem(at: images.appendingPathComponent(name)) }
+            // the copy. The manifest stays: every refresh reads it. In the background: one call per file waits
+            // for iCloud, and a book of a thousand images would hold the round with its ring full.
+            let downloaded = book.files.keys.map { source.appendingPathComponent($0) }
+                + names.map { images.appendingPathComponent($0) }
+            Task.detached(priority: .background) {
+                for url in downloaded { try? FileManager.default.evictUbiquitousItem(at: url) }
+            }
             return .success(book)
         } catch {
             whole = false
