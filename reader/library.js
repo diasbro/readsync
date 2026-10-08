@@ -294,7 +294,8 @@
   const queryOf = (x) => (isShell(x) ? x.query : hitsCache[x.slug]?.query) || x.title || "";
   const icon = (act, glyph, title) => `<button class="ic" data-act="${act}" title="${title}" aria-label="${title}">${glyph}</button>`;
   const jobOf = (b) => jobs[b.slug];
-  const failedJob = (b) => { const j = jobOf(b); return j && !j.running && j.exit !== 0 ? j : null; };
+  // a job whose text loaded but whose audio did not fit it is no failure: the audio section says why
+  const failedJob = (b) => { const j = jobOf(b); return j && !j.running && j.exit !== 0 && !j.audio_refused ? j : null; };
   const shellOf = (b) => wishes.find((w) => w.slug === b.slug);  // the title this book is loading for
   const openableCount = (found) => (found?.hits || []).filter(openable).length + (found?.author_hits?.hits || []).filter(openable).length;
   function actsHtml(x) {
@@ -351,8 +352,10 @@
     const now = b.has_audio ? [narratorOf(b) ? "читает " + narratorOf(b) : "", sourceOf(b.audio_source), b.timing_source === "mms" ? "точное выравнивание" : "разметка по субтитрам"].filter(Boolean).join(" · ") : "нет";
     const align = b.has_audio && b.timing_source !== "mms" ? `<button class="link-btn" data-act="align">выровнять точно (долго)</button>` : "";
     const find = audioOn() ? `<button class="link-btn" data-act="findAudio">${b.has_audio ? "заменить озвучку" : "искать озвучки"}</button>` : "";
-    return `<div class="sec"><h5>Аудио<span class="now">· ${esc(now)}</span>${find}${align}</h5>
-      ${audioFindHtml(b)}
+    const drop = b.audio ? `<button class="link-btn" data-act="removeAudio">удалить аудио</button>` : "";
+    const j = jobOf(b), refused = j?.audio_refused ? `<div class="m status warn"><span>${esc(j.log[j.log.length - 1] || "аудио не подошло")}</span><button class="link-btn" data-act="dismiss">скрыть</button></div>` : "";
+    return `<div class="sec"><h5>Аудио<span class="now">· ${esc(now)}</span>${find}${align}${drop}</h5>
+      ${refused}${audioFindHtml(b)}
       <div class="own"><input name="audio_url" placeholder="${b.has_audio ? "Заменить: " : ""}ссылка на YouTube, части по одной через пробел"><label class="file">или <u>файл</u><input type="file" name="audio_file" accept="audio/*,.m4b,.m4a,.mp3" hidden></label><input name="narrator" class="narr" placeholder="Чтец"><button class="btn sm" data-act="audioGo">${b.has_audio ? "Заменить" : "Добавить"}</button></div>
       ${b.has_audio || audioOn() ? "" : `<div class="m">Голос выбери сам: <a target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${q((b.title || "") + " аудиокнига")}">YouTube</a></div>`}</div>`;
   }
@@ -403,12 +406,13 @@
     const stage = job?.running && job.stage ? " · " + job.stage : "";
     const meta = [facts(b), !b.ready ? (b.building ? "загружается" + (stage || "…") : failed ? null : "не загрузилась до конца") : b.building ? "заменяю" + (stage || "…") : null].filter(Boolean).join(" · ");
     const frag = b.fragment_note ? `<div class="m status warn">в конце текста «${esc(b.fragment_note)}»</div>` : "";
+    const refused = job?.audio_refused ? `<div class="m" title="${esc(job.log[job.log.length - 1] || "")}">аудио не подошло</div>` : "";
     const cover = b.cover ? `<img class="cover" src="/books/${esc(b.slug)}/${esc(b.cover)}" alt="">` : `<div class="cover empty">${esc(nameOf(b).slice(0, 1))}</div>`;
     // one stop for the keyboard per card: the title; the cover is the same link for the pointer only
     const title = `<div class="t">${esc(nameOf(b))}</div>`;
     const link = b.ready ? `<a class="cover-link" href="?book=${esc(b.slug)}" tabindex="-1" aria-hidden="true">${cover}</a>` : `<div class="cover-link">${cover}</div>`;
     return `<div class="card" data-key="${esc(b.slug)}">${link}
-      <div class="body">${b.ready ? `<a href="?book=${esc(b.slug)}" class="tlink">${title}</a>` : title}<div class="m${meta ? "" : " empty"}">${esc(meta)}</div>${failHtml(b)}${frag}
+      <div class="body">${b.ready ? `<a href="?book=${esc(b.slug)}" class="tlink">${title}</a>` : title}<div class="m${meta ? "" : " empty"}">${esc(meta)}</div>${failHtml(b)}${refused}${frag}
       <div class="bar${pct ? "" : " empty"}${done ? " done" : ""}"><i style="width:${pct}%"></i></div><div class="m${pct || said ? "" : " empty"}">${esc(where)}</div></div>${actsHtml(b)}</div>`;
   }
   // ---- covers: the same books as tiles, a cover, the title in two lines and one line of state ----
@@ -434,6 +438,7 @@
       act = confirmStop === b.slug ? "" : icon("stopJob", iconSvg("close"), "Отменить загрузку");
     } else if (fail) line = `<span class="m warn" title="${esc(fail.log[fail.log.length - 1] || "код " + fail.exit)}">не загрузилось</span>`;
     else if (!b.ready) line = '<span class="m warn">не загрузилась до конца</span>';
+    else if (job?.audio_refused && !job.running) line = `<span class="m" title="${esc(job.log[job.log.length - 1] || "")}">аудио не подошло</span>`;
     else if (b.fragment_note) line = `<span class="m warn" title="в конце текста «${esc(b.fragment_note)}»">фрагмент</span>`;
     else line = `<span class="m" title="${esc(where)}">${said ? "" : audioMark}${esc(where)}</span>`;
     const tile = `<div class="card tile${opened ? " on" : ""}${loading ? " loading" : ""}" ${opened ? "data-for" : "data-key"}="${esc(b.slug)}">${link}${title}<div class="tl">${line}${act}</div></div>`;
@@ -910,6 +915,12 @@
       const ok = await startAdd({ slug: b.slug, audio_ref: h.ref, narrator: h.narrator || "" });
       if (ok) { closeCard(); renderLibrary(); } else paint();
     },
+    // the book goes back to text only; its text, edition and place stay
+    removeAudio: (x, btn) => askInPlace(btn, "аудио и привязка к нему удалятся, текст останется —", "удалить", async () => {
+      const r = await api("POST", "/api/remove-audio/" + x.slug).catch((err) => ({ error: String(err) }));
+      if (r.error) toast("Ошибка: " + r.error);
+      renderLibrary();
+    }),
     align: async (x) => {
       const r = await api("POST", "/api/align/" + x.slug).catch((err) => ({ error: String(err) }));
       if (r.error) toast("Ошибка: " + r.error); else { closeCard(); toast("Точное выравнивание запущено, это долго"); pollJobs(); renderLibrary(); }

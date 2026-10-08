@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import math
 import os
 import re
 import shutil
@@ -51,6 +52,13 @@ UA = {"User-Agent": "Mozilla/5.0"}
 SOURCE_BPS = 128_000 // 8
 OURS_BPS = 48_000 // 8
 WAV_BPS = 16_000 * 2
+# below this share of the recording's words found in the book, in order, it is the reading of another text
+# (another translation, another book). Measured: right recordings 84% (auto-captions of an old reading) and 95%,
+# another translation of the same book 2% (the passages the two translations share); a noisy reading with a
+# skipped chapter still makes about 30%
+MIN_MATCH = 0.10
+# the exit of a job whose audio did not fit the text (which loaded, if it came too): a notice, not a failure
+AUDIO_REFUSED = 3
 
 
 def say(msg: str) -> None:
@@ -370,6 +378,27 @@ def build_audio(sources: list[str], w: Path, lang: str) -> None:
     lst.unlink()
 
 
+def new_captions(w: Path) -> bool:
+    """The new recording's own captions or transcript are in the work dir."""
+    return any(w.glob("yt.*.json3")) or (w / "whisper.json3").exists()
+
+
+def match_of(w: Path) -> float | None:
+    """The share of the recording's words anchored into the text (anchors.json), None when it cannot be told."""
+    try:
+        m = json.loads((w / "anchors.json").read_text(encoding="utf-8")).get("match")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if isinstance(m, bool) or not isinstance(m, (int, float)) or not math.isfinite(m):
+        return None
+    return float(m)
+
+
+def percent(m: float) -> str:
+    """A share as a percentage floored to one decimal, the Russian way: 0.0032 is «0,3»."""
+    return f"{math.floor(round(m * 1000, 6)) / 10:.1f}".replace(".", ",")
+
+
 def land_audio(w: Path, d: Path) -> None:
     """The new audio, its timing and its captions replace the old ones in one step each; until here the
     book kept its old audio.m4a, timing.json and book.toml. stamp() follows and comes last."""
@@ -448,14 +477,10 @@ def build(args: argparse.Namespace, d: Path, w: Path) -> None:
     text = w / "book.json" if (w / "book.json").exists() else d / "book.json"  # a new text waits in w
     book = json.loads(text.read_text(encoding="utf-8"))
 
-    # new text under existing captions (an edition replaced): the word timing is rebuilt from them
     has_captions = any(d.glob("yt.*.json3")) or (d / "whisper.json3").exists()
     has_audio = any((d / name).exists() for name in PLAYABLE)
     new_audio = bool(args.audio or args.audio_ref)
-    retime = bool(args.text) and not new_audio and has_captions and has_audio
-    if retime:
-        run([PY, str(PIPE / "anchors.py"), str(d), "--work", str(w)])
-        run([PY, str(PIPE / "timing_from_anchors.py"), str(w)])
+    refused = ""  # why the new audio is not the book's: the job still does the rest and fails at the end
     if new_audio:
         # the old audio, timing and book.toml stay as they are until everything new is ready in w
         sources = fetch_recording(args.audio_ref, w) if args.audio_ref else args.audio
@@ -463,8 +488,38 @@ def build(args: argparse.Namespace, d: Path, w: Path) -> None:
         if not (w / "yt.merged.json3").exists():
             say("распознаю речь: субтитров нет, это долго")
             run([PY, str(PIPE / "transcribe.py"), str(w), "--model", args.whisper_model, "--lang", args.lang])
-        say("размечаю")
+        # only what the new recording says counts: never the book's old captions
+        if not new_captions(w):
+            refused = "Не удалось сверить аудио с текстом"
+        else:
+            say("размечаю")
+            run([PY, str(PIPE / "anchors.py"), str(d), "--work", str(w)])
+            m = match_of(w)
+            if m is None:
+                refused = "Не удалось сверить аудио с текстом"
+            elif m < MIN_MATCH:  # another book or another translation: its timing would be junk
+                refused = f"Аудио не совпадает с текстом: совпало {percent(m)} %"
+            else:
+                run([PY, str(PIPE / "timing_from_anchors.py"), str(w)])
+        if refused:
+            if not args.text:  # nothing else to do: the book stays as it was, the card says why
+                say(refused)
+                sys.exit(AUDIO_REFUSED)
+            # none of it reaches the book or the steps below: the new text is timed by the old captions and
+            # aligned on the book's own audio, whose WAV align.py makes again
+            derived = [w / "audio16k.wav", w / "parts.txt", *w.glob("part[0-9][0-9].*"), *w.glob("yt.*.json3")]
+            for f in [w / "audio.m4a", w / "anchors.json", w / "whisper.json3", *derived]:
+                f.unlink(missing_ok=True)
+            new_audio = False
+    # new text under existing captions (an edition replaced): the word timing is rebuilt from them, if they
+    # are of this text at all; if not, the new text does not land: the book keeps its text, audio and timing
+    retime = bool(args.text) and not new_audio and has_captions and has_audio
+    if retime:
         run([PY, str(PIPE / "anchors.py"), str(d), "--work", str(w)])
+        m = match_of(w)
+        if m is None or m < MIN_MATCH:
+            got = f"совпало {percent(m)} %" if m is not None else "не удалось сверить"
+            raise SystemExit(f"Новый текст не совпадает с аудио книги: {got}. Удалите аудио, чтобы заменить текст")
         run([PY, str(PIPE / "timing_from_anchors.py"), str(w)])
 
     toml = d / "book.toml"
@@ -507,6 +562,9 @@ def build(args: argparse.Namespace, d: Path, w: Path) -> None:
         print("running precise MMS alignment (about 15 min per hour of audio, low priority)...", flush=True)
         run([PY, str(PIPE / "align.py"), str(d), "--work", str(w)])
         print("done: precise timing", flush=True)
+    if refused:  # the text is in, the audio is not: the job ends with why, and the card shows it beside the audio
+        say(refused)
+        sys.exit(AUDIO_REFUSED)
 
 
 if __name__ == "__main__":

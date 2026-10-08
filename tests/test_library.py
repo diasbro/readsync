@@ -285,6 +285,32 @@ def test_a_job_that_succeeded_unseen_lets_go_of_its_log_and_its_title(tmp_path, 
     assert [w["id"] for w in library.load_wishlist()] == ["w2"]
 
 
+def test_a_text_that_loaded_with_audio_that_did_not_fit_is_loaded_with_a_notice(tmp_path, monkeypatch):
+    """Not a failure: the title it was saved for is done, and the log stays as the audio section's notice."""
+    sys.path.insert(0, str(Path(library.__file__).parent / "pipeline"))
+    import add_book
+
+    assert library.AUDIO_REFUSED == add_book.AUDIO_REFUSED
+    books = tmp_path / "books"
+    monkeypatch.setattr(library, "BOOKS", books)
+    monkeypatch.setattr(library, "WISHLIST_FILE", books / "wishlist.json")
+    (books / "b").mkdir(parents=True)
+    (books / "wishlist.json").write_text(json.dumps([{"id": "w1", "title": "B", "slug": "b"}]), encoding="utf-8")
+    body = 'import sys\nprint("ready", flush=True)\nprint("Аудио не совпадает с текстом: совпало 0,3 %", file=sys.stderr)\nsys.exit(3)\n'
+    library.launch("b", fake_job(tmp_path, body))
+    wait_job("b")
+    library.JOBS.clear()
+
+    st = library.job_status()["b"]
+
+    assert st["audio_refused"] is True and st["exit"] == 3
+    assert st["log"][-1] == "Аудио не совпадает с текстом: совпало 0,3 %"
+    assert library.load_wishlist() == []
+    assert (books / "b" / "add.log").exists()
+    library.stop_job("b")  # «скрыть»
+    assert "b" not in library.job_status()
+
+
 def test_a_job_left_by_an_earlier_server_is_still_running_and_can_be_stopped(tmp_path, monkeypatch, work_root):
     """It holds its work dir: the card says «загружается», a second load is refused, and a stop reaches it."""
     books = tmp_path / "books"
@@ -609,6 +635,120 @@ def test_a_rename_waits_for_the_job_holding_the_book(tmp_path, monkeypatch):
     assert 'title = "Новое"' in (d / "book.toml").read_text(encoding="utf-8")
 
 
+def audiobook(tmp_path: Path, monkeypatch) -> Path:
+    """A finished audiobook with everything its audio brought, a reading state and a cover."""
+    toml = (
+        f'title = "B"\nid = "{"c" * 32}"\nedition = "e1"\naudio_source = "https://example.org/a"\n'
+        'narrator = "Чтец"\naudio_end = 12.50\ntranslator = "Малявин"\n'
+    )
+    d = ready_book(tmp_path, monkeypatch, toml=toml)
+    for name in ("audio.m4a", "audio.mp3", "yt.webm", "timing.json", "yt.ru-orig.json3", "whisper.json3"):
+        (d / name).write_bytes(b"x" * 10)
+    (d / "images").mkdir()
+    (d / "images" / "cover.jpg").write_bytes(b"cover")
+    (d / "state").mkdir()
+    (d / "state" / f"{'a' * 32}.json").write_text('{"pos": 30, "posAt": 1}', encoding="utf-8")
+    return d
+
+
+def test_removing_the_audio_leaves_the_text_its_edition_and_place(tmp_path, monkeypatch):
+    d = audiobook(tmp_path, monkeypatch)
+    added = (d / "book.toml").stat().st_mtime_ns
+    library.remove_audio("b")
+    assert sorted(p.name for p in d.iterdir()) == ["book.json", "book.toml", "images", "state"]
+    assert (d / "state" / f"{'a' * 32}.json").read_text(encoding="utf-8") == '{"pos": 30, "posAt": 1}'
+    meta = tomllib.loads((d / "book.toml").read_text(encoding="utf-8"))
+    assert not {"audio_source", "narrator", "audio_end"} & set(meta)
+    assert (meta["id"], meta["edition"], meta["translator"]) == ("c" * 32, "e1", "Малявин")
+    assert meta["files"] == f"book.json:{(d / 'book.json').stat().st_size}"
+    assert (d / "book.toml").stat().st_mtime_ns == added  # its place in the library stays
+    (book,) = library.list_books()
+    assert book["audio"] is None and not book["has_audio"]
+
+
+def test_removing_the_audio_waits_for_the_job_holding_the_book(tmp_path, monkeypatch):
+    d = audiobook(tmp_path, monkeypatch)
+    before = {p.name: p.read_bytes() for p in d.iterdir() if p.is_file()}
+    library._pipeline()
+    from tidy import claim, work_dir
+
+    claim(work_dir("b"))
+    with pytest.raises(library.Busy, match="обрабатывается"):
+        library.remove_audio("b")
+    assert {p.name: p.read_bytes() for p in d.iterdir() if p.is_file()} == before
+
+
+def test_removing_the_audio_of_no_book_or_a_text_only_one(tmp_path, monkeypatch):
+    ready_book(tmp_path, monkeypatch)
+    with pytest.raises(FileNotFoundError):
+        library.remove_audio("nobook")
+    with pytest.raises(FileNotFoundError):
+        library.remove_audio("../b")
+    with pytest.raises(ValueError, match="нет аудио"):
+        library.remove_audio("b")
+
+
+def listened(tmp_path: Path, monkeypatch, pos: float, pos_at: int, sent_at: int) -> Path:
+    """An audiobook of 10 blocks of 3 sentences, one timed word per sentence 10 s apart, listened to `pos`."""
+    import state
+
+    d = audiobook(tmp_path, monkeypatch)
+    blocks = [{"kind": "p", "text": "Раз. Два. Три.", "sentences": [[0, 4], [5, 9], [10, 14]]} for _ in range(10)]
+    (d / "book.json").write_text(json.dumps({"title": "B", "blocks": blocks}), encoding="utf-8")
+    words = [[b, s * 5, s * 5 + 3, (b * 3 + s) * 10.0, (b * 3 + s) * 10.0 + 5] for b in range(10) for s in range(3)]
+    (d / "timing.json").write_text(json.dumps({"duration": 300.0, "words": words}), encoding="utf-8")
+    (d / "state" / f"{'a' * 32}.json").write_text(
+        json.dumps({"pos": pos, "posAt": pos_at, "sent": 2, "sentAt": sent_at, "sentPct": 7, "sentEdition": "e1"}),
+        encoding="utf-8",
+    )
+    assert state.load(d)["sent"] == 2
+    return d
+
+
+def test_a_book_listened_to_80_percent_opens_at_that_sentence_once_its_audio_is_gone(tmp_path, monkeypatch):
+    import state
+
+    d = listened(tmp_path, monkeypatch, pos=245.0, pos_at=2000, sent_at=1000)  # in sentence 24 of 30
+    library.remove_audio("b")
+    st = state.load(d)
+    assert (st["sent"], st["sentAt"], st["sentPct"], st["sentEdition"]) == (24, 2000, 80, "e1")
+    assert st["pos"] == 245.0  # the audio position stays as it was
+
+
+def test_a_page_position_newer_than_the_audio_one_stays(tmp_path, monkeypatch):
+    import state
+
+    d = listened(tmp_path, monkeypatch, pos=245.0, pos_at=1000, sent_at=2000)
+    library.remove_audio("b")
+    st = state.load(d)
+    assert (st["sent"], st["sentAt"], st["sentPct"]) == (2, 2000, 7)
+
+
+def test_the_manifest_never_lists_a_file_that_is_gone(tmp_path, monkeypatch):
+    """book.toml is written once, already without the audio, before any file goes; leftovers are tidied."""
+    import manifest
+
+    d = audiobook(tmp_path, monkeypatch)
+    (d / "anchors.json").write_text("{}", encoding="utf-8")  # a leftover of an earlier version
+    seen = []
+    stamp = manifest.stamp
+
+    def watched(book, **kw):
+        seen.append(((book / "book.toml").read_text(encoding="utf-8"), (book / "audio.m4a").exists()))
+        stamp(book, **kw)
+        seen.append(((book / "book.toml").read_text(encoding="utf-8"), (book / "audio.m4a").exists()))
+
+    monkeypatch.setattr(manifest, "stamp", watched)
+    library.remove_audio("b")
+    (before, audio_before), (after, audio_after) = seen
+    assert "narrator" in before and audio_before and audio_after  # nothing written, nothing deleted before
+    meta = tomllib.loads(after)
+    assert meta["files"] == f"book.json:{(d / 'book.json').stat().st_size}"
+    assert not {"audio_source", "narrator", "audio_end"} & set(meta)
+    assert (d / "book.toml").read_text(encoding="utf-8") == after  # the one write
+    assert not (d / "anchors.json").exists()
+
+
 def test_slugify_reads_combining_letters_as_themselves():
     """W27: NFC first, then each code point; the cut keeps a dash it lands on (the phone does the same)."""
     assert library.slugify("Мастер и Маргарита") == "master-i-margarita"
@@ -616,3 +756,28 @@ def test_slugify_reads_combining_letters_as_themselves():
     assert library.slugify("е\u0301ль") == "e-l"  # е with a stress mark: no letter of its own
     assert library.slugify("a" * 47 + " b") == "a" * 47 + "-"
     assert library.slugify("!!!") == "book"
+
+
+def test_removing_the_audio_waits_for_the_reading_state_from_icloud(tmp_path, monkeypatch):
+    """This device's file is still a placeholder: the newest place may be in it, so nothing is touched yet."""
+    import state
+
+    d = listened(tmp_path, monkeypatch, pos=245.0, pos_at=2000, sent_at=1000)
+    own = d / "state" / f"{'a' * 32}.json"
+    own.rename(d / "state" / f".{own.name}.icloud")
+    state._last_good.clear()
+    before = {p.name: p.read_bytes() for p in d.iterdir() if p.is_file()}
+    with pytest.raises(state.StateUnavailable, match="iCloud"):
+        library.remove_audio("b")
+    assert {p.name: p.read_bytes() for p in d.iterdir() if p.is_file()} == before
+
+
+def test_a_timing_longer_than_the_text_puts_the_place_on_its_last_sentence(tmp_path, monkeypatch):
+    import state
+
+    d = listened(tmp_path, monkeypatch, pos=245.0, pos_at=2000, sent_at=1000)
+    words = [[b, 0, 3, b * 10.0, b * 10.0 + 5] for b in range(40)]  # 40 blocks timed, 10 in the text
+    (d / "timing.json").write_text(json.dumps({"duration": 400.0, "words": words}), encoding="utf-8")
+    library.remove_audio("b")
+    st = state.load(d)
+    assert (st["sent"], st["sentPct"]) == (29, 97)

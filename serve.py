@@ -37,6 +37,7 @@ from library import (
     merge_settings,
     merge_state,
     random_sentence,
+    remove_audio,
     rename_book,
     save_hits,
     start_align,
@@ -346,6 +347,17 @@ class Handler(SimpleHTTPRequestHandler):
             with STATE_LOCK:
                 job, err = start_align(self.path.rsplit("/", 1)[-1])
             return self.send_json(job or {"error": err}, HTTPStatus.OK if job else HTTPStatus.BAD_REQUEST)
+        if self.path.startswith("/api/remove-audio/"):
+            try:
+                return self.send_json(remove_audio(self.path.rsplit("/", 1)[-1]))
+            except Busy as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.CONFLICT)
+            except StateUnavailable as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except FileNotFoundError as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.NOT_FOUND)
+            except (ValueError, OSError) as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
         if self.path.startswith("/api/wishlist"):
             try:
                 return self.send_json(wishlist_add(delta))

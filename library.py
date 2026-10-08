@@ -364,6 +364,72 @@ def delete_book(slug: str) -> None:
         JOBS.pop(slug, None)
 
 
+AUDIO_FILES = ("timing.json", "audio.m4a", "audio.mp3", "yt.webm", "whisper.json3")
+AUDIO_KEYS = ("audio_source", "narrator", "audio_end")
+
+
+def remove_audio(slug: str) -> dict:
+    """The book goes back to text only: its audio, the timing and captions made from it, and what book.toml says
+    of them. The text and its edition stay, and so does the place: a position in the audio newer than the page
+    one becomes that sentence. The page asks for confirmation first."""
+    _pipeline()
+    from manifest import stamp
+    from tidy import tidy
+
+    d = BOOKS / slug
+    if not SLUG_RE.match(slug) or not (d / "book.toml").is_file():
+        raise FileNotFoundError("книги нет")
+    with STATE_LOCK:  # start_job runs under it too: no job starts between the check and the removal
+        if job_running(slug):
+            raise Busy("книга ещё обрабатывается")
+        gone = [d / n for n in AUDIO_FILES if (d / n).exists()] + sorted(d.glob("yt.*.json3"))
+        if not gone:
+            raise ValueError("у книги нет аудио")
+        try:
+            with state.LOCK:  # this device's file must be readable before anything changes: never a place lost
+                state._own_for_write(d)
+        except state.StateUnavailable:
+            raise state.StateUnavailable("Состояние чтения ещё не пришло из iCloud, попробуйте позже") from None
+        keep_place(d)
+        # the manifest first, already without them: it never lists a file that is not there
+        stamp(d, without=AUDIO_FILES, drop=AUDIO_KEYS)
+        for f in gone:
+            f.unlink(missing_ok=True)
+        tidy(d)
+    return {"slug": slug}
+
+
+def keep_place(d: Path) -> None:
+    """The sentence being heard becomes this device's page position, when it is newer than the page one."""
+    st = state.load(d)
+    pos, pos_at = state._num(st.get("pos")), state._num(st.get("posAt")) or 0
+    if pos is None or pos_at <= (state._num(st.get("sentAt")) or 0):
+        return
+    try:
+        book = json.loads((d / "book.json").read_text(encoding="utf-8"))
+        words = json.loads((d / "timing.json").read_text(encoding="utf-8"))["words"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    if not words:
+        return
+    lo, hi = 0, len(words) - 1  # the last word started by pos
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if words[mid][3] <= pos:
+            lo = mid
+        else:
+            hi = mid - 1
+    bi, cs = int(words[lo][0]), words[lo][1]
+    blocks = book["blocks"]
+    before = sum(len(b.get("sentences") or []) for b in blocks[:bi])
+    own = blocks[bi].get("sentences") or [] if bi < len(blocks) else []
+    sent = before + max([i for i, r in enumerate(own) if r[0] <= cs] or [0])
+    total = sum(len(b.get("sentences") or []) for b in blocks)
+    sent = min(sent, max(0, total - 1))  # timing left from a longer text points past its end
+    patch = {"sent": sent, "sentAt": pos_at, "sentPct": round(sent / max(1, total) * 100)}
+    state.put(d, {**patch, "sentEdition": state.edition_of(d)})
+
+
 def load_settings() -> dict:
     try:
         return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -605,6 +671,9 @@ def start_job(form: dict) -> tuple[dict | None, str]:
 # update, a restart, the iCloud switch) when the job ends, and the card must still know how it went
 EXIT_MARK = "readsync: exit "
 EXIT_RE = re.compile(r"readsync: exit (\d+)")
+# add_book's AUDIO_REFUSED: the audio did not fit the text, the book is as the job left it (with the text it
+# brought, if any); the log says how much matched
+AUDIO_REFUSED = 3
 
 
 def launch(slug: str, cmd: list[str]) -> None:
@@ -752,6 +821,15 @@ def job_status() -> dict:
         if code == 0 and log:  # a finished job has nothing left to say: its log goes, and the title it was for
             path.unlink(missing_ok=True)
             wishlist_loaded(slug)
+        if code == AUDIO_REFUSED:  # the book has its text: the title is done; the log stays as the audio's notice
+            wishlist_loaded(slug)
         stage = next((ln for ln in reversed(lines) if re.search("[А-Яа-яЁё]", ln)), "") if running else ""
-        out[slug] = {"running": running, "exit": code, "log": lines[-6:], "stage": stage, "started": started}
+        out[slug] = {
+            "running": running,
+            "exit": code,
+            "log": lines[-6:],
+            "stage": stage,
+            "started": started,
+            "audio_refused": code == AUDIO_REFUSED,
+        }
     return out

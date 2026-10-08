@@ -47,12 +47,17 @@ def _set(text: str, key: str, value: str, raw: bool = False) -> str:
     return new if n else text.rstrip("\n") + "\n" + line + "\n"
 
 
-def _ends(d: Path, text: str) -> str:
+def _ends(d: Path, text: str, timed: bool = True) -> str:
     """book.toml text with `text_end` and `audio_end` for the book as it is now; no timing, no audio_end.
-    Files that do not read as a book leave the text as it was: the manifest itself must not fail on them."""
+    `timed`: False when the timing is on its way out. Files that do not read as a book leave the text as it
+    was: the manifest itself must not fail on them."""
     try:
         book = json.loads((d / "book.json").read_text(encoding="utf-8"))
-        timing = json.loads((d / "timing.json").read_text(encoding="utf-8")) if (d / "timing.json").exists() else None
+        timing = (
+            json.loads((d / "timing.json").read_text(encoding="utf-8"))
+            if timed and (d / "timing.json").exists()
+            else None
+        )
         end, heard = text_end(book), audio_end(book, timing) if timing is not None else None
     except (OSError, ValueError, TypeError, AttributeError, IndexError):
         return text
@@ -73,21 +78,26 @@ def stamp_ends(d: Path) -> None:
     os.replace(tmp, toml)
 
 
-def stamp(d: Path, new_edition: bool = False, edition: str = "") -> None:
-    """`edition`: this one, written in the same step as the sizes (a re-extraction chose it for its map)."""
+def stamp(
+    d: Path, new_edition: bool = False, edition: str = "", without: tuple[str, ...] = (), drop: tuple[str, ...] = ()
+) -> None:
+    """`edition`: this one, written in the same step as the sizes (a re-extraction chose it for its map).
+    `without`: files about to be deleted, left out of the sizes; `drop`: keys that go in the same write."""
     toml = d / "book.toml"
     st = toml.stat() if toml.exists() else None
     text = toml.read_text(encoding="utf-8") if st else ""
+    for k in drop:
+        text = re.sub(rf"(?m)^{k}\s*=.*\n?", "", text)
     if not ID_RE.search(text):
         text = _set(text, "id", uuid.uuid4().hex)
     if edition:
         text = _set(text, "edition", edition)
     elif new_edition or not re.search(r"(?m)^edition\s*=", text):
         text = _set(text, "edition", uuid.uuid4().hex)
-    files = ",".join(f"{n}:{(d / n).stat().st_size}" for n in PARTS if (d / n).exists())
+    files = ",".join(f"{n}:{(d / n).stat().st_size}" for n in PARTS if n not in without and (d / n).exists())
     text = _set(text, "files", files)
     if (d / "book.json").exists():
-        text = _ends(d, text)
+        text = _ends(d, text, timed="timing.json" not in without)
     tmp = d / ".book.toml.tmp"
     tmp.write_text(text, encoding="utf-8")
     if st:  # the library orders new books by this time: a book stamped again (new audio, alignment) is not new
