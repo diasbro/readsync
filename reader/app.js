@@ -219,7 +219,13 @@
     };
     return { cls, cut, run };
   }
-  const picHtml = (pc) => `<img class="pic" src="/books/${slug}/${esc(pc.src)}" alt="">`;
+  // a picture takes no place in the text, so the spaces the book had around it were folded into one beside it:
+  // a side that touches a letter gets the space back as a margin; a side by a space or a stop gets none
+  const wordChar = (c) => !!c && /[\p{L}\p{N}]/u.test(c);
+  const picHtml = (pc, text) => {
+    const gap = (wordChar(text[pc.pos - 1]) ? " gap-l" : "") + (wordChar(text[pc.pos]) ? " gap-r" : "");
+    return `<img class="pic${gap}" src="/books/${slug}/${esc(pc.src)}" alt="">`;
+  };
   // a picture in the line is a glyph at text height unless it is drawn larger than one
   const sizePic = (im) => im.classList.toggle("big", im.naturalHeight > 64);
   // ink (a heading set as SVG, a glyph, a line drawing, black on white): the dark themes turn it light, a
@@ -271,7 +277,7 @@
         let h = "", p = from;
         for (; ni < notes.length && notes[ni].pos <= to; ni++) {
           const nt = notes[ni], at = Math.max(p, nt.pos);
-          h += mk.run(p, at) + (nt.src ? picHtml(nt) : `<sup class="nref" data-n="${esc(nt.id)}" tabindex="0" role="button">${esc(nt.m || noteNo.get(nt.id))}</sup>`);
+          h += mk.run(p, at) + (nt.src ? picHtml(nt, text) : `<sup class="nref" data-n="${esc(nt.id)}" tabindex="0" role="button">${esc(nt.m || noteNo.get(nt.id))}</sup>`);
           p = at;
         }
         return h + mk.run(p, to);
@@ -1112,7 +1118,7 @@
       while (a < e && text[a] === "\n") a++;
       while (e > a && text[e - 1] === "\n") e--;
       let body = "", p = a;
-      for (; pi < pics.length && pics[pi].pos <= e; pi++) { const at = Math.max(p, pics[pi].pos); body += mk.run(p, at) + picHtml(pics[pi]); p = at; }
+      for (; pi < pics.length && pics[pi].pos <= e; pi++) { const at = Math.max(p, pics[pi].pos); body += mk.run(p, at) + picHtml(pics[pi], text); p = at; }
       body += mk.run(p, e);
       if (!body) continue;
       const k = NOTE_KIND[kind];
