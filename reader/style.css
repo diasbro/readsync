@@ -393,15 +393,18 @@ body.dim-para:not(.pages) #text .blk.cur, body.dim-sent:not(.pages) #text .s.cur
 #text .fig img { max-width: 100%; height: auto; max-height: 70vh; border-radius: 6px; }
 /* the column is the window less the two bars and the padding: 60vh alone overflows a short window */
 body.pages #text .fig img { max-height: max(80px, min(60vh, calc(100vh - var(--topbar-h) - var(--pager-h) - 140px))); }
-html[data-theme="dark"] #text .fig img, html[data-theme="night"] #text .fig img { filter: brightness(.85); }
+html:is([data-theme="dark"], [data-theme="night"]) :is(#text, #note-pop) img:not(.ink) { filter: brightness(.85); }
 /* a picture set in the line (a glyph drawn as an image) is as tall as the text; a larger one keeps its size,
    within the column. Dark glyphs on a clear ground turn light in the dark themes */
 :is(#text, #note-pop) .pic { height: 1.1em; width: auto; vertical-align: -.2em; margin: 0 .1em; }
 :is(#text, #note-pop) .pic.big { height: auto; max-width: 100%; max-height: 70vh; vertical-align: baseline; }
 #note-pop .pic.big { max-height: 40vh; }
 body.pages #text .pic.big { max-height: max(80px, min(60vh, calc(100vh - var(--topbar-h) - var(--pager-h) - 140px))); }
-html:is([data-theme="dark"], [data-theme="night"]) :is(#text, #note-pop) .pic:not(.big) { filter: invert(.85); }
-html:is([data-theme="dark"], [data-theme="night"]) :is(#text, #note-pop) .pic.big { filter: brightness(.85); }
+/* ink turns light (a small picture in the text always, as glyphs set as pictures are); hue-rotate keeps the
+   colours of a coloured drawing */
+html:is([data-theme="dark"], [data-theme="night"]) :is(#text, #note-pop) :is(img.ink, .pic:not(.big)) {
+  filter: invert(.85) hue-rotate(180deg);
+}
 #text .nref { font-size: .7em; color: var(--accent); cursor: pointer; padding: .3em .35em; margin: 0 -.35em 0 calc(1px - .35em); }
 #text .s { cursor: pointer; }
 
