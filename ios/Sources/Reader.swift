@@ -116,7 +116,6 @@ final class Bridge: NSObject, WKNavigationDelegate {
         }
         if method == "PUT", path == "/api/settings" {
             AppSettings.save(body)
-            Player.shared.lockText = AppSettings.lockText  // the switch is in the reader's settings
             return replyHandler(AppSettings.load(), nil)
         }
         // the path names the book: a write meant for another one is not this page's to make
@@ -355,7 +354,4 @@ enum AppSettings {
     /// A book is marked read at the end of its text, always: a mark made by mistake is undone right there
     /// («отменить») or by setting the status back, so there is no switch for it.
     static let markRead = true
-
-    /// «Текст на экране блокировки»: the sentence being spoken as the lock screen's title; the reader's setting.
-    static var lockText: Bool { ((load()["settings"] as? [String: Any])?["lockText"] as? Bool) ?? false }
 }
