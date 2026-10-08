@@ -36,12 +36,19 @@ def finished_book(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(add_book, "BOOKS", tmp_path)
 
     def run(cmd, **kw):  # the timing step is the one whose output the book takes in
+        if Path(cmd[1]).name == "anchors.py":
+            (Path(cmd[cmd.index("--work") + 1]) / "anchors.json").write_text('{"match": 0.5}', encoding="utf-8")
         if str(cmd[1]).endswith("timing_from_anchors.py"):
             (Path(cmd[2]) / "timing.json").write_text('{"words": []}', encoding="utf-8")
 
     monkeypatch.setattr(add_book, "run", run)
     monkeypatch.setattr(add_book, "tidy", lambda d: None)
-    monkeypatch.setattr(add_book, "build_audio", lambda src, w, lang: (w / "audio.m4a").write_bytes(b"a" * 10))
+
+    def build_audio(src, w, lang):  # the recording and its captions
+        (w / "audio.m4a").write_bytes(b"a" * 10)
+        (w / "yt.merged.json3").write_text('{"events": []}', encoding="utf-8")
+
+    monkeypatch.setattr(add_book, "build_audio", build_audio)
     monkeypatch.setattr(
         add_book, "build_text", lambda src, d, t, a, w: (d / "book.json").write_text(json.dumps({"blocks": []}))
     )
@@ -184,6 +191,10 @@ def test_audio_ref_downloads_parts_into_work_dir(tmp_path, monkeypatch, work_roo
     def run(cmd, **kw):
         if cmd[0] == "ffmpeg":
             Path(cmd[-1]).write_bytes(b"audio")
+        elif Path(cmd[1]).name == "transcribe.py":  # no captions: the transcript stands in for them
+            (Path(cmd[2]) / "whisper.json3").write_text('{"events": []}', encoding="utf-8")
+        elif Path(cmd[1]).name == "anchors.py":
+            (work_root / "b" / "anchors.json").write_text('{"match": 0.4}', encoding="utf-8")
         elif str(cmd[1]).endswith("timing_from_anchors.py"):
             (Path(cmd[2]) / "timing.json").write_text('{"words": []}', encoding="utf-8")
         seen_in_book.append(sorted(p.name for p in d.iterdir()))
@@ -334,6 +345,7 @@ def test_a_new_text_and_its_pictures_land_last(tmp_path, monkeypatch, work_root)
     def run(cmd, **kw):
         if Path(cmd[1]).name == "anchors.py":  # it times the new text, which waits in the work dir
             seen.append((json.loads((work_root / "b" / "book.json").read_text())["title"], book_title(d)))
+            (work_root / "b" / "anchors.json").write_text('{"match": 0.9}', encoding="utf-8")
         if str(cmd[1]).endswith("timing_from_anchors.py"):
             (Path(cmd[2]) / "timing.json").write_text('{"words": []}', encoding="utf-8")
 
@@ -513,3 +525,233 @@ def test_a_missing_file_is_not_retried(monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="текст не скачался"):
         add_book.fetch_text("https://x.example/gone.epub", tmp_path / "01")
     assert calls == [120]
+
+
+def matched(monkeypatch, *matches: object, captions: bool = True) -> list[tuple[str, list[str]]]:
+    """The pipeline with a recording whose words match the text by `matches` (one per anchors.py run, the last
+    repeated; a str is written into anchors.json as it is); real tidy. Returns every step run, with the captions
+    the work dir held for anchors.py."""
+    steps: list[tuple[str, list[str]]] = []
+
+    def build_audio(src, w, lang):
+        (w / "audio.m4a").write_bytes(b"new audio")
+        (w / "audio16k.wav").write_bytes(b"wav")
+        if captions:
+            (w / "yt.merged.json3").write_text('{"events": [1]}', encoding="utf-8")
+
+    def run(cmd, **kw):
+        name = Path(cmd[1]).name
+        if name == "anchors.py":
+            w = Path(cmd[cmd.index("--work") + 1])
+            steps.append((name, sorted(p.name for p in w.glob("*.json3"))))
+            m = matches[min(sum(s[0] == name for s in steps) - 1, len(matches) - 1)]
+            (w / "anchors.json").write_text(m if isinstance(m, str) else json.dumps({"match": m}), encoding="utf-8")
+            return
+        steps.append((name, []))
+        if name == "timing_from_anchors.py":
+            (Path(cmd[2]) / "timing.json").write_text('{"words": ["new"]}', encoding="utf-8")
+
+    monkeypatch.setattr(add_book, "build_audio", build_audio)
+    monkeypatch.setattr(add_book, "build_text", new_text)
+    monkeypatch.setattr(add_book, "run", run)
+    monkeypatch.setattr(add_book, "tidy", tidy.tidy)
+    return steps
+
+
+AUDIO_NAMES = ("audio.m4a", "timing.json", "yt.merged.json3", "whisper.json3", "audio16k.wav")
+TEXT_AND_AUDIO = ["--text", "https://example.org/x", "--audio", "https://example.org/a"]
+
+
+def test_audio_of_another_text_is_not_landed_but_the_text_is(tmp_path, monkeypatch, work_root, capsys):
+    """Another translation read aloud matches almost none of its words: the book gets its text and no audio,
+    and the job ends with the share that matched, for the card to show beside the audio."""
+    monkeypatch.setattr(add_book, "BOOKS", tmp_path)
+    matched(monkeypatch, 0.0032)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "nb", *TEXT_AND_AUDIO, "--narrator", "Чтец", "--no-align"])
+    with pytest.raises(SystemExit) as e:
+        add_book.main()
+    assert e.value.code == add_book.AUDIO_REFUSED
+    assert capsys.readouterr().err.splitlines()[-1] == "Аудио не совпадает с текстом: совпало 0,3 %"
+    d = tmp_path / "nb"
+    assert json.loads((d / "book.json").read_text(encoding="utf-8"))["title"] == "New"
+    assert not [n for n in AUDIO_NAMES if (d / n).exists()] and not [*d.glob("yt.*")]
+    meta = tomllib.loads((d / "book.toml").read_text(encoding="utf-8"))
+    assert not {"audio_source", "narrator", "audio_end"} & set(meta)
+    assert meta["files"] == f"book.json:{(d / 'book.json').stat().st_size}"
+    assert not (work_root / "nb").exists()
+
+
+def test_a_recording_of_part_of_the_book_lands(tmp_path, monkeypatch):
+    """What counts is how much of the recording is the book's text, not how much of the book it reads."""
+    monkeypatch.setattr(add_book, "BOOKS", tmp_path)
+    matched(monkeypatch, 0.4)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "nb", *TEXT_AND_AUDIO, "--no-align"])
+    add_book.main()
+    d = tmp_path / "nb"
+    assert (d / "audio.m4a").read_bytes() == b"new audio" and (d / "yt.merged.json3").exists()
+    assert (d / "timing.json").read_text(encoding="utf-8") == '{"words": ["new"]}'
+    assert tomllib.loads((d / "book.toml").read_text(encoding="utf-8"))["audio_source"] == "https://example.org/a"
+
+
+def test_match_is_the_share_of_the_recording_found_in_the_book():
+    """One volume of a two-volume text, read in full: little of the book, all of the recording."""
+    sys.path.insert(0, str(PIPE))
+    import anchors
+
+    volume = " ".join(f"слово{i}" for i in range(300))
+    book = {"blocks": [{"text": volume}, {"text": " ".join(f"другое{i}" for i in range(900))}]}
+    caps = {"events": [{"tStartMs": i * 400, "segs": [{"utf8": f"слово{i}"}]} for i in range(300)]}
+    res = anchors.build(book, caps)
+    assert res["spoken"] == 300 and res["matched"] == 300 and res["match"] == 1.0
+    assert res["coverage"] == 0.25
+
+
+@pytest.mark.parametrize(("m", "said"), [(0.0029, "0,2"), (0.029, "2,9"), (0.0499, "4,9"), (0.001, "0,1"), (0, "0,0")])
+def test_the_share_is_floored_to_one_decimal(m, said):
+    assert add_book.percent(m) == said
+
+
+def refused(capsys) -> tuple[object, str]:
+    """How the job ended: its exit code and its last line."""
+    with pytest.raises(SystemExit) as e:
+        add_book.main()
+    return e.value.code, capsys.readouterr().err.splitlines()[-1]
+
+
+def test_replacement_audio_of_another_text_leaves_the_old_audio(tmp_path, monkeypatch, work_root, capsys):
+    """Refused like audio that came with a text: a notice on the card, not a failure."""
+    d = book_with_audio(tmp_path, monkeypatch)
+    before = {p.name: p.read_bytes() for p in d.iterdir()}
+    matched(monkeypatch, 0.0499)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "b", "--audio", "https://example.org/a", "--no-align"])
+    assert refused(capsys) == (add_book.AUDIO_REFUSED, "Аудио не совпадает с текстом: совпало 4,9 %")
+    assert {p.name: p.read_bytes() for p in d.iterdir()} == before
+    assert not (work_root / "b").exists()
+
+
+@pytest.mark.parametrize("anchors_json", ["{}", '{"match": null}', '{"match": NaN}', '{"match": "0.5"}', "not json"])
+def test_a_match_that_cannot_be_read_refuses_the_audio(tmp_path, monkeypatch, anchors_json, capsys):
+    d = book_with_audio(tmp_path, monkeypatch)
+    before = {p.name: p.read_bytes() for p in d.iterdir()}
+    matched(monkeypatch, anchors_json)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "b", "--audio", "https://example.org/a", "--no-align"])
+    assert refused(capsys) == (add_book.AUDIO_REFUSED, "Не удалось сверить аудио с текстом")
+    assert {p.name: p.read_bytes() for p in d.iterdir()} == before
+
+
+def test_audio_without_captions_of_its_own_is_never_checked_by_the_old_ones(tmp_path, monkeypatch, capsys):
+    """The book's captions are of its old audio: matching the new recording by them would let any recording in."""
+    d = book_with_audio(tmp_path, monkeypatch)
+    before = {p.name: p.read_bytes() for p in d.iterdir()}
+    steps = matched(monkeypatch, 0.9, captions=False)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "b", "--audio", "https://example.org/a", "--no-align"])
+    assert refused(capsys) == (add_book.AUDIO_REFUSED, "Не удалось сверить аудио с текстом")
+    assert [s[0] for s in steps] == ["transcribe.py"]
+    assert {p.name: p.read_bytes() for p in d.iterdir()} == before
+
+
+def test_a_new_text_with_audio_of_another_text_is_timed_and_aligned_as_without_it(tmp_path, monkeypatch, capsys):
+    """The text lands; the book keeps its audio and captions, the new text is timed against those (not against
+    the refused recording) and aligned as any replaced text; the refusal comes at the very end."""
+    d = book_with_audio(tmp_path, monkeypatch)
+    old_audio = (d / "audio.m4a").read_bytes()
+    steps = matched(monkeypatch, 0.001, 0.6)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "b", *TEXT_AND_AUDIO])
+    with pytest.raises(SystemExit) as e:
+        add_book.main()
+    assert e.value.code == add_book.AUDIO_REFUSED
+    assert steps == [
+        ("anchors.py", ["yt.merged.json3"]),
+        ("anchors.py", []),  # the second run finds only the book's own captions
+        ("timing_from_anchors.py", []),
+        ("align.py", []),
+    ]
+    err = capsys.readouterr().err.splitlines()
+    assert err[-1] == "Аудио не совпадает с текстом: совпало 0,1 %"
+    assert (d / "audio.m4a").read_bytes() == old_audio
+    assert (d / "yt.merged.json3").read_text(encoding="utf-8") == '{"events": []}'
+    assert (d / "timing.json").read_text(encoding="utf-8") == '{"words": ["new"]}'
+    assert json.loads((d / "book.json").read_text(encoding="utf-8"))["title"] == "New"
+
+
+@pytest.mark.parametrize("audio", [False, True])
+def test_a_new_text_the_books_audio_does_not_read_is_not_landed(tmp_path, monkeypatch, work_root, audio):
+    """Timing another text by the old captions gives junk: the book keeps its text, audio, timing and edition."""
+    d = book_with_audio(tmp_path, monkeypatch)
+    before = {p.name: p.read_bytes() for p in d.iterdir()}
+    matched(monkeypatch, *([0.001, 0.01] if audio else [0.01]))
+    argv = TEXT_AND_AUDIO if audio else TEXT_AND_AUDIO[:2]
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "b", *argv, "--no-align"])
+    with pytest.raises(SystemExit) as e:
+        add_book.main()
+    assert e.value.code == "Новый текст не совпадает с аудио книги: совпало 1,0 %. Удалите аудио, чтобы заменить текст"
+    assert {p.name: p.read_bytes() for p in d.iterdir()} == before
+    assert not (work_root / "b").exists()
+
+
+def test_align_reads_the_books_own_audio_not_the_refused_one(tmp_path, monkeypatch):
+    """align.py makes its WAV from the book's audio when there is none in the work dir: the refused one's goes."""
+    book_with_audio(tmp_path, monkeypatch)
+    matched(monkeypatch, 0.001, 0.6)
+    seen = []
+    run = add_book.run
+
+    def spy(cmd, **kw):
+        if Path(cmd[1]).name == "align.py":
+            w = Path(cmd[cmd.index("--work") + 1])
+            seen.append(sorted(p.name for p in w.iterdir() if p.name not in ("pid", "book.json", "images")))
+        return run(cmd, **kw)
+
+    monkeypatch.setattr(add_book, "run", spy)
+    monkeypatch.setattr(sys, "argv", ["add_book.py", "b", *TEXT_AND_AUDIO])
+    with pytest.raises(SystemExit):
+        add_book.main()
+    assert seen == [["anchors.json"]]  # the new text's anchors, by the book's own captions
+
+
+def read_by(words: list[str], spoken: list[str]) -> dict:
+    sys.path.insert(0, str(PIPE))
+    import anchors
+
+    book = {"blocks": [{"text": " ".join(words[k : k + 100])} for k in range(0, len(words), 100)]}
+    caps = {"events": [{"tStartMs": i * 400, "segs": [{"utf8": w}]} for i, w in enumerate(spoken)]}
+    return anchors.build(book, caps)
+
+
+@pytest.mark.parametrize(
+    ("label", "skipped", "read"),
+    [("a preface not read", 2000, 3000), ("the second of two volumes", 30000, 30000)],
+)
+def test_captions_that_begin_far_into_the_book_are_found(label, skipped, read):
+    words = [f"пред{i}" for i in range(skipped)] + [f"слово{i}" for i in range(read)]
+    r = read_by(words, words[skipped:])
+    assert r["match"] == 1.0, label
+
+
+def test_a_reading_that_skips_a_chapter_or_a_part_without_captions_is_found_again():
+    words = [f"с{i}" for i in range(24000)]
+    assert read_by(words, words[:500] + words[3500:])["match"] == 1.0  # abridged: a chapter left out
+    assert read_by(words, words[8000:])["match"] == 1.0  # part 1 had no captions
+    assert read_by(words, words[:8000] + words[16000:])["match"] == 1.0  # part 2 had none
+
+
+def test_an_intro_quoting_a_later_passage_does_not_lead_the_reading_astray():
+    words = [f"с{i}" for i in range(20000)]
+    intro = [f"х{i}" for i in range(1000)] + words[15000:15020] + [f"х{i}" for i in range(1000, 2000)]
+    assert read_by(words, intro + words)["match"] > 0.9  # all of the reading: 20000 of 22020 words
+
+
+def test_the_annotation_read_first_does_not_lead_the_reading_astray():
+    """book.json keeps the annotation at the end; the narrator reads it first, after an intro of his own."""
+    text, note = [f"с{i}" for i in range(20000)], [f"а{i}" for i in range(150)]
+    r = read_by(text + note, [f"х{i}" for i in range(1500)] + note + text)
+    assert r["match"] > 0.9  # all of the reading: 20000 of 21650 words
+
+
+def test_another_text_finds_no_place_however_far_it_looks():
+    import random
+
+    rnd = random.Random(3)
+    vocab = [f"w{i}" for i in range(3000)]
+    r = read_by([rnd.choice(vocab) for _ in range(40000)], [rnd.choice(vocab) for _ in range(30000)])
+    assert r["match"] < add_book.MIN_MATCH / 5
