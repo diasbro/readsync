@@ -149,6 +149,31 @@ def test_a_rename_while_a_job_holds_the_book_is_a_conflict(server, tmp_path):
     assert 'title = "B"' in (tmp_path / "b" / "book.toml").read_text(encoding="utf-8")
 
 
+def test_removing_the_audio_is_this_servers_own_and_waits_for_a_job(server, tmp_path):
+    d = tmp_path / "b"
+    (d / "audio.m4a").write_bytes(b"audio")
+    (d / "timing.json").write_text('{"words": []}', encoding="utf-8")
+    assert call(server, "POST", "/api/remove-audio/b", headers={"Host": f"evil.example:{server}"})[0] == 403
+    assert call(server, "POST", "/api/remove-audio/b", headers={"Origin": "http://evil.example"})[0] == 403
+    cross = {"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
+    assert call(server, "POST", "/api/remove-audio/b", headers=cross)[0] == 403
+    assert (d / "audio.m4a").exists()
+    library._pipeline()
+    from tidy import claim, work_dir
+
+    w = claim(work_dir("b"))
+    status, body = call(server, "POST", "/api/remove-audio/b")
+    assert status == 409 and "обрабатывается" in json.loads(body)["error"]
+    assert (d / "audio.m4a").exists()
+    (w / "pid").write_text("1", encoding="utf-8")  # the job is over
+    assert call(server, "POST", "/api/remove-audio/nobook")[0] == 404
+    ours = {"Origin": f"http://127.0.0.1:{server}", "Sec-Fetch-Site": "same-origin"}
+    assert call(server, "POST", "/api/remove-audio/b", headers=ours) == (200, b'{"slug": "b"}')
+    assert not (d / "audio.m4a").exists() and not (d / "timing.json").exists()
+    assert 'edition = "e1"' in (d / "book.toml").read_text(encoding="utf-8")
+    assert call(server, "POST", "/api/remove-audio/b")[0] == 400  # nothing left to remove
+
+
 def test_an_upload_is_held_in_memory_once():
     """A 600 MB audiobook used to cost several GB while the form was parsed; its fields still come out whole."""
     payload = bytes(range(256)) * (20 * 4096)  # 20 MB, every byte value, CRLFs included
@@ -173,3 +198,13 @@ def test_an_upload_is_held_in_memory_once():
     assert out["audio_file"]["filename"] == "а.mp3" and bytes(out["audio_file"]["data"]) == payload
     assert out["audio_url"] == {"value": "https://a/1", "values": ["https://a/1", "https://a/2"]}
     assert out["title"] == {"value": "Книга"}
+
+
+def test_removing_the_audio_before_the_state_came_from_icloud_says_so(server, tmp_path):
+    d = tmp_path / "b"
+    (d / "audio.m4a").write_bytes(b"audio")
+    (d / "state").mkdir()
+    (d / "state" / f".{'a' * 32}.json.icloud").write_bytes(b"")
+    status, body = call(server, "POST", "/api/remove-audio/b")
+    assert status == 503 and "iCloud" in json.loads(body)["error"]
+    assert (d / "audio.m4a").exists()
