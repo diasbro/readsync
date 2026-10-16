@@ -20,7 +20,8 @@ last=$(cat "$STATE" 2>/dev/null || echo 0)
 now=$(date +%s)
 if [ "${1:-}" != "--now" ] && [ $((now - last)) -lt $EVERY ]; then exit 0; fi
 
-# the first paired physical iPhone reachable now (cable or Wi-Fi); none: try again in an hour
+# the first paired physical iPhone (cable or Wi-Fi); over Wi-Fi it is listed without a connection until one
+# is asked for, so it is asked for below rather than looked for here
 list=$(mktemp)
 xcrun devicectl list devices --json-output "$list" >/dev/null 2>&1 || true
 device=$(/usr/bin/python3 - "$list" <<'PY'
@@ -31,12 +32,29 @@ except Exception:
     devices = []
 for d in devices:
     hw, conn = d.get("hardwareProperties", {}), d.get("connectionProperties", {})
-    if hw.get("reality") == "physical" and conn.get("pairingState") == "paired" and conn.get("tunnelState") == "connected":
+    if hw.get("reality") == "physical" and conn.get("pairingState") == "paired":
         print(hw.get("udid", "")); break
 PY
 )
 rm -f "$list"
-if [ -z "$device" ]; then exit 0; fi
+
+# not reachable now (away from this Wi-Fi, off): said once in the log, and a day before the signature runs out
+# (7 days after the last install) a notification asks for the phone; tried again in an hour
+WARNED="$HOME/Library/Application Support/readsync/ios-warned"
+AWAY="$HOME/Library/Application Support/readsync/ios-away"  # there while the phone is out of reach
+unreachable() {
+  [ -e "$AWAY" ] || { echo "$(date '+%F %T') phone not reachable: install postponed"; touch "$AWAY"; }
+  local warned
+  warned=$(cat "$WARNED" 2>/dev/null || echo 0)
+  if [ "$last" -gt 0 ] && [ $((now - last)) -ge $((6 * 24 * 3600)) ] && [ $((now - warned)) -ge $((12 * 3600)) ]; then
+    osascript -e 'display notification "Подпись приложения на телефоне скоро закончится: подключите телефон к той же сети Wi-Fi или кабелем" with title "readsync"' >/dev/null 2>&1 || true
+    echo "$now" >"$WARNED"
+  fi
+  exit 0
+}
+if [ -z "$device" ]; then unreachable; fi
+xcrun devicectl device info details --device "$device" --timeout 60 >/dev/null 2>&1 || unreachable
+rm -f "$AWAY"
 
 team=$(security find-certificate -a -c "Apple Development" -p 2>/dev/null | openssl x509 -noout -subject 2>/dev/null \
   | sed -n 's/.*OU *= *\([A-Z0-9]\{10\}\).*/\1/p' | head -1 || true)  # none found: said just below
