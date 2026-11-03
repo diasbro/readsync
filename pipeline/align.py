@@ -135,6 +135,8 @@ def align(args: argparse.Namespace, w: Path) -> None:
                 "16000",
                 "-c:a",
                 "pcm_s16le",
+                "-rf64",
+                "auto",  # past 4 GB a plain WAV header wraps its size: see add_book.build_audio
                 str(wav_path),
             ],
             check=True,

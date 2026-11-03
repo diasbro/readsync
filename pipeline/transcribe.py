@@ -3,7 +3,8 @@ caption file (whisper.json3) that anchors.py understands.
 
 The WAV is read here, a stretch at a time, rather than handed to faster-whisper by name: it would decode
 the whole file into memory (a 100-hour book is 23 GB of samples), and its decoder breaks with each PyAV
-release that renames an option."""
+release that renames an option. soundfile reads it, as align.py does: past 4 GB the WAV is RF64, which the
+stdlib wave module does not know."""
 
 from __future__ import annotations
 
@@ -11,7 +12,6 @@ import argparse
 import json
 import sys
 import time
-import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -28,24 +28,23 @@ def main() -> None:
     ap.add_argument("--lang", default="ru")
     ap.add_argument("--limit-sec", type=float, default=None)
     args = ap.parse_args()
-    need(("numpy", "faster_whisper"), ["faster-whisper==1.2.1"], "распознавание речи")
-    import numpy as np
+    need(("numpy", "soundfile", "faster_whisper"), ["faster-whisper==1.2.1", "soundfile"], "распознавание речи")
+    import soundfile as sf
     from faster_whisper import WhisperModel
 
     model = WhisperModel(args.model, device="cpu", compute_type="int8")
     t = time.time()
     events = []
     n = 0
-    with wave.open(str(args.book_dir / "audio16k.wav"), "rb") as wav:
-        if (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) != (SR, 1, 2):
-            sys.exit("audio16k.wav must be 16 kHz mono 16-bit")
-        left = wav.getnframes() if not args.limit_sec else min(wav.getnframes(), int(args.limit_sec * SR))
+    with sf.SoundFile(str(args.book_dir / "audio16k.wav")) as wav:
+        if (wav.samplerate, wav.channels) != (SR, 1):
+            sys.exit("audio16k.wav must be 16 kHz mono")
+        left = wav.frames if not args.limit_sec else min(wav.frames, int(args.limit_sec * SR))
         start = 0.0
         while left > 0:
-            frames = wav.readframes(min(left, CHUNK_SEC * SR))
-            if not frames:
+            audio = wav.read(min(left, CHUNK_SEC * SR), dtype="float32")
+            if not len(audio):
                 break
-            audio = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
             left -= len(audio)
             segments, _ = model.transcribe(
                 audio, language=args.lang, word_timestamps=True, vad_filter=True, beam_size=1

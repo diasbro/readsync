@@ -72,6 +72,19 @@ def test_stretches_keep_the_recording_time(tmp_path, monkeypatch):
     assert events[0]["segs"] == [{"utf8": " слово", "tOffsetMs": 0}]
 
 
+def test_rf64_is_read_whole(tmp_path, monkeypatch):
+    """Past 4 GB the pipeline writes RF64 (a plain WAV header wraps its size there): it reads like any WAV."""
+    import soundfile as sf
+
+    fake_whisper(monkeypatch)
+    monkeypatch.setattr(transcribe, "CHUNK_SEC", 4)
+    sf.write(str(tmp_path / "audio16k.wav"), np.zeros(6 * transcribe.SR, dtype=np.int16), transcribe.SR, format="RF64")
+    assert (tmp_path / "audio16k.wav").read_bytes()[:4] == b"RF64"
+    monkeypatch.setattr(sys, "argv", ["transcribe.py", str(tmp_path)])
+    transcribe.main()
+    assert FakeModel.lengths == [4, 2]
+
+
 def test_limit_reads_only_the_start(tmp_path, monkeypatch):
     fake_whisper(monkeypatch)
     write_wav(tmp_path / "audio16k.wav", 10)
