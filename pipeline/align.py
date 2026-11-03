@@ -23,11 +23,17 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-import onnxruntime as ort
-import soundfile as sf
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from needs import need  # noqa: E402
+
+need(
+    ("numpy", "onnxruntime", "soundfile", "ctc_forced_aligner"),
+    ["ctc-forced-aligner==1.0.2", "soundfile"],
+    "выравнивание",
+)
+import numpy as np  # noqa: E402
+import onnxruntime as ort  # noqa: E402
+import soundfile as sf  # noqa: E402
 from manifest import stamp  # noqa: E402
 from tidy import claim, land, tidy, work_dir  # noqa: E402
 from timing_from_anchors import interpolate  # noqa: E402
@@ -129,6 +135,8 @@ def align(args: argparse.Namespace, w: Path) -> None:
                 "16000",
                 "-c:a",
                 "pcm_s16le",
+                "-rf64",
+                "auto",  # past 4 GB a plain WAV header wraps its size: see add_book.build_audio
                 str(wav_path),
             ],
             check=True,

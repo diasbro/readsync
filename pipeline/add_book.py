@@ -359,7 +359,8 @@ def build_audio(sources: list[str], w: Path, lang: str) -> None:
     say("склеиваю")
     concat = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst), "-vn"]
     run([*concat, *aac_args(), str(w / "audio.m4a")])
-    run([*concat, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(w / "audio16k.wav")])
+    # RF64 past 4 GB (37 hours): a plain WAV header cannot hold the size, and readers stop where it wraps
+    run([*concat, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-rf64", "auto", str(w / "audio16k.wav")])
     # captions: shift each part's events by its offset and join into one json3
     events = []
     for p, off in zip(parts, offsets, strict=True):
